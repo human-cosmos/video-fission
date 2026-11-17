@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -372,5 +373,58 @@ def test_hub_capabilities_expose_skill_and_tool_contracts(test_settings):
             "conversation_metrics",
             "create_video_brief",
         }.issubset({tool["name"] for tool in payload["tools"]})
+    finally:
+        hub.shutdown()
+
+
+def test_ugc_skill_pipeline_is_bundled_and_shares_reference_library(test_settings):
+    manager = SkillManager(
+        test_settings.skills_dir,
+        test_settings.bundled_skills_dir,
+        test_settings.disabled_skills_dir,
+    )
+    bundled = {skill["slug"]: skill for skill in manager.list() if skill["source"] == "bundled"}
+    expected = {
+        "creative-intent-script-skeleton",
+        "universal-ugc-video-script-generation",
+        "video-references",
+    }
+    assert expected.issubset(bundled)
+
+    for slug in ("creative-intent-script-skeleton", "universal-ugc-video-script-generation"):
+        assert "$video-references" in bundled[slug]["content"]
+
+    reference_root = Path(bundled["video-references"]["path"]).parent / "references"
+    scripts = sorted(path for path in reference_root.glob("*/*.md") if path.is_file())
+    assert len(scripts) == 630
+
+    index = (reference_root / "index.md").read_text(encoding="utf-8")
+    assert index.startswith("# Video References Catalog")
+    assert "../SKILL.md" in index
+    for stale in ("read_file", "list_files", "write_file", "edit_file"):
+        assert stale not in index
+
+    by_category: dict[str, int] = {}
+    for script in scripts:
+        category = script.parent.name
+        by_category[category] = by_category.get(category, 0) + 1
+        relative = script.relative_to(reference_root).as_posix()
+        assert f"`{relative}`" in index
+        text = script.read_text(encoding="utf-8")
+        first_line = text.lstrip("\ufeff").splitlines()[0]
+        assert re.match(r"^\d+\..+[，,].+[，,]", first_line)
+        assert text.count("\n---\n") >= 2
+    for category, count in by_category.items():
+        assert f"### 【{category}】（共 {count} 篇）" in index
+
+    db = Database(test_settings.database_path)
+    tools = build_registry(db, test_settings.workspace, test_settings.artifacts_dir)
+    hub = CodexHub(test_settings, db, manager, tools)
+    try:
+        instructions = hub._system_instructions({})
+        for skill in expected:
+            assert skill in instructions
+        assert "骨架尚未明确时先用" in instructions
+        assert "用户已确认骨架时直接使用" in instructions
     finally:
         hub.shutdown()

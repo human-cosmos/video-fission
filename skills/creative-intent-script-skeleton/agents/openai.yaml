@@ -1,0 +1,4 @@
+interface:
+  display_name: "创作意图与脚本骨架"
+  short_description: "把创作说明与参考视频分析收敛成可确认的 UGC 脚本骨架"
+  default_prompt: "Use $creative-intent-script-skeleton to turn this video request and reference analysis into a confirmed creative skeleton."

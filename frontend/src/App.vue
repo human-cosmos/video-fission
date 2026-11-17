@@ -4,7 +4,6 @@ import {
   Archive,
   ArrowUp,
   Check,
-  ChevronDown,
   GitBranch,
   Menu,
   MoreHorizontal,
@@ -23,6 +22,7 @@ import CapabilityPanel from './components/CapabilityPanel.vue'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import SkillEditorModal from './components/SkillEditorModal.vue'
+import TopbarSelect from './components/TopbarSelect.vue'
 import { isRefreshEvent } from './utils/events'
 
 const conversations = ref([])
@@ -56,12 +56,63 @@ let selectionSequence = 0
 let uploadGeneration = 0
 let toastTimer = null
 let titleBeforeEdit = ''
+let sidebarResizeStartX = 0
+let sidebarResizeStartWidth = 0
+
+const SIDEBAR_MIN_WIDTH = 240
+const SIDEBAR_MAX_WIDTH = 420
+const SIDEBAR_DEFAULT_WIDTH = 278
+const SIDEBAR_COLLAPSED_WIDTH = 68
+
+function clampSidebarWidth(value) {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(value)))
+}
+
+function storedSidebarWidth() {
+  const stored = window.localStorage.getItem('video-fission.sidebarWidth')
+  if (!stored) return SIDEBAR_DEFAULT_WIDTH
+  const value = Number(stored)
+  return Number.isFinite(value) ? clampSidebarWidth(value) : SIDEBAR_DEFAULT_WIDTH
+}
+
+const sidebarWidth = ref(storedSidebarWidth())
+const sidebarCollapsed = ref(
+  window.localStorage.getItem('video-fission.sidebarCollapsed') === 'true',
+)
+const sidebarGridWidth = computed(() =>
+  sidebarCollapsed.value ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth.value,
+)
 
 const currentModel = computed(() =>
   models.value.find((model) => model.id === currentConversation.value?.model),
 )
 const supportedEfforts = computed(
   () => currentModel.value?.supported_reasoning_efforts || ['low', 'medium', 'high'],
+)
+const effortDetails = {
+  none: '最快响应，适合简单整理',
+  minimal: '轻量推理，优先速度',
+  low: '快速完成，适合明确任务',
+  medium: '速度与推演深度平衡',
+  high: '更充分拆解复杂创作任务',
+  xhigh: '高强度推演，适合长链路任务',
+  max: '最高推理深度',
+  ultra: '极限推理，执行时间更长',
+}
+const modelOptions = computed(() =>
+  models.value.map((model) => ({
+    value: model.id,
+    label: model.name,
+    detail: model.description,
+    meta: model.is_default ? '默认' : '',
+  })),
+)
+const effortOptions = computed(() =>
+  supportedEfforts.value.map((effort) => ({
+    value: effort,
+    label: String(effort).toUpperCase(),
+    detail: effortDetails[effort] || '',
+  })),
 )
 const visibleConversations = computed(() =>
   conversations.value.filter((item) =>
@@ -240,6 +291,57 @@ async function newConversation() {
   }
 }
 
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  window.localStorage.setItem(
+    'video-fission.sidebarCollapsed',
+    String(sidebarCollapsed.value),
+  )
+}
+
+function startSidebarResize(event) {
+  if (window.innerWidth <= 900) return
+  event.preventDefault()
+  sidebarResizeStartX = event.clientX
+  sidebarResizeStartWidth = sidebarWidth.value
+  document.body.classList.add('is-resizing-sidebar')
+  window.addEventListener('pointermove', resizeSidebar)
+  window.addEventListener('pointerup', stopSidebarResize, { once: true })
+  window.addEventListener('pointercancel', stopSidebarResize, { once: true })
+}
+
+function resizeSidebar(event) {
+  sidebarWidth.value = clampSidebarWidth(
+    sidebarResizeStartWidth + event.clientX - sidebarResizeStartX,
+  )
+}
+
+function stopSidebarResize() {
+  document.body.classList.remove('is-resizing-sidebar')
+  window.removeEventListener('pointermove', resizeSidebar)
+  window.removeEventListener('pointerup', stopSidebarResize)
+  window.removeEventListener('pointercancel', stopSidebarResize)
+  window.localStorage.setItem('video-fission.sidebarWidth', String(sidebarWidth.value))
+}
+
+function handleSidebarResizeKey(event) {
+  const step = event.shiftKey ? 24 : 8
+  let next = sidebarWidth.value
+  if (event.key === 'ArrowLeft') next -= step
+  else if (event.key === 'ArrowRight') next += step
+  else if (event.key === 'Home') next = SIDEBAR_MIN_WIDTH
+  else if (event.key === 'End') next = SIDEBAR_MAX_WIDTH
+  else return
+  event.preventDefault()
+  sidebarWidth.value = clampSidebarWidth(next)
+  window.localStorage.setItem('video-fission.sidebarWidth', String(sidebarWidth.value))
+}
+
+function resetSidebarWidth() {
+  sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH
+  window.localStorage.setItem('video-fission.sidebarWidth', String(SIDEBAR_DEFAULT_WIDTH))
+}
+
 async function refreshCurrent() {
   if (!currentConversation.value?.id) return
   const id = currentConversation.value.id
@@ -268,9 +370,10 @@ async function saveTitle() {
   }
 }
 
-async function updateModel() {
+async function updateModel(modelId = currentConversation.value?.model) {
   if (!currentConversation.value?.id) return
-  const model = models.value.find((item) => item.id === currentConversation.value.model)
+  currentConversation.value.model = modelId
+  const model = models.value.find((item) => item.id === modelId)
   const effort =
     model?.default_reasoning_effort ||
     currentConversation.value.reasoning_effort ||
@@ -287,11 +390,12 @@ async function updateModel() {
   }
 }
 
-async function updateEffort() {
+async function updateEffort(effort) {
   if (!currentConversation.value?.id) return
+  currentConversation.value.reasoning_effort = effort
   try {
     await api.updateConversation(currentConversation.value.id, {
-      reasoning_effort: currentConversation.value.reasoning_effort,
+      reasoning_effort: effort,
     })
   } catch (error) {
     notify(error.message)
@@ -583,24 +687,35 @@ onBeforeUnmount(() => {
   clearTimeout(refreshTimer)
   refreshQueued = false
   clearTimeout(toastTimer)
+  stopSidebarResize()
   window.removeEventListener('keydown', handleShortcut)
 })
 </script>
 
 <template>
-  <div class="app-shell">
+  <div
+    class="app-shell"
+    :class="{ 'sidebar-collapsed': sidebarCollapsed }"
+    :style="{ '--sidebar-width': `${sidebarGridWidth}px` }"
+  >
     <ConversationSidebar
       :conversations="visibleConversations"
       :current-id="currentConversation?.id || ''"
       :show-archived="showArchived"
       :loading="listLoading"
       :mobile-open="mobileSidebar"
+      :collapsed="sidebarCollapsed"
+      :width="sidebarWidth"
       @new="newConversation"
       @select="selectConversation"
       @archive="archiveConversation"
       @unarchive="unarchiveConversation"
       @toggle-archived="showArchived = !showArchived"
       @close-mobile="mobileSidebar = false"
+      @toggle-collapse="toggleSidebar"
+      @resize-start="startSidebarResize"
+      @resize-keydown="handleSidebarResizeKey"
+      @resize-reset="resetSidebarWidth"
     />
 
     <main class="workspace">
@@ -634,28 +749,30 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="topbar-controls">
-          <label v-if="currentConversation" class="select-control">
-            <span class="control-prefix">M</span>
-            <select v-model="currentConversation.model" aria-label="模型" @change="updateModel">
-              <option v-for="model in models" :key="model.id" :value="model.id">
-                {{ model.name }}
-              </option>
-            </select>
-            <ChevronDown :size="13" />
-          </label>
-          <label v-if="currentConversation" class="select-control effort-control">
-            <span class="control-prefix"><Zap :size="12" /></span>
-            <select
-              v-model="currentConversation.reasoning_effort"
-              aria-label="推理强度"
-              @change="updateEffort"
-            >
-              <option v-for="effort in supportedEfforts" :key="effort" :value="effort">
-                {{ effort }}
-              </option>
-            </select>
-            <ChevronDown :size="13" />
-          </label>
+          <TopbarSelect
+            v-if="currentConversation"
+            v-model="currentConversation.model"
+            class="model-control"
+            caption="模型"
+            aria-label="模型"
+            :options="modelOptions"
+            @change="updateModel"
+          >
+            <template #icon><span class="control-prefix">M</span></template>
+          </TopbarSelect>
+          <TopbarSelect
+            v-if="currentConversation"
+            v-model="currentConversation.reasoning_effort"
+            class="effort-control"
+            caption="推理"
+            aria-label="推理强度"
+            :options="effortOptions"
+            @change="updateEffort"
+          >
+            <template #icon>
+              <span class="control-prefix"><Zap :size="13" /></span>
+            </template>
+          </TopbarSelect>
 
           <details v-if="currentConversation" class="more-menu">
             <summary class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></summary>

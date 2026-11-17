@@ -174,7 +174,7 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 | 会话范围 | 多 Profile + 业务上下文 | 自由对话单 Profile |
 | 写代码 | Git Worktree | 固定只读沙箱 |
 | Tool | 大量业务领域 Tool | 4 个通用/视频策划 Tool |
-| Skill | 用户目录、商店、物化 | 项目目录 + 用户目录 |
+| Skill | 用户目录、商店、物化 | 项目目录 + 用户目录 + UGC 共享参考库 |
 | 前端 | 大后台中的一个页面 | 独立完整工作台 |
 | 部署 | MongoDB/Redis 等基础设施 | Python + Node build + Codex CLI |
 

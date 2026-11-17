@@ -1,0 +1,4 @@
+interface:
+  display_name: "UGC 完整脚本生成"
+  short_description: "生成镜头级分镜、可执行片段制作计划以及完整音视频合成要求"
+  default_prompt: "Use $universal-ugc-video-script-generation to turn this confirmed skeleton into a production-ready UGC script."

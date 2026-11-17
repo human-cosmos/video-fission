@@ -4,6 +4,8 @@ import {
   ArchiveRestore,
   LoaderCircle,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Search,
   X,
@@ -17,6 +19,8 @@ const props = defineProps({
   showArchived: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   mobileOpen: { type: Boolean, default: false },
+  collapsed: { type: Boolean, default: false },
+  width: { type: Number, default: 278 },
 })
 
 const emit = defineEmits([
@@ -26,6 +30,10 @@ const emit = defineEmits([
   'unarchive',
   'toggle-archived',
   'close-mobile',
+  'toggle-collapse',
+  'resize-start',
+  'resize-keydown',
+  'resize-reset',
 ])
 
 const query = ref('')
@@ -39,7 +47,11 @@ const filtered = computed(() => {
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ 'is-mobile-open': mobileOpen }">
+  <aside
+    id="conversation-sidebar"
+    class="sidebar"
+    :class="{ 'is-mobile-open': mobileOpen, 'is-collapsed': collapsed }"
+  >
     <header class="brand-row">
       <div class="brand-mark" aria-hidden="true">
         <span></span>
@@ -50,12 +62,27 @@ const filtered = computed(() => {
         <strong>VIDEO FISSION</strong>
         <small>CREATIVE OPERATIONS</small>
       </div>
+      <button
+        class="icon-button sidebar-collapse-button"
+        :aria-label="collapsed ? '展开会话侧栏' : '折叠会话侧栏'"
+        :title="collapsed ? '展开侧栏' : '折叠侧栏'"
+        @click="$emit('toggle-collapse')"
+      >
+        <PanelLeftOpen v-if="collapsed" :size="17" />
+        <PanelLeftClose v-else :size="17" />
+      </button>
       <button class="icon-button sidebar-close" aria-label="关闭会话列表" @click="$emit('close-mobile')">
         <X :size="18" />
       </button>
     </header>
 
-    <button class="new-chat-button" data-testid="new-conversation" @click="$emit('new')">
+    <button
+      class="new-chat-button"
+      data-testid="new-conversation"
+      aria-label="新建对话"
+      title="新建对话"
+      @click="$emit('new')"
+    >
       <Plus :size="17" />
       <span>新建对话</span>
       <kbd>⌘ N</kbd>
@@ -121,6 +148,21 @@ const filtered = computed(() => {
         {{ showArchived ? '返回最近对话' : '查看归档' }}
       </button>
     </footer>
+
+    <div
+      class="sidebar-resize-handle"
+      role="separator"
+      aria-label="调整会话侧栏宽度"
+      aria-orientation="vertical"
+      :aria-valuemin="240"
+      :aria-valuemax="420"
+      :aria-valuenow="width"
+      tabindex="0"
+      title="拖拽调整宽度，双击恢复默认"
+      @pointerdown="$emit('resize-start', $event)"
+      @keydown="$emit('resize-keydown', $event)"
+      @dblclick="$emit('resize-reset')"
+    ></div>
   </aside>
 </template>
 

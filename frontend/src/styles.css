@@ -12,6 +12,11 @@
   --electric: #2e61f3;
   --gold: #f0b54a;
   --sage: #9eb1a4;
+  --sidebar: #dfe4db;
+  --sidebar-deep: #d4ddd3;
+  --sidebar-ink: #1c302a;
+  --sidebar-muted: #61736b;
+  --sidebar-line: #bdc8be;
   --danger: #b43d2e;
   --shadow: 0 24px 70px rgba(18, 35, 31, 0.15);
   --font-display: "Iowan Old Style", "Songti SC", "Noto Serif SC", Georgia, serif;
@@ -87,11 +92,13 @@ summary:focus-visible {
   height: 100%;
   padding: 22px 16px 16px;
   overflow: hidden;
-  color: #e7ebe3;
+  color: var(--sidebar-ink);
   background:
-    radial-gradient(circle at 0 0, rgba(46, 97, 243, 0.16), transparent 36%),
-    linear-gradient(155deg, #172b26 0%, #10201d 58%, #0b1816 100%);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+    radial-gradient(circle at 10% 0%, rgba(46, 97, 243, 0.07), transparent 34%),
+    radial-gradient(circle at 100% 90%, rgba(240, 100, 69, 0.055), transparent 30%),
+    linear-gradient(165deg, #e5e9e0 0%, var(--sidebar) 54%, var(--sidebar-deep) 100%);
+  border-right: 1px solid var(--sidebar-line);
+  box-shadow: inset -1px 0 rgba(255, 255, 255, 0.42);
 }
 
 .sidebar::after {
@@ -105,7 +112,7 @@ summary:focus-visible {
   background: repeating-linear-gradient(
     112deg,
     transparent 0 18px,
-    rgba(240, 181, 74, 0.035) 18px 19px
+    rgba(28, 48, 42, 0.035) 18px 19px
   );
   transform: rotate(8deg);
 }
@@ -126,15 +133,16 @@ summary:focus-visible {
   width: 34px;
   height: 34px;
   overflow: hidden;
-  background: var(--paper-bright);
+  background: var(--sidebar-ink);
   border-radius: 50%;
+  box-shadow: 0 5px 14px rgba(28, 48, 42, 0.14);
 }
 
 .brand-mark span {
   position: absolute;
   width: 3px;
   height: 22px;
-  background: var(--ink);
+  background: #eef1e9;
   transform-origin: center;
 }
 
@@ -145,7 +153,7 @@ summary:focus-visible {
 }
 
 .brand-mark span:nth-child(2) {
-  background: var(--ink);
+  background: #eef1e9;
   transform: rotate(-20deg);
 }
 
@@ -169,7 +177,7 @@ summary:focus-visible {
 
 .brand-copy small {
   margin-top: 1px;
-  color: #8fa199;
+  color: var(--sidebar-muted);
   font-family: var(--font-mono);
   font-size: 8px;
   letter-spacing: 0.15em;
@@ -208,8 +216,8 @@ button.mobile-only {
 }
 
 .sidebar .icon-button:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  border-color: rgba(28, 48, 42, 0.08);
 }
 
 .new-chat-button {
@@ -220,27 +228,27 @@ button.mobile-only {
   min-height: 44px;
   margin: 26px 0 14px;
   padding: 0 13px;
-  color: var(--ink);
+  color: #f4f6f0;
   font-size: 13px;
   font-weight: 650;
   cursor: pointer;
-  background: var(--paper-bright);
+  background: var(--sidebar-ink);
   border: 0;
   border-radius: 3px 15px 15px 15px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 26px rgba(28, 48, 42, 0.16);
   transition:
     transform 160ms ease,
     background 160ms ease;
 }
 
 .new-chat-button:hover {
-  background: white;
+  background: #29483f;
   transform: translateY(-1px);
 }
 
 .new-chat-button kbd {
   margin-left: auto;
-  color: #68756f;
+  color: #aebdb5;
   font-family: var(--font-mono);
   font-size: 9px;
   font-weight: 500;
@@ -252,19 +260,20 @@ button.mobile-only {
   gap: 8px;
   height: 38px;
   padding: 0 11px;
-  color: #84958e;
-  background: rgba(255, 255, 255, 0.055);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--sidebar-muted);
+  background: rgba(251, 252, 248, 0.58);
+  border: 1px solid rgba(28, 48, 42, 0.1);
   border-radius: 10px;
 }
 
 .conversation-search:focus-within {
-  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.78);
+  border-color: rgba(28, 48, 42, 0.22);
 }
 
 .conversation-search input {
   width: 100%;
-  color: #f2f3ed;
+  color: var(--sidebar-ink);
   font-size: 12px;
   background: transparent;
   border: 0;
@@ -272,7 +281,7 @@ button.mobile-only {
 }
 
 .conversation-search input::placeholder {
-  color: #788a82;
+  color: #78867f;
 }
 
 .sidebar-section-label {
@@ -280,7 +289,7 @@ button.mobile-only {
   align-items: center;
   justify-content: space-between;
   margin: 24px 4px 9px;
-  color: #788b82;
+  color: #73847c;
   font-family: var(--font-mono);
   font-size: 9px;
   letter-spacing: 0.12em;
@@ -296,7 +305,7 @@ button.mobile-only {
   padding-right: 2px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  scrollbar-color: rgba(28, 48, 42, 0.2) transparent;
 }
 
 .conversation-row {
@@ -307,7 +316,7 @@ button.mobile-only {
   width: 100%;
   min-height: 55px;
   padding: 8px 7px 8px 9px;
-  color: #d5dcd6;
+  color: var(--sidebar-ink);
   text-align: left;
   cursor: pointer;
   background: transparent;
@@ -319,12 +328,13 @@ button.mobile-only {
 }
 
 .conversation-row:hover {
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.34);
 }
 
 .conversation-row.active {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.68);
+  border-color: rgba(28, 48, 42, 0.1);
+  box-shadow: 0 7px 18px rgba(28, 48, 42, 0.06);
 }
 
 .conversation-row.active::before {
@@ -346,8 +356,8 @@ button.mobile-only {
   flex: 0 0 28px;
   width: 28px;
   height: 28px;
-  color: #8da097;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #667a70;
+  border: 1px solid rgba(28, 48, 42, 0.12);
   border-radius: 50%;
 }
 
@@ -358,7 +368,7 @@ button.mobile-only {
   width: 7px;
   height: 7px;
   background: var(--signal);
-  border: 1px solid var(--ink);
+  border: 1px solid var(--sidebar);
   border-radius: 50%;
   animation: pulse 1.6s infinite;
 }
@@ -380,7 +390,7 @@ button.mobile-only {
 }
 
 .conversation-copy small {
-  color: #7e9088;
+  color: var(--sidebar-muted);
   font-size: 9px;
 }
 
@@ -391,7 +401,7 @@ button.mobile-only {
   flex: 0 0 26px;
   width: 26px;
   height: 26px;
-  color: #798d84;
+  color: #74847c;
   cursor: pointer;
   opacity: 0;
   border-radius: 50%;
@@ -406,13 +416,13 @@ button.mobile-only {
 }
 
 .row-action:hover {
-  color: white;
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--sidebar-ink);
+  background: rgba(28, 48, 42, 0.08);
 }
 
 .sidebar-empty {
   padding: 28px 16px;
-  color: #81948b;
+  color: var(--sidebar-muted);
   text-align: center;
 }
 
@@ -423,11 +433,12 @@ button.mobile-only {
 
 .sidebar-empty button {
   padding: 7px 11px;
-  color: #dfe5df;
+  color: var(--sidebar-ink);
   font-size: 11px;
   cursor: pointer;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(28, 48, 42, 0.16);
+  background: rgba(255, 255, 255, 0.28);
   border-radius: 8px;
 }
 
@@ -435,7 +446,7 @@ button.mobile-only {
   position: relative;
   z-index: 1;
   padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(28, 48, 42, 0.1);
 }
 
 .archive-toggle {
@@ -443,7 +454,7 @@ button.mobile-only {
   align-items: center;
   gap: 7px;
   padding: 7px 3px;
-  color: #92a29b;
+  color: var(--sidebar-muted);
   font-size: 10px;
   cursor: pointer;
   background: transparent;
@@ -451,39 +462,7 @@ button.mobile-only {
 }
 
 .archive-toggle:hover {
-  color: white;
-}
-
-.runtime-line {
-  display: grid;
-  grid-template-columns: 8px 1fr;
-  align-items: center;
-  gap: 2px 8px;
-  padding: 9px 5px 1px;
-  color: #aab8b1;
-  font-size: 10px;
-}
-
-.runtime-line small {
-  grid-column: 2;
-  overflow: hidden;
-  color: #60726a;
-  font-family: var(--font-mono);
-  font-size: 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  background: #8b5f50;
-  border-radius: 50%;
-}
-
-.status-dot.online {
-  background: #6cd094;
-  box-shadow: 0 0 0 4px rgba(108, 208, 148, 0.08);
+  color: var(--sidebar-ink);
 }
 
 .workspace {
@@ -2034,7 +2013,7 @@ button.mobile-only {
   }
 
   button.panel-close,
-  button.mobile-only {
+  button.capability-toggle {
     display: inline-flex;
   }
 
@@ -2072,6 +2051,10 @@ button.mobile-only {
   button.sidebar-close {
     display: inline-flex;
     margin-left: auto;
+  }
+
+  button.sidebar-toggle {
+    display: inline-flex;
   }
 
   .topbar {

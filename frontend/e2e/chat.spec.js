@@ -28,7 +28,7 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   const marker = `VF_E2E_${Date.now()}`
   cleanup.skillSlug = `e2e-hook-${marker.slice(-6).toLowerCase()}`
   await page.goto('/')
-  await expect(page.getByTestId('runtime-status')).toContainText('Codex 已连接')
+  await expect(page.getByRole('heading', { name: 'Video Fission' })).toBeVisible()
 
   await page.getByTestId('new-conversation').click()
   await expect(page.getByTestId('message-input')).toBeVisible()

@@ -97,7 +97,7 @@ class CodexHub:
             except (OSError, subprocess.SubprocessError) as exc:
                 warning = str(exc)
         else:
-            warning = "未找到 Codex CLI。请安装官方 CLI 或设置 CODEX_BIN。"
+            warning = "智能中枢运行时不可用。"
         return {
             "available": available,
             "codex_bin": bin_path,
@@ -193,7 +193,7 @@ class CodexHub:
         if not text and not files:
             raise ValueError("消息不能为空")
         if not self.settings.codex_bin:
-            raise RuntimeUnavailable("未找到 Codex CLI")
+            raise RuntimeUnavailable("智能中枢运行时不可用")
         lock = self._conversation_lock(conversation_id)
         if not lock.acquire(blocking=False):
             raise ConversationBusy("当前对话已有进行中的一轮")
@@ -533,7 +533,7 @@ class CodexHub:
         on_server_request: Any,
     ) -> CodexAppServer:
         if not self.settings.codex_bin:
-            raise RuntimeUnavailable("未找到 Codex CLI")
+            raise RuntimeUnavailable("智能中枢运行时不可用")
         runtime = CodexAppServer(
             self.settings.codex_bin,
             cwd=cwd,

@@ -62,7 +62,7 @@ class CodexAppServer:
                 start_new_session=os.name != "nt",
             )
         except OSError as exc:
-            raise CodexAppServerError(f"无法启动 Codex CLI: {exc}") from exc
+            raise CodexAppServerError(f"无法启动智能中枢运行时: {exc}") from exc
         thread = threading.Thread(target=self._read_loop, daemon=True, name="codex-stdout")
         thread.start()
         stderr_thread = threading.Thread(target=self._read_stderr, daemon=True, name="codex-stderr")
@@ -140,7 +140,7 @@ class CodexAppServer:
 
     def _send(self, message: dict[str, Any]) -> None:
         if not self.proc or not self.proc.stdin:
-            raise CodexAppServerError("Codex app-server 尚未启动")
+            raise CodexAppServerError("智能中枢运行时尚未启动")
         encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self._lock:
             self.proc.stdin.write(encoded)

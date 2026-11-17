@@ -14,7 +14,6 @@ import { compactTitle, formatRelativeTime } from '../utils/events'
 const props = defineProps({
   conversations: { type: Array, default: () => [] },
   currentId: { type: String, default: '' },
-  runtime: { type: Object, default: () => ({}) },
   showArchived: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   mobileOpen: { type: Boolean, default: false },
@@ -121,11 +120,6 @@ const filtered = computed(() => {
         <Archive :size="14" />
         {{ showArchived ? '返回最近对话' : '查看归档' }}
       </button>
-      <div class="runtime-line" data-testid="runtime-status">
-        <span :class="['status-dot', { online: runtime.available }]"></span>
-        <span>{{ runtime.available ? 'Codex 已连接' : 'Codex 离线' }}</span>
-        <small>{{ runtime.version || '未检测到运行时' }}</small>
-      </div>
     </footer>
   </aside>
 </template>

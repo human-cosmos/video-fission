@@ -81,7 +81,7 @@ defineExpose({ scrollToBottom })
 <template>
   <div ref="scroller" class="message-scroller">
     <div v-if="!conversation" class="hero-empty">
-      <div class="hero-eyebrow"><span></span> CODEX CREATIVE ENGINE</div>
+      <div class="hero-eyebrow"><span></span> CREATIVE OPERATIONS ENGINE</div>
       <h1>把一个视频想法<br />切成<span>可执行的镜头。</span></h1>
       <p>
         对话、推演、查资料、写脚本、调用工具。所有上下文与执行轨迹留在同一个工作台。
@@ -201,7 +201,7 @@ defineExpose({ scrollToBottom })
         <div class="message-spine"><span></span></div>
         <div class="interaction-card approval-card" data-testid="approval-card">
           <div class="interaction-kicker"><CircleAlert :size="15" /> 需要你的批准</div>
-          <h3>{{ approval.request?.reason || 'Codex 请求继续执行' }}</h3>
+          <h3>{{ approval.request?.reason || '智能中枢请求继续执行' }}</h3>
           <pre>{{ approvalDetail(approval) }}</pre>
           <div class="interaction-actions">
             <button class="button primary" @click="$emit('decide-approval', approval.id, 'accept')">

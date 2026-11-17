@@ -27,7 +27,6 @@ import { isRefreshEvent } from './utils/events'
 
 const conversations = ref([])
 const currentConversation = ref(null)
-const runtime = ref({})
 const models = ref([])
 const skills = ref([])
 const tools = ref([])
@@ -89,12 +88,11 @@ async function bootstrap() {
   loading.value = true
   bootError.value = ''
   try {
-    const [health, capabilityPayload, modelPayload] = await Promise.all([
+    const [, capabilityPayload, modelPayload] = await Promise.all([
       api.health(),
       api.capabilities(),
       api.models().catch(() => ({ items: [] })),
     ])
-    runtime.value = health.runtime
     skills.value = capabilityPayload.skills || []
     tools.value = capabilityPayload.tools || []
     models.value = modelPayload.items || []
@@ -117,7 +115,6 @@ async function bootstrap() {
 
 async function loadCapabilities() {
   const payload = await api.capabilities()
-  runtime.value = payload.runtime
   skills.value = payload.skills || []
   tools.value = payload.tools || []
 }
@@ -547,7 +544,6 @@ onBeforeUnmount(() => {
     <ConversationSidebar
       :conversations="visibleConversations"
       :current-id="currentConversation?.id || ''"
-      :runtime="runtime"
       :show-archived="showArchived"
       :loading="listLoading"
       :mobile-open="mobileSidebar"
@@ -561,7 +557,11 @@ onBeforeUnmount(() => {
 
     <main class="workspace">
       <header class="topbar">
-        <button class="icon-button mobile-only" aria-label="打开会话列表" @click="mobileSidebar = true">
+        <button
+          class="icon-button mobile-only sidebar-toggle"
+          aria-label="打开会话列表"
+          @click="mobileSidebar = true"
+        >
           <Menu :size="19" />
         </button>
         <div class="conversation-heading">
@@ -626,7 +626,7 @@ onBeforeUnmount(() => {
             </div>
           </details>
           <button
-            class="icon-button mobile-only"
+            class="icon-button mobile-only capability-toggle"
             aria-label="打开能力台"
             @click="mobileCapabilities = true"
           >
@@ -750,7 +750,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="composer-hint">
           <span>ENTER 发送 · SHIFT + ENTER 换行</span>
-          <span>Codex 只读沙箱 · 工具输出进入会话记录</span>
+          <span>受控执行 · 工具输出进入会话记录</span>
         </p>
       </section>
     </main>

@@ -16,7 +16,7 @@ class SkillValidationError(ValueError):
 def _slug(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     if not value:
-        value = f"skill-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        value = f"skill-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     return value[:64]
 
 
@@ -147,15 +147,17 @@ class SkillManager:
         destination = self.user_root / slug
         if destination.exists() or (self.disabled_root / slug).exists():
             raise SkillValidationError("Skill 标识已存在")
-        destination.mkdir(parents=True)
-        (destination / "SKILL.md").write_text(
-            self.render(
-                name,
-                str(payload.get("description") or ""),
-                str(payload.get("body") or ""),
-            ),
-            encoding="utf-8",
+        rendered = self.render(
+            name,
+            str(payload.get("description") or ""),
+            str(payload.get("body") or ""),
         )
+        destination.mkdir(parents=True)
+        try:
+            (destination / "SKILL.md").write_text(rendered, encoding="utf-8")
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
         return self.get(slug)
 
     def update(self, slug: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -177,8 +179,11 @@ class SkillManager:
         existing = self.get(slug)
         if existing["read_only"]:
             raise SkillValidationError("内置 Skill 不能停用")
-        current = self.user_root / slug if enabled is False else self.disabled_root / slug
-        target = self.disabled_root / slug if enabled is False else self.user_root / slug
+        safe_slug = _slug(slug)
+        current = self.user_root / safe_slug if enabled is False else self.disabled_root / safe_slug
+        target = self.disabled_root / safe_slug if enabled is False else self.user_root / safe_slug
+        if target.exists() and target != current:
+            raise SkillValidationError("Skill 目标状态目录已存在")
         if current.exists():
             shutil.move(str(current), str(target))
         return self.get(slug)

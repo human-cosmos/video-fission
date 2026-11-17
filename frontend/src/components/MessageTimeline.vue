@@ -1,5 +1,5 @@
 <script setup>
-import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from 'lucide-vue-next'
+import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from '@lucide/vue'
 import { nextTick, reactive, ref, watch } from 'vue'
 import { itemLabel, payloadText, toolCallName } from '../utils/events'
 import { renderMarkdown } from '../utils/markdown'
@@ -35,13 +35,10 @@ function approvalDetail(approval) {
 function questionOptions(question) {
   const values = question.options || []
   return values.map((option) =>
-    typeof option === 'string' ? option : option.label || option.value,
+    typeof option === 'string'
+      ? option
+      : option.label || option.value || option.const || String(option),
   )
-}
-
-function questionValue(question) {
-  if (!clarificationDrafts[question.id]) clarificationDrafts[question.id] = ''
-  return clarificationDrafts[question.id]
 }
 
 function submitClarification(clarification) {

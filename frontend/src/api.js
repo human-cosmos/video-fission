@@ -11,7 +11,10 @@ async function request(path, options = {}) {
     ? await response.json()
     : await response.text()
   if (!response.ok) {
-    const message = typeof data === 'string' ? data : data.detail || data.message
+    const detail = typeof data === 'string' ? data : data.detail || data.message
+    const message = Array.isArray(detail)
+      ? detail.map((item) => item.msg || String(item)).join('；')
+      : detail
     throw new Error(message || `请求失败 (${response.status})`)
   }
   return data
@@ -60,6 +63,8 @@ export const api = {
     body.append('file', file)
     return request('/uploads', { method: 'POST', body })
   },
+  deleteUpload: (id) =>
+    request(`/uploads/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   skills: () => request('/skills'),
   skill: (slug) => request(`/skills/${encodeURIComponent(slug)}`),
   createSkill: (payload) => request('/skills', json('POST', payload)),

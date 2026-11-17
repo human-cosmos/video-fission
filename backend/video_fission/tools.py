@@ -101,7 +101,8 @@ def _safe_relative(path: str, workspace: Path) -> Path:
 
 def _slug(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return value[:60] or datetime.now(UTC).strftime("brief-%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    return f"{value[:45] or 'brief'}-{stamp}"
 
 
 def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRegistry:
@@ -111,22 +112,32 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
         root = _safe_relative(str(arguments.get("path") or "."), registry.workspace)
         limit = min(max(int(arguments.get("limit") or 80), 1), 200)
         entries: list[dict[str, Any]] = []
-        for path in sorted(root.rglob("*")):
-            if len(entries) >= limit:
-                break
+        truncated = False
+        for path in root.rglob("*"):
             if ".git" in path.parts:
+                continue
+            if len(entries) >= limit:
+                truncated = True
+                break
+            try:
+                resolved = path.resolve()
+                if resolved != registry.workspace and registry.workspace not in resolved.parents:
+                    continue
+                kind = "directory" if resolved.is_dir() else "file" if resolved.is_file() else "other"
+                size = resolved.stat().st_size if kind == "file" else None
+            except OSError:
                 continue
             entries.append(
                 {
-                    "path": str(path.relative_to(registry.workspace)),
-                    "kind": "directory" if path.is_dir() else "file",
-                    "size": path.stat().st_size if path.is_file() else None,
+                    "path": str(resolved.relative_to(registry.workspace)),
+                    "kind": kind,
+                    "size": size,
                 }
             )
         return {
             "workspace": str(registry.workspace),
             "entries": entries,
-            "truncated": len(entries) >= limit,
+            "truncated": truncated,
         }
 
     def read_workspace_file(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -157,14 +168,18 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
         }
 
     def create_video_brief(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        topic = str(arguments.get("topic") or "未命名视频").strip()
-        audience = str(arguments.get("audience") or "泛内容受众").strip()
-        duration = int(arguments.get("duration_seconds") or 30)
-        angle = str(arguments.get("angle") or "高信息密度、强节奏的开场").strip()
+        topic = str(arguments.get("topic") or "未命名视频").strip()[:200]
+        audience = str(arguments.get("audience") or "泛内容受众").strip()[:200]
+        duration = min(max(int(arguments.get("duration_seconds") or 30), 5), 600)
+        angle = str(arguments.get("angle") or "高信息密度、强节奏的开场").strip()[:500]
         conversation_id = str(context.get("conversation_id") or "shared")
         folder = registry.artifacts_dir / conversation_id
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{_slug(topic)}.md"
+        hook_end = min(3, max(1, duration // 4))
+        middle_start = hook_end
+        middle_end = max(middle_start + 1, duration * 2 // 3)
+        middle_end = min(middle_end, max(middle_start + 1, duration - 1))
         body = f"""# {topic}
 
 - 目标受众：{audience}
@@ -186,10 +201,9 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
 
 | 时间 | 画面 | 字幕/旁白 | 节奏 |
 | --- | --- | --- | --- |
-| 0-3s | 主体特写 + 动态字标 | 结果先行 | 快切 |
-| 3-{max(8, duration // 3)}s | 三段对比蒙太奇 | 逐条拆解 | 节拍点切 |
-| {max(8, duration // 3)}-{max(18, duration * 2 // 3)}s | 证据特写 | 数据与细节 | 稳态推进 |
-| 尾段 | 回扣开场 + CTA | 下一步行动 | 定格 |
+| 0-{hook_end}s | 主体特写 + 动态字标 | 结果先行 | 快切 |
+| {middle_start}-{middle_end}s | 三段对比蒙太奇 | 逐条拆解 | 节拍点切 |
+| {middle_end}-{duration}s | 证据特写与 CTA | 数据、细节与行动 | 稳态收束 |
 
 ## 制作备注
 
@@ -216,7 +230,11 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative directory path"},
+                    "path": {
+                        "type": "string",
+                        "maxLength": 500,
+                        "description": "Relative directory path",
+                    },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
                 },
                 "additionalProperties": False,
@@ -231,7 +249,13 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
             description="Read a UTF-8 text file inside the isolated workspace.",
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Relative file path"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "maxLength": 500,
+                        "description": "Relative file path",
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -265,9 +289,9 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
             input_schema={
                 "type": "object",
                 "properties": {
-                    "topic": {"type": "string"},
-                    "audience": {"type": "string"},
-                    "angle": {"type": "string"},
+                    "topic": {"type": "string", "maxLength": 200},
+                    "audience": {"type": "string", "maxLength": 200},
+                    "angle": {"type": "string", "maxLength": 500},
                     "duration_seconds": {
                         "type": "integer",
                         "minimum": 5,

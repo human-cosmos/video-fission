@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: 'http://127.0.0.1:5174',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -21,17 +21,18 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: '../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8000',
+      command:
+        'node ../frontend/e2e/reset-e2e-data.js && VF_DATA_DIR=../.e2e-data ../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8001',
       cwd: '../backend',
-      url: 'http://127.0.0.1:8000/api/health',
-      reuseExistingServer: true,
+      url: 'http://127.0.0.1:8001/api/health',
+      reuseExistingServer: false,
       timeout: 30_000,
     },
     {
-      command: 'npm run dev',
+      command: 'VITE_API_TARGET=http://127.0.0.1:8001 npx vite --host 127.0.0.1 --port 5174',
       cwd: '.',
-      url: 'http://127.0.0.1:5173',
-      reuseExistingServer: true,
+      url: 'http://127.0.0.1:5174',
+      reuseExistingServer: false,
       timeout: 30_000,
     },
   ],

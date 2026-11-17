@@ -7,7 +7,7 @@ import {
   Plus,
   Search,
   X,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { compactTitle, formatRelativeTime } from '../utils/events'
 

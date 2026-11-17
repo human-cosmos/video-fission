@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..config import settings
 from ..container import hub, skills
@@ -21,28 +22,36 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 class ConversationCreate(BaseModel):
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=120)
     model: str | None = None
     reasoning_effort: str | None = None
-    developer_instructions: str | None = None
+    developer_instructions: str | None = Field(default=None, max_length=20_000)
 
 
 class ConversationUpdate(BaseModel):
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=120)
     model: str | None = None
     reasoning_effort: str | None = None
-    developer_instructions: str | None = None
+    developer_instructions: str | None = Field(default=None, max_length=20_000)
 
 
 class Mention(BaseModel):
-    name: str
-    path: str
+    name: str = Field(min_length=1, max_length=100)
+    path: str = Field(min_length=1, max_length=500)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized.startswith(("app://", "plugin://", "skill://")):
+            raise ValueError("mention 只支持 app://、plugin:// 或 skill:// 目标")
+        return value.strip()
 
 
 class MessageRequest(BaseModel):
     text: str = Field(default="", max_length=30_000)
-    mentions: list[Mention] = Field(default_factory=list)
-    files: list[dict[str, Any]] = Field(default_factory=list)
+    mentions: list[Mention] = Field(default_factory=list, max_length=20)
+    files: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
 
 
 class ApprovalDecision(BaseModel):
@@ -54,16 +63,16 @@ class ClarificationAnswers(BaseModel):
 
 
 class SkillCreate(BaseModel):
-    name: str
-    description: str
-    body: str
-    slug: str | None = None
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=200_000)
+    slug: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9-]*$")
 
 
 class SkillUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    body: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    body: str | None = Field(default=None, min_length=1, max_length=200_000)
 
 
 class SkillToggle(BaseModel):
@@ -72,20 +81,12 @@ class SkillToggle(BaseModel):
 
 def _error(exc: Exception) -> None:
     if isinstance(exc, ConversationNotFound):
-        from fastapi import HTTPException
-
         raise HTTPException(404, str(exc)) from exc
     if isinstance(exc, ConversationBusy):
-        from fastapi import HTTPException
-
         raise HTTPException(409, str(exc)) from exc
     if isinstance(exc, RuntimeUnavailable):
-        from fastapi import HTTPException
-
         raise HTTPException(503, str(exc)) from exc
     if isinstance(exc, (ValueError, SkillValidationError)):
-        from fastapi import HTTPException
-
         raise HTTPException(400, str(exc)) from exc
     raise exc
 
@@ -238,8 +239,11 @@ async def events(
     except Exception as exc:
         _error(exc)
 
+    last_event_id = request.headers.get("last-event-id", "").strip()
+    resume_id = max(after_id, int(last_event_id)) if last_event_id.isdigit() else after_id
+
     async def stream():
-        cursor = after_id
+        cursor = resume_id
         last_ping = time.monotonic()
         while True:
             if await request.is_disconnected():
@@ -292,8 +296,6 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
             break
         total += len(chunk)
         if total > MAX_UPLOAD_BYTES:
-            from fastapi import HTTPException
-
             raise HTTPException(413, "文件不能超过 20MB")
         chunks.append(chunk)
     original = Path(file.filename or "attachment").name
@@ -309,6 +311,20 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
     }
 
 
+@router.delete("/uploads/{file_id}")
+def delete_upload(file_id: str) -> dict[str, bool]:
+    if not re.fullmatch(r"[a-f0-9]{32}", file_id):
+        raise HTTPException(400, "附件标识无效")
+    matches = [path for path in settings.uploads_dir.glob(f"{file_id}.*") if path.is_file()]
+    if not matches:
+        raise HTTPException(404, "附件不存在")
+    if any(hub.db.attachment_reference_count(str(path.resolve())) for path in matches):
+        raise HTTPException(409, "文件已被对话使用，不能单独删除")
+    for path in matches:
+        path.unlink(missing_ok=True)
+    return {"deleted": True}
+
+
 @router.get("/skills")
 def list_skills() -> dict[str, Any]:
     return {"items": skills.list(), "roots": skills.runtime_roots}
@@ -319,8 +335,6 @@ def get_skill(slug: str) -> dict[str, Any]:
     try:
         return skills.get(slug)
     except KeyError as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(404, "Skill 不存在") from exc
 
 

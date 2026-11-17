@@ -26,12 +26,14 @@ class CodexAppServer:
         timeout_seconds: int = 180,
         on_notification: Callable[[str, dict[str, Any]], None] | None = None,
         on_server_request: Callable[[dict[str, Any]], Any] | None = None,
+        on_exit: Callable[[CodexAppServer, str], None] | None = None,
     ):
         self.codex_bin = codex_bin
         self.cwd = str(cwd)
         self.timeout_seconds = timeout_seconds
         self.on_notification = on_notification
         self.on_server_request = on_server_request
+        self.on_exit = on_exit
         self.proc: subprocess.Popen[str] | None = None
         self._next_id = 1
         self._pending: dict[int, dict[str, Any]] = {}
@@ -92,12 +94,18 @@ class CodexAppServer:
             if self._closed:
                 return
             detail = self.stderr or (
-                f"Codex app-server exited with code {self.proc.poll()}" if self.proc else "Codex app-server exited"
+                f"智能中枢运行时异常退出（代码 {self.proc.poll()}）" if self.proc else "智能中枢运行时已退出"
             )
             for waiter in self._pending.values():
                 waiter["error"] = detail
                 waiter["event"].set()
             self._pending.clear()
+            callback = self.on_exit
+        if callback:
+            try:
+                callback(self, detail)
+            except Exception:
+                logger.exception("Codex app-server exit handler failed")
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         if "id" in message and ("result" in message or "error" in message):
@@ -128,15 +136,18 @@ class CodexAppServer:
         request_id = message.get("id")
         try:
             result = self.on_server_request(message) if self.on_server_request else None
-            self._send({"id": request_id, "result": result if result is not None else {}})
+            response = {"id": request_id, "result": result if result is not None else {}}
         except Exception as exc:
             logger.exception("Codex server request failed")
-            self._send(
-                {
-                    "id": request_id,
-                    "error": {"code": -32000, "message": str(exc)},
-                }
-            )
+            response = {
+                "id": request_id,
+                "error": {"code": -32000, "message": str(exc)},
+            }
+        try:
+            self._send(response)
+        except CodexAppServerError:
+            if not self._closed:
+                logger.warning("Could not answer Codex server request", exc_info=True)
 
     def _send(self, message: dict[str, Any]) -> None:
         if not self.proc or not self.proc.stdin:
@@ -160,13 +171,18 @@ class CodexAppServer:
         timeout_seconds: int | None = None,
     ) -> Any:
         if not self.running:
-            raise CodexAppServerError(self.stderr or "Codex app-server 未运行")
+            raise CodexAppServerError(self.stderr or "智能中枢运行时未运行")
         with self._lock:
             request_id = self._next_id
             self._next_id += 1
             waiter = {"event": threading.Event(), "result": None, "error": None}
             self._pending[request_id] = waiter
-        self._send({"method": method, "id": request_id, "params": params or {}})
+        try:
+            self._send({"method": method, "id": request_id, "params": params or {}})
+        except Exception:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            raise
         timeout = timeout_seconds or self.timeout_seconds
         if not waiter["event"].wait(timeout):
             with self._lock:

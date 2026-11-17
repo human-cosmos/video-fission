@@ -230,21 +230,20 @@ def question_list(params: dict[str, Any]) -> list[dict[str, Any]]:
     raw = params.get("questions")
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, dict)]
-    if str(params.get("requestedSchema", "")).strip():
-        requested = params.get("requestedSchema")
-        if isinstance(requested, dict):
-            properties = requested.get("properties")
-            required = set(requested.get("required") or [])
-            if isinstance(properties, dict):
-                return [
-                    {
-                        "id": str(name),
-                        "header": str((value or {}).get("title") or name),
-                        "question": str((value or {}).get("description") or (value or {}).get("title") or name),
-                        "required": name in required,
-                        "type": str((value or {}).get("type") or "string"),
-                        "options": (value or {}).get("enum") or [],
-                    }
-                    for name, value in properties.items()
-                ]
+    requested = params.get("requestedSchema")
+    if isinstance(requested, dict):
+        properties = requested.get("properties")
+        required = set(requested.get("required") or [])
+        if isinstance(properties, dict):
+            return [
+                {
+                    "id": str(name),
+                    "header": str((value or {}).get("title") or name),
+                    "question": str((value or {}).get("description") or (value or {}).get("title") or name),
+                    "required": name in required,
+                    "type": str((value or {}).get("type") or "string"),
+                    "options": (value or {}).get("enum") or (value or {}).get("oneOf") or [],
+                }
+                for name, value in properties.items()
+            ]
     return []

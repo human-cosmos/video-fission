@@ -1,5 +1,5 @@
 <script setup>
-import { Braces, ChevronRight, Plus, ShieldCheck, Sparkles, Wrench, X } from 'lucide-vue-next'
+import { Braces, ChevronRight, Plus, ShieldCheck, Sparkles, Wrench, X } from '@lucide/vue'
 import { ref } from 'vue'
 
 defineProps({

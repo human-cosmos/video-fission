@@ -1,6 +1,6 @@
 <script setup>
-import { X } from 'lucide-vue-next'
-import { reactive, watch } from 'vue'
+import { X } from '@lucide/vue'
+import { nextTick, reactive, ref, watch } from 'vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -9,6 +9,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'save'])
+const nameInput = ref(null)
 const form = reactive({
   slug: '',
   name: '',
@@ -29,6 +30,15 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) return
+    await nextTick()
+    nameInput.value?.focus()
+  },
+)
+
 function submit() {
   emit('save', {
     slug: form.slug.trim() || undefined,
@@ -41,11 +51,19 @@ function submit() {
 
 <template>
   <div v-if="open" class="modal-backdrop" @click.self="$emit('close')">
-    <form class="modal-card skill-editor" data-testid="skill-editor" @submit.prevent="submit">
+    <form
+      class="modal-card skill-editor"
+      data-testid="skill-editor"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="skill-editor-title"
+      @keydown.esc.prevent="$emit('close')"
+      @submit.prevent="submit"
+    >
       <header>
         <div>
           <span class="micro-label">SKILL WORKSHOP</span>
-          <h2>{{ skill ? '编辑 Skill' : '创建 Skill' }}</h2>
+          <h2 id="skill-editor-title">{{ skill ? '编辑 Skill' : '创建 Skill' }}</h2>
         </div>
         <button type="button" class="icon-button" aria-label="关闭" @click="$emit('close')">
           <X :size="19" />
@@ -53,7 +71,13 @@ function submit() {
       </header>
       <label>
         <span>显示名称</span>
-        <input v-model="form.name" required maxlength="80" placeholder="例如：爆款开场拆解" />
+        <input
+          ref="nameInput"
+          v-model="form.name"
+          required
+          maxlength="80"
+          placeholder="例如：爆款开场拆解"
+        />
       </label>
       <label v-if="!skill">
         <span>标识（可选）</span>

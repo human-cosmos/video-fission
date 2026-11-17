@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
   Zap,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, eventUrl } from './api'
 import CapabilityPanel from './components/CapabilityPanel.vue'
@@ -50,6 +50,10 @@ const timeline = ref(null)
 const composerInput = ref(null)
 let eventSource = null
 let refreshTimer = null
+let refreshInFlight = false
+let refreshQueued = false
+let selectionSequence = 0
+let uploadGeneration = 0
 let toastTimer = null
 let titleBeforeEdit = ''
 
@@ -65,10 +69,12 @@ const visibleConversations = computed(() =>
   ),
 )
 const hasConversation = computed(() => Boolean(currentConversation.value?.id))
+const isArchived = computed(() => Boolean(currentConversation.value?.is_archived))
 const canSend = computed(
   () =>
     !sending.value &&
     !uploading.value &&
+    !isArchived.value &&
     (composer.value.trim() || attachments.value.length),
 )
 
@@ -88,8 +94,7 @@ async function bootstrap() {
   loading.value = true
   bootError.value = ''
   try {
-    const [, capabilityPayload, modelPayload] = await Promise.all([
-      api.health(),
+    const [capabilityPayload, modelPayload] = await Promise.all([
       api.capabilities(),
       api.models().catch(() => ({ items: [] })),
     ])
@@ -137,9 +142,9 @@ function closeStream() {
   streamConnected.value = false
 }
 
-function connectStream(conversationId) {
+function connectStream(conversationId, afterId = 0) {
   closeStream()
-  eventSource = new EventSource(eventUrl(conversationId, 0))
+  eventSource = new EventSource(eventUrl(conversationId, afterId))
   eventSource.onopen = () => {
     streamConnected.value = true
   }
@@ -158,33 +163,56 @@ function connectStream(conversationId) {
 }
 
 function scheduleRefresh(conversationId) {
-  clearTimeout(refreshTimer)
-  refreshTimer = setTimeout(async () => {
-    if (currentConversation.value?.id !== conversationId) return
-    try {
-      const [detail, list] = await Promise.all([
-        api.conversation(conversationId),
-        api.conversations(true),
-      ])
-      currentConversation.value = detail
-      conversations.value = list.items || []
-    } catch {
-      // Keep the current transcript visible during transient stream reconnects.
-    }
+  refreshQueued = true
+  if (refreshTimer) return
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    flushScheduledRefresh(conversationId)
   }, 140)
+}
+
+async function flushScheduledRefresh(conversationId) {
+  if (currentConversation.value?.id !== conversationId) {
+    refreshQueued = false
+    return
+  }
+  if (refreshInFlight) return
+  refreshInFlight = true
+  refreshQueued = false
+  try {
+    const [detail, list] = await Promise.all([
+      api.conversation(conversationId),
+      api.conversations(true),
+    ])
+    if (currentConversation.value?.id !== conversationId) return
+    currentConversation.value = detail
+    conversations.value = list.items || []
+  } catch {
+    // Keep the current transcript visible during transient stream reconnects.
+  } finally {
+    refreshInFlight = false
+    if (refreshQueued && currentConversation.value?.id === conversationId) {
+      scheduleRefresh(conversationId)
+    }
+  }
 }
 
 async function selectConversation(id) {
   if (!id) return
+  const sequence = ++selectionSequence
   closeStream()
   try {
-    currentConversation.value = await api.conversation(id)
+    const detail = await api.conversation(id)
+    if (sequence !== selectionSequence) return
+    currentConversation.value = detail
     window.localStorage.setItem('video-fission.activeConversation', id)
     titleBeforeEdit = currentConversation.value.title
+    uploadGeneration += 1
+    uploading.value = false
     attachments.value = []
     skillMentions.value = []
     mobileSidebar.value = false
-    connectStream(id)
+    connectStream(id, detail.latest_event_id || 0)
     await loadConversations()
     await nextTick()
     timeline.value?.scrollToBottom('instant')
@@ -216,7 +244,9 @@ async function refreshCurrent() {
   if (!currentConversation.value?.id) return
   const id = currentConversation.value.id
   try {
-    currentConversation.value = await api.conversation(id)
+    const detail = await api.conversation(id)
+    if (currentConversation.value?.id !== id) return
+    currentConversation.value = detail
     await loadConversations()
   } catch (error) {
     notify(error.message)
@@ -226,8 +256,10 @@ async function refreshCurrent() {
 async function saveTitle() {
   const title = currentConversation.value?.title?.trim()
   if (!title || title === titleBeforeEdit) return
+  const conversationId = currentConversation.value.id
   try {
-    const updated = await api.updateConversation(currentConversation.value.id, { title })
+    const updated = await api.updateConversation(conversationId, { title })
+    if (currentConversation.value?.id !== conversationId) return
     currentConversation.value = { ...currentConversation.value, ...updated }
     titleBeforeEdit = updated.title
     await loadConversations()
@@ -270,22 +302,29 @@ async function uploadFiles(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
   if (!files.length) return
+  const generation = ++uploadGeneration
   uploading.value = true
   try {
     for (const file of files) {
       const uploaded = await api.upload(file)
+      if (generation !== uploadGeneration) return
       attachments.value.push(uploaded)
     }
     notify(`已添加 ${files.length} 个文件`)
   } catch (error) {
     notify(error.message)
   } finally {
-    uploading.value = false
+    if (generation === uploadGeneration) uploading.value = false
   }
 }
 
-function removeAttachment(id) {
-  attachments.value = attachments.value.filter((file) => file.id !== id)
+async function removeAttachment(id) {
+  try {
+    await api.deleteUpload(id)
+    attachments.value = attachments.value.filter((file) => file.id !== id)
+  } catch (error) {
+    notify(error.message)
+  }
 }
 
 function useSkill(skill) {
@@ -305,20 +344,22 @@ function removeMention(path) {
 
 async function send() {
   if (!canSend.value) return
-  let conversation = currentConversation.value
-  if (!conversation?.id) {
-    await newConversation()
-    conversation = currentConversation.value
+  if (isArchived.value) {
+    notify('已归档会话不能继续发送消息')
+    return
   }
-  if (!conversation?.id) return
   sending.value = true
   const text = composer.value.trim()
-  const payload = {
-    text,
-    files: attachments.value,
-    mentions: skillMentions.value,
-  }
+  const files = [...attachments.value]
+  const mentions = [...skillMentions.value]
   try {
+    let conversation = currentConversation.value
+    if (!conversation?.id) {
+      await newConversation()
+      conversation = currentConversation.value
+    }
+    if (!conversation?.id) return
+    const payload = { text, files, mentions }
     if (conversation.status === 'running') {
       await api.steer(conversation.id, payload)
     } else {
@@ -516,6 +557,12 @@ function insertLineBreak(event) {
 }
 
 function handleShortcut(event) {
+  if (event.key === 'Escape') {
+    mobileSidebar.value = false
+    mobileCapabilities.value = false
+    skillModalOpen.value = false
+    return
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
     event.preventDefault()
     newConversation()
@@ -534,6 +581,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   closeStream()
   clearTimeout(refreshTimer)
+  refreshQueued = false
   clearTimeout(toastTimer)
   window.removeEventListener('keydown', handleShortcut)
 })
@@ -570,6 +618,7 @@ onBeforeUnmount(() => {
             v-model="currentConversation.title"
             class="title-input"
             aria-label="对话标题"
+            maxlength="120"
             @focus="titleBeforeEdit = currentConversation.title"
             @blur="saveTitle"
             @keydown.enter.target.blur
@@ -697,8 +746,12 @@ onBeforeUnmount(() => {
             v-model="composer"
             data-testid="message-input"
             rows="1"
+            maxlength="30000"
+            :disabled="isArchived"
             :placeholder="
-              currentConversation?.status === 'running'
+              isArchived
+                ? '该对话已归档，取消归档后可继续发送'
+                : currentConversation?.status === 'running'
                 ? '追问当前执行，或补充新的限制…'
                 : '描述你想拆解、策划或完成的视频任务…'
             "
@@ -712,7 +765,7 @@ onBeforeUnmount(() => {
                   type="file"
                   multiple
                   hidden
-                  :disabled="uploading"
+                  :disabled="uploading || isArchived"
                   @change="uploadFiles"
                 />
               </label>

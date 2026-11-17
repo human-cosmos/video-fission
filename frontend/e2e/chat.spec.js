@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
+import { writeFile } from 'node:fs/promises'
 
 const cleanup = {
   conversationId: '',
   skillSlug: '',
+  uploadId: '',
 }
 
 test.afterEach(async ({ request }) => {
@@ -18,8 +20,12 @@ test.afterEach(async ({ request }) => {
   if (cleanup.skillSlug) {
     await request.delete(`/api/skills/${cleanup.skillSlug}`)
   }
+  if (cleanup.uploadId) {
+    await request.delete(`/api/uploads/${cleanup.uploadId}`)
+  }
   cleanup.conversationId = ''
   cleanup.skillSlug = ''
+  cleanup.uploadId = ''
 })
 
 test('creates a persistent Codex conversation, invokes a tool, and creates a skill', async ({
@@ -28,7 +34,7 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   const marker = `VF_E2E_${Date.now()}`
   cleanup.skillSlug = `e2e-hook-${marker.slice(-6).toLowerCase()}`
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Video Fission' })).toBeVisible()
+  await expect(page.locator('.app-shell')).toBeVisible()
 
   await page.getByTestId('new-conversation').click()
   await expect(page.getByTestId('message-input')).toBeVisible()
@@ -101,7 +107,7 @@ test('keeps the conversation and capability controls reachable on mobile', async
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Video Fission' })).toBeVisible()
+  await expect(page.locator('.app-shell')).toBeVisible()
 
   await page.getByRole('button', { name: '打开会话列表' }).click()
   await expect(page.getByTestId('new-conversation')).toBeInViewport()
@@ -114,5 +120,29 @@ test('keeps the conversation and capability controls reachable on mobile', async
     path: testInfo.outputPath('video-fission-mobile.png'),
     fullPage: false,
   })
+})
+
+test('preserves an attachment uploaded before the first conversation exists', async ({
+  page,
+}, testInfo) => {
+  const marker = `VF_E2E_ATTACHMENT_${Date.now()}`
+  const attachmentPath = testInfo.outputPath('attachment-note.txt')
+  await writeFile(attachmentPath, 'attachment survives conversation creation', 'utf8')
+
+  await page.goto('/')
+  const uploadResponse = page.waitForResponse(
+    (response) => response.url().endsWith('/api/uploads') && response.request().method() === 'POST',
+  )
+  await page.locator('input[type=file]').setInputFiles(attachmentPath)
+  cleanup.uploadId = (await (await uploadResponse).json()).id
+  await expect(page.getByText('attachment-note.txt', { exact: true })).toBeVisible()
+  await page
+    .getByTestId('message-input')
+    .fill(`这是端到端测试 ${marker}。请只回复 ATTACHMENT_OK。`)
+  await page.getByTestId('send-message').click()
+  await expect(page.getByText('ATTACHMENT_OK', { exact: true })).toBeVisible({
+    timeout: 120_000,
+  })
+  await expect(page.getByText('attachment-note.txt', { exact: true })).toBeVisible()
 })
 

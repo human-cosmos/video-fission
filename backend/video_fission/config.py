@@ -39,7 +39,7 @@ class Settings:
         data_dir = _env_path("VF_DATA_DIR", PROJECT_ROOT / "data")
         workspace = _env_path("VF_WORKSPACE", data_dir / "workspace")
         configured_bin = os.getenv("CODEX_BIN", "").strip()
-        codex_bin = configured_bin or shutil.which("codex")
+        codex_bin = shutil.which(configured_bin) or configured_bin if configured_bin else shutil.which("codex")
         return cls(
             project_root=PROJECT_ROOT,
             data_dir=data_dir,

@@ -45,11 +45,14 @@ def test_live_conversation_skill_discovery_tool_and_persistence(test_settings):
         runtime_skills = hub.runtime_skills()
         assert any(item.get("name") == "video-brief" for item in runtime_skills["items"])
 
+        models = hub.list_models()
+        assert models, "Codex returned no available models"
+        model = next((item for item in models if item["is_default"]), models[0])
         conversation = hub.create_conversation(
             {
                 "title": "Live E2E",
-                "model": "deepseek-flash",
-                "reasoning_effort": "low",
+                "model": model["id"],
+                "reasoning_effort": model["default_reasoning_effort"],
             }
         )
         hub.send_message(

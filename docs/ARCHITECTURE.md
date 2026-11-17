@@ -183,11 +183,11 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 验证日期：2026-11-17。
 
 - Codex CLI：`0.169.0`
-- 后端基础测试：4 passed
+- 后端基础测试：14 passed
 - 真实 Codex 集成：1 passed
 - 前端单元测试：4 passed
 - 前端生产构建：passed
-- Playwright E2E：2 passed
+- Playwright E2E：3 passed
 
 真实 E2E 已验证：
 
@@ -199,4 +199,7 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 - 页面刷新后会话、消息、Tool 轨迹和 Skill 均恢复
 - Thread 分叉、归档和取消归档
 - 390px 移动端下会话列表与能力抽屉可达
+- 首次对话前上传的附件在创建会话后仍保留
+
+E2E 使用独立 `.e2e-data/` 数据目录和独立后端端口，不接触正常运行数据。
 

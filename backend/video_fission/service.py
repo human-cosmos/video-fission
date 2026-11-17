@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
 import subprocess
 import threading
 import time
@@ -61,12 +64,46 @@ class CodexHub:
         self._approval_waiters: dict[str, dict[str, Any]] = {}
         self._clarification_waiters: dict[str, dict[str, Any]] = {}
         self._models_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._runtime_probe_cache: tuple[float, dict[str, Any]] | None = None
 
     def initialize(self) -> None:
         self.settings.ensure_directories()
         self.db.initialize()
+        self._cleanup_orphan_uploads()
+        self._cleanup_orphan_artifacts()
+        recovery_message = "服务重启，上一轮执行已中断"
+        for conversation_id in self.db.recover_orphaned_runs(recovery_message):
+            self.db.append_event(
+                conversation_id,
+                "runtime.recovered",
+                {"message": recovery_message},
+            )
+
+    def _cleanup_orphan_uploads(self, max_age_seconds: int = 86_400) -> None:
+        cutoff = time.time() - max_age_seconds
+        for path in self.settings.uploads_dir.iterdir():
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            try:
+                if path.stat().st_mtime < cutoff and self.db.attachment_reference_count(str(path.resolve())) == 0:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to clean orphan upload: %s", path, exc_info=True)
+
+    def _cleanup_orphan_artifacts(self, max_age_seconds: int = 86_400) -> None:
+        cutoff = time.time() - max_age_seconds
+        for path in self.settings.artifacts_dir.iterdir():
+            if not path.is_dir() or path.is_symlink() or self.db.get_conversation(path.name):
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    shutil.rmtree(path)
+            except OSError:
+                logger.warning("Failed to clean orphan artifact directory: %s", path, exc_info=True)
 
     def shutdown(self) -> None:
+        for conversation_id in list(self._turn_locks):
+            self._cancel_interactions(conversation_id)
         with self._lock:
             runtimes = list(self._runtimes.values())
             self._runtimes.clear()
@@ -78,6 +115,12 @@ class CodexHub:
 
     def runtime_status(self) -> dict[str, Any]:
         bin_path = self.settings.codex_bin
+        if self._runtime_probe_cache and time.time() - self._runtime_probe_cache[0] < 15:
+            probe = self._runtime_probe_cache[1]
+            return {
+                **probe,
+                "online_conversations": len(self._runtimes),
+            }
         version = None
         available = False
         warning = None
@@ -98,15 +141,16 @@ class CodexHub:
                 warning = str(exc)
         else:
             warning = "智能中枢运行时不可用。"
-        return {
+        probe = {
             "available": available,
             "codex_bin": bin_path,
             "version": version,
             "runtime_command": f"{bin_path or 'codex'} app-server --stdio",
             "workspace": str(self.settings.workspace),
             "warning": warning,
-            "online_conversations": len(self._runtimes),
         }
+        self._runtime_probe_cache = (time.time(), probe)
+        return {**probe, "online_conversations": len(self._runtimes)}
 
     def capabilities(self) -> dict[str, Any]:
         return {
@@ -134,12 +178,14 @@ class CodexHub:
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         row = self._conversation(conversation_id)
+        latest_event_id = self.db.latest_event_id(conversation_id)
         return {
             **self._public_conversation(row),
             "items": self.db.list_items(conversation_id),
             "pending_approvals": self.db.pending_approvals(conversation_id),
             "pending_clarifications": self.db.pending_clarifications(conversation_id),
             "tool_runs": self.db.list_tool_runs(conversation_id),
+            "latest_event_id": latest_event_id,
         }
 
     def create_conversation(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -192,13 +238,21 @@ class CodexHub:
         files = payload.get("files") or []
         if not text and not files:
             raise ValueError("消息不能为空")
+        if row.get("status") == "running":
+            raise ConversationBusy("当前对话已有进行中的一轮")
         if not self.settings.codex_bin:
             raise RuntimeUnavailable("智能中枢运行时不可用")
         lock = self._conversation_lock(conversation_id)
         if not lock.acquire(blocking=False):
             raise ConversationBusy("当前对话已有进行中的一轮")
-        generation = int(row.get("turn_generation") or 0) + 1
         try:
+            row = self._conversation(conversation_id)
+            if row.get("archived_at"):
+                raise ConversationBusy("已归档会话不能继续发送消息")
+            if row.get("status") == "running":
+                raise ConversationBusy("当前对话已有进行中的一轮")
+            files = self._validated_files(files)
+            generation = int(row.get("turn_generation") or 0) + 1
             model_text = self._text_with_files(text, files)
             mentions = payload.get("mentions") or []
             item = self.db.add_item(
@@ -251,9 +305,10 @@ class CodexHub:
         ):
             return self.send_message(conversation_id, payload)
         text = str(payload.get("text") or "").strip()
-        if not text:
-            raise ValueError("追问内容不能为空")
         files = payload.get("files") or []
+        if not text and not files:
+            raise ValueError("追问内容不能为空")
+        files = self._validated_files(files)
         model_text = self._text_with_files(text, files)
         mentions = payload.get("mentions") or []
         item = self.db.add_item(
@@ -287,9 +342,21 @@ class CodexHub:
             except Exception:
                 logger.warning("Interrupt RPC failed", exc_info=True)
         self._cancel_interactions(conversation_id)
-        self.db.update_conversation(conversation_id, {"status": "idle", "active_turn_id": None})
-        self.db.append_event(conversation_id, "turn.interrupted", {"status": "idle"})
-        return {"status": "interrupted"}
+        generation = int(row.get("turn_generation") or 0) + 1
+        self.db.update_conversation(
+            conversation_id,
+            {
+                "status": "idle",
+                "active_turn_id": None,
+                "turn_generation": generation,
+            },
+        )
+        self.db.append_event(
+            conversation_id,
+            "turn.interrupted",
+            {"status": "idle", "turn_generation": generation},
+        )
+        return {"status": "interrupted", "turn_generation": generation}
 
     def compact(self, conversation_id: str) -> dict[str, Any]:
         row = self._conversation(conversation_id)
@@ -326,10 +393,25 @@ class CodexHub:
         row = self._conversation(conversation_id)
         if row.get("status") == "running":
             self.interrupt(conversation_id)
+        attachment_paths = {
+            str(file.get("path") or "")
+            for item in self.db.list_items(conversation_id)
+            for file in (item.get("payload") or {}).get("files") or []
+            if isinstance(file, dict)
+        }
+        attachment_paths.discard("")
         runtime = self._runtimes.pop(conversation_id, None)
         if runtime:
             runtime.close()
         self.db.delete_conversation(conversation_id)
+        upload_root = self.settings.uploads_dir.resolve()
+        for raw_path in attachment_paths:
+            path = Path(raw_path).resolve()
+            if upload_root in path.parents and self.db.attachment_reference_count(str(path)) == 0:
+                path.unlink(missing_ok=True)
+        artifact_dir = self.settings.artifacts_dir / conversation_id
+        if artifact_dir.is_dir():
+            shutil.rmtree(artifact_dir)
 
     def fork(self, conversation_id: str) -> dict[str, Any]:
         source = self._conversation(conversation_id)
@@ -501,13 +583,33 @@ class CodexHub:
         lines = [text] if text else []
         lines.append("[用户上传的文件。请只在需要时读取，所有路径均为只读附件]")
         for index, file in enumerate(files, start=1):
-            if not isinstance(file, dict):
-                continue
             name = str(file.get("name") or f"附件 {index}")
             path = str(file.get("path") or "")
             if path:
                 lines.append(f"{index}. {name} — `{path}`")
         return "\n\n".join(lines)
+
+    def _validated_files(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        root = self.settings.uploads_dir.resolve()
+        validated: list[dict[str, Any]] = []
+        for item in files:
+            if not isinstance(item, dict):
+                raise ValueError("附件格式无效")
+            raw_path = str(item.get("path") or "").strip()
+            if not raw_path:
+                raise ValueError("附件路径不能为空")
+            path = Path(raw_path).expanduser().resolve()
+            if root not in path.parents or not path.is_file():
+                raise ValueError("附件不存在或不属于当前应用")
+            validated.append(
+                {
+                    **item,
+                    "id": str(item.get("id") or path.stem),
+                    "name": Path(str(item.get("name") or path.name)).name,
+                    "path": str(path),
+                }
+            )
+        return validated
 
     def _system_instructions(self, row: dict[str, Any]) -> str:
         user_instructions = str(row.get("developer_instructions") or "").strip()
@@ -531,6 +633,7 @@ class CodexHub:
         cwd: str,
         on_notification: Any,
         on_server_request: Any,
+        on_exit: Any = None,
     ) -> CodexAppServer:
         if not self.settings.codex_bin:
             raise RuntimeUnavailable("智能中枢运行时不可用")
@@ -540,6 +643,7 @@ class CodexHub:
             timeout_seconds=self.settings.codex_timeout_seconds,
             on_notification=on_notification,
             on_server_request=on_server_request,
+            on_exit=on_exit,
         ).start()
         runtime.initialize()
         try:
@@ -562,6 +666,7 @@ class CodexHub:
                 cwd=row.get("cwd") or str(self.settings.workspace),
                 on_notification=lambda method, params: self._on_notification(conversation_id, method, params),
                 on_server_request=lambda message: self._on_server_request(conversation_id, message),
+                on_exit=lambda failed_runtime, detail: self._on_runtime_exit(conversation_id, failed_runtime, detail),
             )
             payload = {
                 "cwd": row.get("cwd") or str(self.settings.workspace),
@@ -605,6 +710,8 @@ class CodexHub:
     ) -> None:
         try:
             row = self._conversation(conversation_id)
+            if row.get("status") != "running" or int(row.get("turn_generation") or 0) != generation:
+                return
             runtime = self._ensure_runtime(row)
             if not row.get("codex_thread_id"):
                 row = self._conversation(conversation_id)
@@ -624,6 +731,13 @@ class CodexHub:
             turn = result.get("turn") or {}
             turn_id = turn.get("id")
             if turn_id:
+                current = self._conversation(conversation_id)
+                if current.get("status") != "running" or int(current.get("turn_generation") or 0) != generation:
+                    try:
+                        runtime.interrupt(row["codex_thread_id"], turn_id)
+                    except Exception:
+                        logger.warning("Failed to interrupt stale turn", exc_info=True)
+                    return
                 self.db.update_conversation(conversation_id, {"active_turn_id": turn_id})
                 self.db.append_event(
                     conversation_id,
@@ -640,7 +754,35 @@ class CodexHub:
                 except RuntimeError:
                     pass
 
-    def _mark_failed(self, conversation_id: str, message: str, generation: int | None = None) -> None:
+    def _on_runtime_exit(
+        self,
+        conversation_id: str,
+        runtime: CodexAppServer,
+        detail: str,
+    ) -> None:
+        with self._lock:
+            if self._runtimes.get(conversation_id) is runtime:
+                self._runtimes.pop(conversation_id, None)
+        try:
+            row = self._conversation(conversation_id)
+        except ConversationNotFound:
+            return
+        self._cancel_interactions(conversation_id)
+        if row.get("status") == "running":
+            self._mark_failed(
+                conversation_id,
+                f"智能中枢运行时意外退出：{detail}",
+                int(row.get("turn_generation") or 0),
+            )
+
+    def _mark_failed(self, conversation_id: str, message: str, generation: int | None = None) -> bool:
+        current = self.db.get_conversation(conversation_id)
+        if not current:
+            return False
+        if generation is not None and (
+            current.get("status") != "running" or int(current.get("turn_generation") or 0) != generation
+        ):
+            return False
         self.db.update_conversation(
             conversation_id,
             {"status": "failed", "last_error": message, "active_turn_id": None},
@@ -650,6 +792,7 @@ class CodexHub:
             "error",
             {"message": message, "turn_generation": generation},
         )
+        return True
 
     @staticmethod
     def _safe_payload(value: Any, depth: int = 0) -> Any:
@@ -710,14 +853,18 @@ class CodexHub:
         elif method == "turn/completed":
             turn = safe_params.get("turn") if isinstance(safe_params.get("turn"), dict) else {}
             status = str(turn.get("status") or "completed")
-            self.db.update_conversation(
-                conversation_id,
-                {
-                    "status": "failed" if status == "failed" else "idle",
-                    "active_turn_id": None,
-                    "last_error": (flatten_text(turn) if status == "failed" else None),
-                },
-            )
+            current = self._conversation(conversation_id)
+            completed_turn_id = str(turn.get("id") or "")
+            active_turn_id = str(current.get("active_turn_id") or "")
+            if not active_turn_id or not completed_turn_id or active_turn_id == completed_turn_id:
+                self.db.update_conversation(
+                    conversation_id,
+                    {
+                        "status": "failed" if status == "failed" else "idle",
+                        "active_turn_id": None,
+                        "last_error": (flatten_text(turn) if status == "failed" else None),
+                    },
+                )
         elif method == "error":
             message = str(
                 safe_params.get("message") or (safe_params.get("error") or {}).get("message") or "Codex runtime error"
@@ -749,7 +896,37 @@ class CodexHub:
             return self._handle_tool(conversation_id, params)
         if method in APPROVAL_METHODS:
             return self._handle_approval(conversation_id, request_id, method, params)
+        if method == "account/chatgptAuthTokens/refresh":
+            return self._refresh_auth_tokens()
+        if method == "attestation/generate":
+            raise ValueError("当前客户端不生成上游 attestation token")
         return {}
+
+    @staticmethod
+    def _refresh_auth_tokens() -> dict[str, Any]:
+        codex_home = Path(os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")).expanduser()
+        auth_path = codex_home / "auth.json"
+        if not auth_path.is_file():
+            raise ValueError("Codex 登录状态需要刷新，请重新执行 codex login")
+        try:
+            payload = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("无法读取 Codex 登录状态，请重新登录") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Codex 登录状态格式无效")
+        tokens = payload.get("tokens") if isinstance(payload.get("tokens"), dict) else payload
+        access_token = str(tokens.get("access_token") or tokens.get("accessToken") or payload.get("access_token") or "")
+        account_id = str(
+            tokens.get("account_id") or tokens.get("chatgpt_account_id") or payload.get("chatgpt_account_id") or ""
+        )
+        plan_type = tokens.get("plan_type") or tokens.get("chatgpt_plan_type") or payload.get("chatgpt_plan_type")
+        if not access_token or not account_id:
+            raise ValueError("Codex 登录状态缺少可刷新的 Token，请重新登录")
+        return {
+            "accessToken": access_token,
+            "chatgptAccountId": account_id,
+            "chatgptPlanType": plan_type,
+        }
 
     def _handle_tool(self, conversation_id: str, params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("tool") or "")

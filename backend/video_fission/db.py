@@ -283,6 +283,13 @@ class Database:
             for row in rows
         ]
 
+    def latest_event_id(self, conversation_id: str) -> int:
+        row = self.query_one(
+            "SELECT COALESCE(MAX(id), 0) AS event_id FROM events WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return int(row["event_id"]) if row else 0
+
     def list_items(self, conversation_id: str) -> list[dict[str, Any]]:
         rows = self.query(
             "SELECT * FROM items WHERE conversation_id = ? ORDER BY created_at ASC, id ASC",
@@ -581,3 +588,41 @@ class Database:
             }
             for row in rows
         ]
+
+    def recover_orphaned_runs(self, reason: str) -> list[str]:
+        now = utc_now()
+        with self.transaction() as connection:
+            rows = connection.execute("SELECT id FROM conversations WHERE status = 'running'").fetchall()
+            conversation_ids = [str(row["id"]) for row in rows]
+            connection.execute(
+                """
+                UPDATE approvals
+                SET decision = 'cancel', reason = ?, resolved_at = ?
+                WHERE decision IS NULL
+                """,
+                (reason, now),
+            )
+            connection.execute(
+                """
+                UPDATE clarifications
+                SET answers = '{}', resolved_at = ?
+                WHERE answers IS NULL
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                UPDATE conversations
+                SET status = 'failed', active_turn_id = NULL, last_error = ?, updated_at = ?
+                WHERE status = 'running'
+                """,
+                (reason, now),
+            )
+        return conversation_ids
+
+    def attachment_reference_count(self, path: str) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS count FROM items WHERE payload LIKE ?",
+            (f"%{path}%",),
+        )
+        return int(row["count"]) if row else 0

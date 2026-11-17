@@ -1,0 +1,78 @@
+const BASE = '/api'
+
+async function request(path, options = {}) {
+  const headers = new Headers(options.headers || {})
+  if (options.body && !(options.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json')
+  }
+  const response = await fetch(`${BASE}${path}`, { ...options, headers })
+  const contentType = response.headers.get('content-type') || ''
+  const data = contentType.includes('application/json')
+    ? await response.json()
+    : await response.text()
+  if (!response.ok) {
+    const message = typeof data === 'string' ? data : data.detail || data.message
+    throw new Error(message || `请求失败 (${response.status})`)
+  }
+  return data
+}
+
+const json = (method, body) => ({
+  method,
+  body: body === undefined ? undefined : JSON.stringify(body),
+})
+
+export const api = {
+  health: () => request('/health'),
+  capabilities: () => request('/capabilities'),
+  models: (refresh = false) => request(`/models${refresh ? '?refresh=true' : ''}`),
+  conversations: (includeArchived = false) =>
+    request(`/conversations?include_archived=${includeArchived}`),
+  conversation: (id) => request(`/conversations/${id}`),
+  createConversation: (payload = {}) =>
+    request('/conversations', json('POST', payload)),
+  updateConversation: (id, payload) =>
+    request(`/conversations/${id}`, json('PATCH', payload)),
+  deleteConversation: (id) =>
+    request(`/conversations/${id}`, { method: 'DELETE' }),
+  sendMessage: (id, payload) =>
+    request(`/conversations/${id}/messages`, json('POST', payload)),
+  steer: (id, payload) =>
+    request(`/conversations/${id}/steer`, json('POST', payload)),
+  interrupt: (id) =>
+    request(`/conversations/${id}/interrupt`, { method: 'POST' }),
+  compact: (id) =>
+    request(`/conversations/${id}/compact`, { method: 'POST' }),
+  fork: (id) =>
+    request(`/conversations/${id}/fork`, { method: 'POST' }),
+  archive: (id) =>
+    request(`/conversations/${id}/archive`, { method: 'POST' }),
+  unarchive: (id) =>
+    request(`/conversations/${id}/unarchive`, { method: 'POST' }),
+  sync: (id) =>
+    request(`/conversations/${id}/sync`, { method: 'POST' }),
+  decideApproval: (id, decision) =>
+    request(`/approvals/${id}/decide`, json('POST', { decision })),
+  answerClarification: (id, answers) =>
+    request(`/clarifications/${id}/answer`, json('POST', { answers })),
+  upload: (file) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request('/uploads', { method: 'POST', body })
+  },
+  skills: () => request('/skills'),
+  skill: (slug) => request(`/skills/${encodeURIComponent(slug)}`),
+  createSkill: (payload) => request('/skills', json('POST', payload)),
+  updateSkill: (slug, payload) =>
+    request(`/skills/${encodeURIComponent(slug)}`, json('PUT', payload)),
+  toggleSkill: (slug, enabled) =>
+    request(`/skills/${encodeURIComponent(slug)}/toggle`, json('POST', { enabled })),
+  deleteSkill: (slug) =>
+    request(`/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+  tools: () => request('/tools'),
+}
+
+export function eventUrl(conversationId, afterId = 0) {
+  return `${BASE}/conversations/${conversationId}/events?after_id=${afterId}`
+}
+

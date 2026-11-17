@@ -183,7 +183,7 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 验证日期：2026-11-17。
 
 - Codex CLI：`0.169.0`
-- 后端基础测试：14 passed
+- 后端基础测试：15 passed
 - 真实 Codex 集成：1 passed
 - 前端单元测试：4 passed
 - 前端生产构建：passed

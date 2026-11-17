@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from video_fission.db import Database
-from video_fission.service import CodexHub, ConversationBusy
+from video_fission.service import RUNTIME_IDLE_SECONDS, CodexHub, ConversationBusy
 from video_fission.skills import SkillManager, SkillValidationError
 from video_fission.tools import build_registry
 
@@ -320,6 +321,33 @@ def test_initialize_removes_old_unreferenced_uploads(test_settings):
         hub.initialize()
         assert not orphan.exists()
         assert not orphan_artifact.exists()
+    finally:
+        hub.shutdown()
+
+
+def test_idle_runtime_is_closed_but_running_runtime_is_kept(test_settings):
+    db = Database(test_settings.database_path)
+    skills = SkillManager(
+        test_settings.skills_dir,
+        test_settings.bundled_skills_dir,
+        test_settings.disabled_skills_dir,
+    )
+    tools = build_registry(db, test_settings.workspace, test_settings.artifacts_dir)
+    hub = CodexHub(test_settings, db, skills, tools)
+    hub.initialize()
+    idle = hub.create_conversation({})
+    running = hub.create_conversation({})
+    db.update_conversation(running["id"], {"status": "running"})
+    idle_runtime = Mock(last_activity=time.time() - RUNTIME_IDLE_SECONDS - 1)
+    running_runtime = Mock(last_activity=time.time() - RUNTIME_IDLE_SECONDS - 1)
+    hub._runtimes[idle["id"]] = idle_runtime
+    hub._runtimes[running["id"]] = running_runtime
+    try:
+        hub._close_idle_runtimes()
+        idle_runtime.close.assert_called_once()
+        running_runtime.close.assert_not_called()
+        assert idle["id"] not in hub._runtimes
+        assert running["id"] in hub._runtimes
     finally:
         hub.shutdown()
 

@@ -31,6 +31,7 @@ from .skills import SkillManager
 from .tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
+RUNTIME_IDLE_SECONDS = 30 * 60
 
 
 class ConversationNotFound(LookupError):
@@ -160,6 +161,7 @@ class CodexHub:
         }
 
     def list_conversations(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        self._close_idle_runtimes()
         return [self._public_conversation(row) for row in self.db.list_conversations(include_archived)]
 
     def _conversation(self, conversation_id: str) -> dict[str, Any]:
@@ -177,6 +179,7 @@ class CodexHub:
         }
 
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        self._close_idle_runtimes()
         row = self._conversation(conversation_id)
         latest_event_id = self.db.latest_event_id(conversation_id)
         return {
@@ -382,12 +385,32 @@ class CodexHub:
                 "status": "archived" if archived else "idle",
             },
         )
+        if archived:
+            closed_runtime = self._runtimes.pop(conversation_id, None)
+            if closed_runtime:
+                closed_runtime.close()
         self.db.append_event(
             conversation_id,
             "conversation.archived" if archived else "conversation.unarchived",
             {},
         )
         return self._public_conversation(self._conversation(conversation_id))
+
+    def _close_idle_runtimes(self) -> None:
+        now = time.time()
+        with self._lock:
+            candidates = list(self._runtimes.items())
+        for conversation_id, runtime in candidates:
+            row = self.db.get_conversation(conversation_id)
+            if not row or row.get("status") == "running":
+                continue
+            if runtime.last_activity and now - runtime.last_activity < RUNTIME_IDLE_SECONDS:
+                continue
+            with self._lock:
+                if self._runtimes.get(conversation_id) is not runtime:
+                    continue
+                self._runtimes.pop(conversation_id, None)
+            runtime.close()
 
     def delete(self, conversation_id: str) -> None:
         row = self._conversation(conversation_id)

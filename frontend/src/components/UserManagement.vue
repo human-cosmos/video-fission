@@ -176,7 +176,7 @@ onMounted(loadUsers)
   margin-top: 18px;
   background: var(--paper-bright);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 10px;
 }
 .user-panel > header {
   display: flex;
@@ -191,7 +191,7 @@ onMounted(loadUsers)
   height: 40px;
   color: var(--electric);
   background: rgba(46, 97, 243, 0.08);
-  border-radius: 12px;
+  border-radius: 9px;
 }
 .user-panel h2 {
   margin: 0;
@@ -209,7 +209,7 @@ onMounted(loadUsers)
   align-items: end;
   padding: 16px;
   background: var(--paper);
-  border-radius: 14px;
+  border-radius: 10px;
 }
 .user-create label {
   display: grid;
@@ -226,7 +226,7 @@ onMounted(loadUsers)
   color: var(--ink);
   background: var(--paper-bright);
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 8px;
   font: inherit;
 }
 .user-create .button {
@@ -253,8 +253,8 @@ onMounted(loadUsers)
   place-items: center;
   width: 32px;
   height: 32px;
-  color: #18352d;
-  background: #d7ff70;
+  color: var(--electric);
+  background: #e6eefb;
   border-radius: 10px;
   font-size: 12px;
   font-weight: 700;

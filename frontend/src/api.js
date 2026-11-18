@@ -55,8 +55,20 @@ export const api = {
   health: () => request('/health'),
   capabilities: () => request('/capabilities'),
   models: (refresh = false) => request(`/models${refresh ? '?refresh=true' : ''}`),
-  conversations: (includeArchived = false) =>
-    request(`/conversations?include_archived=${includeArchived}`),
+  conversations: ({
+    archived = false,
+    cursor = '',
+    query = '',
+    limit = 30,
+  } = {}) => {
+    const search = new URLSearchParams({
+      archived: String(Boolean(archived)),
+      limit: String(limit),
+    })
+    if (cursor) search.set('cursor', cursor)
+    if (query.trim()) search.set('q', query.trim())
+    return request(`/conversations?${search.toString()}`)
+  },
   conversation: (id) => request(`/conversations/${id}`),
   createConversation: (payload = {}) =>
     request('/conversations', json('POST', payload)),

@@ -176,7 +176,7 @@ onMounted(loadAssets)
   margin-top: 18px;
   background: var(--paper-bright);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 10px;
 }
 .assets-head {
   display: flex;
@@ -191,7 +191,7 @@ onMounted(loadAssets)
   height: 40px;
   color: var(--electric);
   background: rgba(46, 97, 243, 0.08);
-  border-radius: 12px;
+  border-radius: 9px;
 }
 .assets-head h2 {
   margin: 0;
@@ -208,7 +208,7 @@ onMounted(loadAssets)
   margin-left: auto;
   padding: 4px;
   background: var(--paper);
-  border-radius: 10px;
+  border-radius: 9px;
 }
 .assets-tabs button {
   display: flex;
@@ -220,7 +220,7 @@ onMounted(loadAssets)
   cursor: pointer;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   font: inherit;
   font-size: 10px;
 }
@@ -238,7 +238,7 @@ onMounted(loadAssets)
   padding: 12px 14px;
   color: var(--muted);
   background: var(--paper);
-  border-radius: 12px;
+  border-radius: 9px;
   font-size: 10px;
 }
 .assets-toolbar .button {
@@ -326,7 +326,7 @@ onMounted(loadAssets)
   transition: transform 150ms ease;
 }
 .global-switch input:checked + span {
-  background: var(--signal);
+  background: var(--electric);
 }
 .global-switch input:checked + span::after {
   transform: translateX(15px);

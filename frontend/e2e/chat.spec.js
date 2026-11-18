@@ -12,7 +12,10 @@ test.afterEach(async ({ request }) => {
   if (conversations.ok()) {
     const payload = await conversations.json()
     for (const conversation of payload.items || []) {
-      if (conversation.title.startsWith('这是端到端测试 VF_E2E_')) {
+      if (
+        conversation.title.startsWith('这是端到端测试 VF_E2E_') ||
+        conversation.title.startsWith('VF_E2E_LIST_')
+      ) {
         await request.delete(`/api/conversations/${conversation.id}`)
       }
     }
@@ -59,7 +62,7 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   await expect(page.getByText('create_video_brief', { exact: true }).first()).toBeVisible({
     timeout: 120_000,
   })
-  await expect(page.getByText(/data\/artifacts\/.*\.md/).last()).toBeVisible({
+  await expect(page.getByText(/artifacts[\\/].*\.md/).last()).toBeVisible({
     timeout: 120_000,
   })
 
@@ -107,7 +110,11 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
 
 test('keeps the conversation and account controls reachable on mobile', async ({
   page,
+  request,
 }, testInfo) => {
+  await request.post('/api/conversations', {
+    data: { title: '这是端到端测试 VF_E2E_MOBILE' },
+  })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
   await expect(page.locator('.app-shell')).toBeVisible()
@@ -120,6 +127,13 @@ test('keeps the conversation and account controls reachable on mobile', async ({
   await expect(page.getByTestId('sidebar-account-group')).toBeInViewport()
   await expect(page.getByRole('button', { name: '打开能力台' })).toHaveCount(0)
   await page.getByRole('button', { name: '关闭会话列表' }).click()
+  await page.getByRole('button', { name: '打开会话参数' }).click()
+  const sessionDialog = page.getByRole('dialog', { name: '会话参数' })
+  await expect(sessionDialog).toBeVisible()
+  await expect(sessionDialog.getByRole('button', { name: '模型' })).toBeVisible()
+  await expect(sessionDialog.getByRole('button', { name: '推理强度' })).toBeVisible()
+  await page.getByRole('button', { name: '关闭会话参数' }).click()
+  await expect(sessionDialog).toHaveCount(0)
   await page.waitForTimeout(300)
   await page.screenshot({
     path: testInfo.outputPath('video-fission-mobile.png'),
@@ -150,5 +164,48 @@ test('preserves an attachment uploaded before the first conversation exists', as
     timeout: 120_000,
   })
   await expect(page.getByText('attachment-note.txt', { exact: true })).toBeVisible()
+})
+
+test('creates the conversation only when the first message is sent', async ({ page, request }) => {
+  await page.goto('/')
+  await expect(page.locator('.app-shell')).toBeVisible()
+  const before = await request.get('/api/conversations?archived=false&limit=100')
+  const beforeCount = (await before.json()).items.length
+
+  await page.getByTestId('new-conversation').click()
+  await expect(page.getByTestId('message-input')).toBeVisible()
+  await page.waitForTimeout(500)
+
+  const after = await request.get('/api/conversations?archived=false&limit=100')
+  expect((await after.json()).items.length).toBe(beforeCount)
+})
+
+test('searches conversations and keeps archive navigation aligned', async ({ page, request }) => {
+  const marker = `VF_E2E_LIST_${Date.now()}`
+  const active = await request.post('/api/conversations', {
+    data: { title: `${marker}_ACTIVE` },
+  })
+  const archived = await request.post('/api/conversations', {
+    data: { title: `${marker}_ARCHIVED` },
+  })
+  const activeId = (await active.json()).id
+  const archivedId = (await archived.json()).id
+  await request.post(`/api/conversations/${archivedId}/archive`)
+
+  await page.goto('/')
+  const search = page.getByRole('searchbox', { name: '搜索对话' })
+  await search.fill(`${marker}_ACTIVE`)
+  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ACTIVE` })).toBeVisible()
+  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` })).toHaveCount(0)
+
+  await search.fill('')
+  await page.getByRole('button', { name: '查看归档' }).click()
+  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` })).toBeVisible()
+  await page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` }).click()
+
+  await page.getByRole('button', { name: '返回最近对话' }).click()
+  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ACTIVE` })).toBeVisible()
+  await request.delete(`/api/conversations/${activeId}`)
+  await request.delete(`/api/conversations/${archivedId}`)
 })
 

@@ -132,14 +132,23 @@ def models(refresh: bool = False) -> dict[str, Any]:
 @router.get("/conversations")
 def conversations(
     include_archived: bool = False,
+    archived: bool | None = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=512),
+    q: str | None = Query(default=None, max_length=120),
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return {
-        "items": container.hub.list_conversations(
+    try:
+        return container.hub.list_conversations(
             include_archived=include_archived,
             user_id=owner_id(current_user),
+            archived=archived,
+            limit=limit,
+            cursor=cursor,
+            query=q,
         )
-    }
+    except Exception as exc:
+        _error(exc)
 
 
 @router.post("/conversations", status_code=201)

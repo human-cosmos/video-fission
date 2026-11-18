@@ -6,6 +6,7 @@ import {
   Clapperboard,
   Menu,
   Paperclip,
+  SlidersHorizontal,
   Square,
   X,
   Zap,
@@ -16,7 +17,12 @@ import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
-import { isRefreshEvent } from './utils/events'
+import {
+  isConversationListEvent,
+  isProductionRefreshEvent,
+  isRefreshEvent,
+  mergeConversationSummaries,
+} from './utils/events'
 import {
   MAX_PRODUCTION_UPLOAD_BYTES,
   POLICY_MODES,
@@ -48,15 +54,29 @@ const rerunning = ref(false)
 const cancelling = ref(false)
 const videoInput = ref(null)
 const showArchived = ref(false)
+const conversationQuery = ref('')
+const nextConversationCursor = ref('')
+const hasMoreConversations = ref(false)
+const loadingMoreConversations = ref(false)
 const mobileSidebar = ref(false)
+const mobileSessionOpen = ref(false)
 const toast = ref('')
 const streamConnected = ref(false)
 const timeline = ref(null)
 const composerInput = ref(null)
 let eventSource = null
-let refreshTimer = null
-let refreshInFlight = false
-let refreshQueued = false
+let transcriptRefreshTimer = null
+let transcriptRefreshInFlight = false
+let transcriptRefreshQueued = false
+let listRefreshTimer = null
+let listRefreshInFlight = false
+let listRefreshQueued = false
+let productionRefreshTimer = null
+let productionRefreshInFlight = false
+let productionRefreshQueued = false
+let conversationListSequence = 0
+let conversationSearchTimer = null
+let conversationPollTimer = null
 let selectionSequence = 0
 let uploadGeneration = 0
 let toastTimer = null
@@ -66,8 +86,12 @@ let navigationPromise = null
 
 const MODE_STORAGE_KEY = 'video-fission.workspaceMode'
 const MODE_IDS = WORKSPACE_MODES.map((item) => item.id)
+const CONVERSATION_PAGE_SIZE = 30
+const CONVERSATION_POLL_MS = 15_000
 
 function storedWorkspaceMode() {
+  const hashMode = window.location.hash.replace(/^#/, '')
+  if (MODE_IDS.includes(hashMode)) return hashMode
   const stored = window.localStorage.getItem(MODE_STORAGE_KEY)
   return MODE_IDS.includes(stored) ? stored : 'chat'
 }
@@ -77,17 +101,24 @@ const isChatMode = computed(() => workspaceMode.value === 'chat')
 
 watch(workspaceMode, (mode) => {
   window.localStorage.setItem(MODE_STORAGE_KEY, mode)
+  const baseUrl = `${window.location.pathname}${window.location.search}`
+  window.history.replaceState(
+    {},
+    '',
+    mode === 'settings' ? `${baseUrl}#settings` : baseUrl,
+  )
   if (mode !== 'chat') {
     mobileSidebar.value = false
+    mobileSessionOpen.value = false
   }
 })
 
 let sidebarResizeStartX = 0
 let sidebarResizeStartWidth = 0
 
-const SIDEBAR_MIN_WIDTH = 240
+const SIDEBAR_MIN_WIDTH = 232
 const SIDEBAR_MAX_WIDTH = 420
-const SIDEBAR_DEFAULT_WIDTH = 278
+const SIDEBAR_DEFAULT_WIDTH = 260
 const SIDEBAR_COLLAPSED_WIDTH = 68
 
 function clampSidebarWidth(value) {
@@ -217,8 +248,15 @@ async function runBootstrap() {
   try {
     const modelPayload = await api.models().catch(() => ({ items: [] }))
     models.value = modelPayload.items || []
-    await Promise.all([loadConversations(), loadProductions()])
-    if (conversations.value.length && !currentConversation.value) {
+    await Promise.all([
+      loadConversations({ reset: true }),
+      loadProductions(),
+    ])
+    if (
+      workspaceMode.value === 'chat' &&
+      visibleConversations.value.length &&
+      !currentConversation.value
+    ) {
       const savedId = window.localStorage.getItem('video-fission.activeConversation')
       const savedExists = conversations.value.some((item) => item.id === savedId)
       await selectConversation(
@@ -226,6 +264,13 @@ async function runBootstrap() {
           conversations.value.find((item) => !item.is_archived)?.id ||
           conversations.value[0].id,
       )
+    } else if (workspaceMode.value === 'chat' && !visibleConversations.value.length) {
+      const archived = await api.conversations({ archived: true, limit: 1 })
+      if (archived.items?.length) {
+        showArchived.value = true
+        await loadConversations({ reset: true })
+        await selectConversation(visibleConversations.value[0].id)
+      }
     }
   } catch (error) {
     setBootError(error)
@@ -234,13 +279,50 @@ async function runBootstrap() {
   }
 }
 
-async function loadConversations() {
-  listLoading.value = true
+function appendConversationPage(existing, incoming) {
+  const seen = new Set(existing.map((item) => item.id))
+  return [...existing, ...incoming.filter((item) => !seen.has(item.id))]
+}
+
+async function loadConversations({
+  reset = false,
+  merge = false,
+  silent = false,
+} = {}) {
+  const cursor = reset || merge ? '' : nextConversationCursor.value
+  if (!reset && !merge && !cursor) return
+  const sequence = ++conversationListSequence
+  if (!silent) {
+    if (reset) listLoading.value = true
+    else loadingMoreConversations.value = true
+  }
   try {
-    const payload = await api.conversations(true)
-    conversations.value = payload.items || []
+    const payload = await api.conversations({
+      archived: showArchived.value,
+      cursor,
+      query: conversationQuery.value,
+      limit: CONVERSATION_PAGE_SIZE,
+    })
+    if (sequence !== conversationListSequence) return
+    const items = payload.items || []
+    if (reset) {
+      conversations.value = items
+    } else if (merge) {
+      conversations.value = mergeConversationSummaries(conversations.value, items)
+    } else {
+      conversations.value = appendConversationPage(conversations.value, items)
+    }
+    if (reset || (merge && conversations.value.length <= CONVERSATION_PAGE_SIZE) || cursor) {
+      nextConversationCursor.value = payload.next_cursor || ''
+      hasMoreConversations.value = Boolean(payload.next_cursor)
+    }
   } finally {
-    listLoading.value = false
+    if (sequence === conversationListSequence) {
+      if (!silent) {
+        listLoading.value = false
+        loadingMoreConversations.value = false
+      }
+    }
   }
 }
 
@@ -283,46 +365,89 @@ function connectStream(conversationId, afterId = 0) {
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      if (!isRefreshEvent(data.kind) && !isRefreshEvent(data.type)) return
-      scheduleRefresh(conversationId)
+      const kind = data.kind || data.type
+      if (isRefreshEvent(kind)) scheduleTranscriptRefresh(conversationId)
+      if (isConversationListEvent(kind)) scheduleListRefresh()
+      if (isProductionRefreshEvent(kind)) scheduleProductionRefresh()
     } catch {
       // Ignore malformed stream payloads; EventSource will continue.
     }
   }
 }
 
-function scheduleRefresh(conversationId) {
-  refreshQueued = true
-  if (refreshTimer) return
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null
-    flushScheduledRefresh(conversationId)
+function scheduleTranscriptRefresh(conversationId) {
+  transcriptRefreshQueued = true
+  if (transcriptRefreshTimer) return
+  transcriptRefreshTimer = setTimeout(() => {
+    transcriptRefreshTimer = null
+    flushScheduledTranscriptRefresh(conversationId)
   }, 140)
 }
 
-async function flushScheduledRefresh(conversationId) {
+async function flushScheduledTranscriptRefresh(conversationId) {
   if (currentConversation.value?.id !== conversationId) {
-    refreshQueued = false
+    transcriptRefreshQueued = false
     return
   }
-  if (refreshInFlight) return
-  refreshInFlight = true
-  refreshQueued = false
+  if (transcriptRefreshInFlight) return
+  transcriptRefreshInFlight = true
+  transcriptRefreshQueued = false
   try {
-    const [detail, list] = await Promise.all([
-      api.conversation(conversationId),
-      api.conversations(true),
-      loadProductions(),
-    ])
+    const detail = await api.conversation(conversationId)
     if (currentConversation.value?.id !== conversationId) return
     currentConversation.value = detail
-    conversations.value = list.items || []
   } catch {
     // Keep the current transcript visible during transient stream reconnects.
   } finally {
-    refreshInFlight = false
-    if (refreshQueued && currentConversation.value?.id === conversationId) {
-      scheduleRefresh(conversationId)
+    transcriptRefreshInFlight = false
+    if (transcriptRefreshQueued && currentConversation.value?.id === conversationId) {
+      scheduleTranscriptRefresh(conversationId)
+    }
+  }
+}
+
+function scheduleListRefresh() {
+  listRefreshQueued = true
+  if (listRefreshTimer) return
+  listRefreshTimer = setTimeout(() => {
+    listRefreshTimer = null
+    flushScheduledListRefresh()
+  }, 180)
+}
+
+async function flushScheduledListRefresh() {
+  if (listRefreshInFlight) return
+  listRefreshInFlight = true
+  listRefreshQueued = false
+  try {
+    await loadConversations({ merge: true, silent: true })
+  } catch {
+    // Keep the current list visible while the stream reconnects.
+  } finally {
+    listRefreshInFlight = false
+    if (listRefreshQueued) scheduleListRefresh()
+  }
+}
+
+function scheduleProductionRefresh() {
+  productionRefreshQueued = true
+  if (productionRefreshTimer) return
+  productionRefreshTimer = setTimeout(() => {
+    productionRefreshTimer = null
+    flushScheduledProductionRefresh()
+  }, 180)
+}
+
+async function flushScheduledProductionRefresh() {
+  if (productionRefreshInFlight) return
+  productionRefreshInFlight = true
+  productionRefreshQueued = false
+  try {
+    await loadProductions()
+  } finally {
+    productionRefreshInFlight = false
+    if (productionRefreshQueued) {
+      scheduleProductionRefresh()
     }
   }
 }
@@ -340,6 +465,7 @@ async function selectConversation(id) {
 
 async function selectConversationTask(id) {
   workspaceMode.value = 'chat'
+  mobileSessionOpen.value = false
   const sequence = ++selectionSequence
   closeStream()
   try {
@@ -353,7 +479,6 @@ async function selectConversationTask(id) {
     clearAttachments()
     mobileSidebar.value = false
     connectStream(id, detail.latest_event_id || 0)
-    await loadConversations()
     await nextTick()
     timeline.value?.scrollToBottom('instant')
   } catch (error) {
@@ -364,22 +489,46 @@ async function selectConversationTask(id) {
 function openSettings() {
   workspaceMode.value = 'settings'
   mobileSidebar.value = false
+  mobileSessionOpen.value = false
+}
+
+function openMobileSession() {
+  mobileSidebar.value = false
+  mobileSessionOpen.value = true
+}
+
+function startDraftConversation() {
+  selectionSequence += 1
+  workspaceMode.value = 'chat'
+  closeStream()
+  currentConversation.value = null
+  titleBeforeEdit = ''
+  window.localStorage.removeItem('video-fission.activeConversation')
+  uploadGeneration += 1
+  uploading.value = false
+  clearAttachments()
+  mobileSidebar.value = false
+  mobileSessionOpen.value = false
+  nextTick(() => composerInput.value?.focus())
 }
 
 async function newConversation() {
   await waitForAppReady()
-  const operation = createConversationTask()
-  navigationPromise = operation
-  try {
-    return await operation
-  } finally {
-    if (navigationPromise === operation) navigationPromise = null
+  if (showArchived.value) {
+    showArchived.value = false
+    conversationQuery.value = ''
+    await loadConversations({ reset: true })
   }
+  startDraftConversation()
 }
 
 async function createConversationTask() {
   workspaceMode.value = 'chat'
   try {
+    if (showArchived.value) {
+      showArchived.value = false
+      conversationQuery.value = ''
+    }
     const model = currentConversation.value?.model || models.value[0]?.id || null
     const effort =
       models.value.find((item) => item.id === model)?.default_reasoning_effort || 'high'
@@ -387,13 +536,19 @@ async function createConversationTask() {
       model,
       reasoning_effort: effort,
     })
-    conversations.value.unshift(created)
+    conversations.value.unshift({
+      ...created,
+      list_state: 'empty',
+      has_warnings: false,
+    })
     await selectConversation(created.id)
     mobileSidebar.value = false
     await nextTick()
     composerInput.value?.focus()
+    return currentConversation.value
   } catch (error) {
     notify(error.message)
+    return null
   }
 }
 
@@ -448,6 +603,52 @@ function resetSidebarWidth() {
   window.localStorage.setItem('video-fission.sidebarWidth', String(SIDEBAR_DEFAULT_WIDTH))
 }
 
+function handleConversationSearch(value) {
+  conversationQuery.value = value
+  clearTimeout(conversationSearchTimer)
+  conversationSearchTimer = setTimeout(() => {
+    conversationSearchTimer = null
+    loadConversations({ reset: true, silent: true }).catch(() => {})
+  }, 250)
+}
+
+async function loadMoreConversations() {
+  try {
+    await loadConversations()
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+async function alignCurrentConversationWithView() {
+  const currentId = currentConversation.value?.id
+  if (currentId && visibleConversations.value.some((item) => item.id === currentId)) {
+    return
+  }
+  const next = visibleConversations.value[0]
+  if (next) {
+    await selectConversation(next.id)
+    return
+  }
+  startDraftConversation()
+}
+
+async function toggleArchivedView() {
+  showArchived.value = !showArchived.value
+  conversationQuery.value = ''
+  await loadConversations({ reset: true })
+  await alignCurrentConversationWithView()
+}
+
+async function pollConversations() {
+  if (document.hidden || bootstrapPromise || navigationPromise) return
+  await loadConversations({ merge: true, silent: true }).catch(() => {})
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden) pollConversations()
+}
+
 async function refreshCurrent() {
   if (!currentConversation.value?.id) return
   const id = currentConversation.value.id
@@ -455,7 +656,6 @@ async function refreshCurrent() {
     const detail = await api.conversation(id)
     if (currentConversation.value?.id !== id) return
     currentConversation.value = detail
-    await loadConversations()
   } catch (error) {
     notify(error.message)
   }
@@ -470,7 +670,7 @@ async function saveTitle() {
     if (currentConversation.value?.id !== conversationId) return
     currentConversation.value = { ...currentConversation.value, ...updated }
     titleBeforeEdit = updated.title
-    await loadConversations()
+    await loadConversations({ merge: true, silent: true })
   } catch (error) {
     notify(error.message)
   }
@@ -582,7 +782,7 @@ async function send() {
   try {
     let conversation = currentConversation.value
     if (!conversation?.id) {
-      await newConversation()
+      await createConversationTask()
       conversation = currentConversation.value
     }
     if (!conversation?.id) return
@@ -605,7 +805,10 @@ async function send() {
     composer.value = ''
     clearAttachments()
     await refreshCurrent()
-    await loadProductions()
+    await Promise.all([
+      loadConversations({ merge: true, silent: true }),
+      loadProductions(),
+    ])
     timeline.value?.scrollToBottom()
   } catch (error) {
     notify(error.message)
@@ -701,7 +904,7 @@ async function bindUnboundProduction(productionId) {
   try {
     let conversation = currentConversation.value
     if (!conversation?.id) {
-      await newConversation()
+      await createConversationTask()
       conversation = currentConversation.value
     }
     if (!conversation?.id) return
@@ -724,7 +927,8 @@ async function archiveConversation(id) {
         archived_at: new Date().toISOString(),
       }
     }
-    await loadConversations()
+    await loadConversations({ reset: true })
+    await alignCurrentConversationWithView()
     notify('对话已归档')
   } catch (error) {
     notify(error.message)
@@ -741,7 +945,8 @@ async function unarchiveConversation(id) {
         archived_at: null,
       }
     }
-    await loadConversations()
+    await loadConversations({ reset: true })
+    await alignCurrentConversationWithView()
     notify('已取消归档')
   } catch (error) {
     notify(error.message)
@@ -772,6 +977,7 @@ function insertLineBreak(event) {
 function handleShortcut(event) {
   if (event.key === 'Escape') {
     mobileSidebar.value = false
+    mobileSessionOpen.value = false
     return
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
@@ -780,22 +986,27 @@ function handleShortcut(event) {
   }
 }
 
-watch(showArchived, async () => {
-  await loadConversations()
-})
-
 onMounted(() => {
   bootstrap()
   window.addEventListener('keydown', handleShortcut)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  conversationPollTimer = setInterval(pollConversations, CONVERSATION_POLL_MS)
 })
 
 onBeforeUnmount(() => {
   closeStream()
-  clearTimeout(refreshTimer)
-  refreshQueued = false
+  clearTimeout(transcriptRefreshTimer)
+  clearTimeout(listRefreshTimer)
+  clearTimeout(productionRefreshTimer)
+  clearTimeout(conversationSearchTimer)
+  clearInterval(conversationPollTimer)
+  transcriptRefreshQueued = false
+  listRefreshQueued = false
+  productionRefreshQueued = false
   clearTimeout(toastTimer)
   stopSidebarResize()
   window.removeEventListener('keydown', handleShortcut)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
@@ -821,11 +1032,16 @@ onBeforeUnmount(() => {
       :production-badges="productionBadges"
       :unbound-productions="unboundProductions"
       :settings-active="workspaceMode === 'settings'"
+      :query="conversationQuery"
+      :has-more="hasMoreConversations"
+      :loading-more="loadingMoreConversations"
       @new="newConversation"
       @select="selectConversation"
       @archive="archiveConversation"
       @unarchive="unarchiveConversation"
-      @toggle-archived="showArchived = !showArchived"
+      @toggle-archived="toggleArchivedView"
+      @search="handleConversationSearch"
+      @load-more="loadMoreConversations"
       @close-mobile="mobileSidebar = false"
       @toggle-collapse="toggleSidebar"
       @resize-start="startSidebarResize"
@@ -869,7 +1085,7 @@ onBeforeUnmount(() => {
           <template v-else>
             <h1>系统设置</h1>
             <div class="conversation-meta">
-              <span class="page-subtitle">账号、模型、Skill 与 Tool</span>
+              <span class="page-subtitle">账号、Skill 与 Tool</span>
             </div>
           </template>
         </div>
@@ -900,6 +1116,16 @@ onBeforeUnmount(() => {
             </template>
           </TopbarSelect>
 
+          <button
+            v-if="isChatMode && currentConversation"
+            class="icon-button mobile-only mobile-session-toggle"
+            aria-label="打开会话参数"
+            aria-controls="mobile-session-sheet"
+            :aria-expanded="mobileSessionOpen"
+            @click="openMobileSession"
+          >
+            <SlidersHorizontal :size="18" />
+          </button>
         </div>
       </header>
 
@@ -1068,6 +1294,59 @@ onBeforeUnmount(() => {
         @notify="notify"
       />
     </main>
+
+    <Transition name="session-sheet">
+      <div
+        v-if="isChatMode && currentConversation && mobileSessionOpen"
+        class="mobile-session-backdrop"
+        @click.self="mobileSessionOpen = false"
+      >
+        <section
+          class="mobile-session-sheet"
+          id="mobile-session-sheet"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mobile-session-title"
+        >
+          <header>
+            <div>
+              <span>SESSION</span>
+              <h2 id="mobile-session-title">会话参数</h2>
+            </div>
+            <button
+              class="icon-button compact"
+              aria-label="关闭会话参数"
+              @click="mobileSessionOpen = false"
+            >
+              <X :size="17" />
+            </button>
+          </header>
+          <p>模型和推理强度从下一条消息起生效。</p>
+          <div class="mobile-session-fields">
+            <TopbarSelect
+              v-model="currentConversation.model"
+              caption="模型"
+              aria-label="模型"
+              :options="modelOptions"
+              @change="updateModel"
+            >
+              <template #icon><span class="control-prefix">M</span></template>
+            </TopbarSelect>
+            <TopbarSelect
+              v-model="currentConversation.reasoning_effort"
+              caption="推理强度"
+              aria-label="推理强度"
+              :options="effortOptions"
+              @change="updateEffort"
+            >
+              <template #icon>
+                <span class="control-prefix"><Zap :size="13" /></span>
+              </template>
+            </TopbarSelect>
+          </div>
+        </section>
+      </div>
+    </Transition>
 
     <Transition name="toast">
       <div v-if="toast" class="toast-message" role="status">

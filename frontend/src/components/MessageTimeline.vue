@@ -1,7 +1,7 @@
 <script setup>
 import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from '@lucide/vue'
-import { nextTick, reactive, ref, watch } from 'vue'
-import { itemLabel, payloadText, toolCallName } from '../utils/events'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { groupExecutionItems, itemLabel, payloadText, toolCallName } from '../utils/events'
 import { isVideoFile } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { mediaUrl } from '../utils/productionMedia'
@@ -29,6 +29,7 @@ const emit = defineEmits([
 ])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
+const displayItems = computed(() => groupExecutionItems(props.conversation?.items || []))
 
 function scrollToBottom(behavior = 'smooth') {
   nextTick(() => {
@@ -89,7 +90,24 @@ function cardPayload(item) {
 
 function structuredText(item) {
   const payload = item.payload || {}
-  return payload.output || payload.patch || payload.text || ''
+  const value = payload.output || payload.patch || payload.text || ''
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+}
+
+function traceStatusText(item) {
+  if (item.status === 'inProgress') return '进行中'
+  if (item.status === 'failed') return '有失败'
+  return '已完成'
+}
+
+function executionNames(item) {
+  return [...new Set(item.items.map((step) => toolCallName(step)).filter(Boolean))]
+}
+
+function stepStatusText(status) {
+  if (status === 'inProgress') return '进行中'
+  if (status === 'failed') return '失败'
+  return '完成'
 }
 
 watch(
@@ -125,7 +143,7 @@ defineExpose({ scrollToBottom })
 
     <div v-else class="transcript" data-testid="message-timeline">
       <article
-        v-for="(item, index) in conversation.items"
+        v-for="(item, index) in displayItems"
         :key="item.id"
         class="message"
         :class="[
@@ -186,6 +204,42 @@ defineExpose({ scrollToBottom })
             <div class="markdown-body" v-html="renderMarkdown(payloadText(item))"></div>
             <span v-if="item.status === 'inProgress'" class="typing-caret"></span>
           </div>
+        </template>
+
+        <template v-else-if="item.item_type === 'executionGroup'">
+          <details
+            class="execution-group"
+            data-testid="execution-group"
+            :open="item.status === 'inProgress'"
+          >
+            <summary>
+              <ChevronRight :size="14" />
+              <span>执行轨迹</span>
+              <span class="execution-names">
+                <code v-for="name in executionNames(item)" :key="name">{{ name }}</code>
+              </span>
+              <small>{{ item.items.length }} 步 · {{ traceStatusText(item) }}</small>
+            </summary>
+            <div class="execution-steps">
+              <details
+                v-for="step in item.items"
+                :key="step.id"
+                class="execution-step"
+                :class="{ 'has-error': step.status === 'failed' }"
+                :open="step.status === 'inProgress'"
+              >
+                <summary>
+                  <Terminal v-if="step.item_type === 'commandExecution'" :size="13" />
+                  <Wrench v-else :size="13" />
+                  <span>{{ itemLabel(step.item_type) }}</span>
+                  <code>{{ toolCallName(step) }}</code>
+                  <small>{{ stepStatusText(step.status) }}</small>
+                </summary>
+                <pre v-if="structuredText(step)">{{ structuredText(step) }}</pre>
+                <p v-else-if="step.item_type === 'reasoning'">{{ payloadText(step) }}</p>
+              </details>
+            </div>
+          </details>
         </template>
 
         <template v-else-if="item.item_type === 'reasoning'">

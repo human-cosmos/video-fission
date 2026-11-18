@@ -169,12 +169,28 @@ class CodexHub:
         self,
         include_archived: bool = False,
         user_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+        *,
+        archived: bool | None = None,
+        limit: int = 30,
+        cursor: str | None = None,
+        query: str | None = None,
+    ) -> dict[str, Any]:
         self._close_idle_runtimes()
-        return [
-            self._public_conversation(row)
-            for row in self.db.list_conversations(include_archived, user_id=user_id)
-        ]
+        page = self.db.list_conversations(
+            include_archived,
+            user_id=user_id,
+            archived=archived,
+            limit=limit,
+            cursor=cursor,
+            query=query,
+        )
+        return {
+            "items": [
+                self._public_conversation_summary(row)
+                for row in page["items"]
+            ],
+            "next_cursor": page["next_cursor"],
+        }
 
     def _conversation(self, conversation_id: str, user_id: str | None = None) -> dict[str, Any]:
         row = self.db.get_conversation(conversation_id, user_id)
@@ -187,6 +203,24 @@ class CodexHub:
         row = {key: value for key, value in row.items() if key != "user_id"}
         return {
             **row,
+            "is_running": row.get("status") == "running",
+            "is_archived": bool(row.get("archived_at")),
+        }
+
+    @staticmethod
+    def _public_conversation_summary(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "model": row.get("model"),
+            "reasoning_effort": row.get("reasoning_effort"),
+            "last_error": row.get("last_error"),
+            "archived_at": row.get("archived_at"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "list_state": row.get("list_state") or "empty",
+            "has_warnings": bool(row.get("has_warnings")),
             "is_running": row.get("status") == "running",
             "is_archived": bool(row.get("archived_at")),
         }
@@ -298,10 +332,23 @@ class CodexHub:
         self.db.append_event(conversation_id, "item.local", item)
         return item
 
+    @staticmethod
+    def _fallback_title(text: str, files: list[dict[str, Any]]) -> str:
+        candidate = next(
+            (line.strip() for line in text.splitlines() if line.strip()),
+            "",
+        )
+        if not candidate and files:
+            candidate = Path(str(files[0].get("name") or "附件")).stem
+        candidate = " ".join(candidate.split())
+        if not candidate:
+            return "新对话"
+        return f"{candidate[:47]}…" if len(candidate) > 48 else candidate
+
     def _maybe_retitle(self, row: dict[str, Any], conversation_id: str, text: str, files: list[dict[str, Any]]) -> None:
         if row.get("title") not in {None, "", "新对话"}:
             return
-        title = (text or Path(str((files[0] if files else {}).get("name", "附件"))).stem)[:36]
+        title = self._fallback_title(text, files)
         self.db.update_conversation(conversation_id, {"title": title})
 
     def _start_production_from_message(
@@ -451,7 +498,7 @@ class CodexHub:
                 "last_error": None,
             }
             if row.get("title") in {None, "", "新对话"}:
-                updates["title"] = (text or Path(str(files[0].get("name", "附件"))).stem)[:36]
+                updates["title"] = self._fallback_title(text, files)
             self.db.update_conversation(conversation_id, updates)
             thread = threading.Thread(
                 target=self._run_turn,

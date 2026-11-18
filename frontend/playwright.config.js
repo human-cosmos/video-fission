@@ -21,15 +21,14 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command:
-        'node ../frontend/e2e/reset-e2e-data.js && VF_AUTH_REQUIRED=false VF_DATA_DIR=../.e2e-data ../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8001',
-      cwd: '../backend',
+      command: 'node e2e/start-e2e-backend.js',
+      cwd: '.',
       url: 'http://127.0.0.1:8001/api/health',
       reuseExistingServer: false,
       timeout: 30_000,
     },
     {
-      command: 'VITE_API_TARGET=http://127.0.0.1:8001 npx vite --host 127.0.0.1 --port 5175',
+      command: 'node e2e/start-e2e-frontend.js',
       cwd: '.',
       url: 'http://127.0.0.1:5175',
       reuseExistingServer: false,

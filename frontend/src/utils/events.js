@@ -23,6 +23,15 @@ const TYPE_LABELS = {
   video_output: '成片',
 }
 
+const TRACE_ITEM_TYPES = new Set([
+  'reasoning',
+  'commandExecution',
+  'dynamicToolCall',
+  'mcpToolCall',
+  'webSearch',
+  'fileChange',
+])
+
 export function itemLabel(itemType) {
   return TYPE_LABELS[itemType] || itemType || '运行事件'
 }
@@ -50,14 +59,89 @@ export function toolCallName(item) {
   )
 }
 
+export function groupExecutionItems(items = []) {
+  const rows = []
+  let traceItems = []
+
+  function flushTraceItems() {
+    if (!traceItems.length) return
+    if (traceItems.length === 1) {
+      rows.push(traceItems[0])
+    } else {
+      const first = traceItems[0]
+      const last = traceItems[traceItems.length - 1]
+      rows.push({
+        id: `execution-group-${first.id}-${last.id}`,
+        item_type: 'executionGroup',
+        status: traceItems.some((item) => item.status === 'inProgress')
+          ? 'inProgress'
+          : traceItems.some((item) => item.status === 'failed')
+            ? 'failed'
+            : 'completed',
+        items: traceItems,
+      })
+    }
+    traceItems = []
+  }
+
+  for (const item of items) {
+    if (TRACE_ITEM_TYPES.has(item.item_type)) {
+      traceItems.push(item)
+    } else {
+      flushTraceItems()
+      rows.push(item)
+    }
+  }
+  flushTraceItems()
+  return rows
+}
+
 export function eventTouchesConversation(data) {
   return Boolean(data?.kind || data?.payload)
 }
 
 export function isRefreshEvent(kind) {
-  return /^(item\.|item_upserted|production_updated|production\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
+  return /^(item\.|item_upserted|production_updated|production\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|thread\.name\.updated|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
     String(kind || ''),
   )
+}
+
+export function isConversationListEvent(kind) {
+  return /^(item\.completed|item_upserted|item\.local|tool\.completed|turn\.|conversation\.|thread\.name\.updated|error$)/.test(
+    String(kind || ''),
+  )
+}
+
+export function isProductionRefreshEvent(kind) {
+  return /^(production_updated|production\.)/.test(String(kind || ''))
+}
+
+export function conversationStateLabel(conversation) {
+  const state =
+    conversation?.list_state ||
+    (conversation?.is_running
+      ? 'running'
+      : conversation?.last_error
+        ? 'failed'
+        : conversation?.has_warnings
+          ? 'warning'
+          : 'completed')
+  return {
+    running: '运行中',
+    failed: '执行失败',
+    warning: '工具警告',
+    completed: '已完成',
+    empty: '草稿',
+  }[state] || '已完成'
+}
+
+export function mergeConversationSummaries(existing = [], incoming = []) {
+  const existingById = new Map(existing.map((item) => [item.id, item]))
+  const incomingIds = new Set(incoming.map((item) => item.id))
+  return [
+    ...incoming.map((item) => ({ ...existingById.get(item.id), ...item })),
+    ...existing.filter((item) => !incomingIds.has(item.id)),
+  ]
 }
 
 export function compactTitle(value, fallback = '新对话') {

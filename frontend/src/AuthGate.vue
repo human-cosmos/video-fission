@@ -108,16 +108,16 @@ onBeforeUnmount(() => {
   display: grid;
   place-content: center;
   gap: 16px;
-  color: #93a99e;
-  background: #07130f;
+  color: #667085;
+  background: #f5f7fb;
   text-align: center;
 }
 .auth-boot span {
   width: 34px;
   height: 34px;
   margin: auto;
-  border: 2px solid rgba(215, 255, 112, 0.2);
-  border-top-color: #d7ff70;
+  border: 2px solid #dce4ee;
+  border-top-color: #2563eb;
   border-radius: 999px;
   animation: auth-spin 0.8s linear infinite;
 }

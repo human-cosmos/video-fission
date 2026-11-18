@@ -27,6 +27,8 @@ test("settings entry lives in the sidebar, not the top bar", async ({ page }) =>
   await expect(page.getByText("配音 TTS", { exact: true })).toHaveCount(0)
   await expect(page.getByTestId("settings-understand")).toBeVisible()
   await expect(page.getByTestId("settings-understand-observe")).toBeVisible()
+  await expect(page.getByTestId("save-settings")).toBeDisabled()
+  await expect(page.getByText("设置已同步", { exact: true })).toBeVisible()
   await page.getByTestId("sidebar-user-menu").click()
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible()
   await page.getByTestId("new-conversation").click()

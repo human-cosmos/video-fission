@@ -15,7 +15,11 @@ import {
   X,
 } from '@lucide/vue'
 import { computed, ref } from 'vue'
-import { compactTitle, formatRelativeTime } from '../utils/events'
+import {
+  compactTitle,
+  conversationStateLabel,
+  formatRelativeTime,
+} from '../utils/events'
 import BrandLockup from './BrandLockup.vue'
 
 const props = defineProps({
@@ -30,6 +34,9 @@ const props = defineProps({
   productionBadges: { type: Object, default: () => ({}) },
   unboundProductions: { type: Array, default: () => [] },
   settingsActive: { type: Boolean, default: false },
+  query: { type: String, default: '' },
+  hasMore: { type: Boolean, default: false },
+  loadingMore: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -46,18 +53,12 @@ const emit = defineEmits([
   'bind-unbound',
   'open-settings',
   'logout',
+  'search',
+  'load-more',
 ])
 
-const query = ref('')
 const unboundOpen = ref(true)
 const accountMenu = ref(null)
-const filtered = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  if (!needle) return props.conversations
-  return props.conversations.filter((item) =>
-    `${item.title} ${item.last_error || ''}`.toLowerCase().includes(needle),
-  )
-})
 const accountName = computed(
   () => props.currentUser.display_name || props.currentUser.username || '用户',
 )
@@ -115,21 +116,31 @@ function logout() {
 
     <label class="conversation-search">
       <Search :size="15" />
-      <input v-model="query" type="search" placeholder="搜索对话" aria-label="搜索对话" />
+      <input
+        :value="query"
+        type="search"
+        placeholder="搜索对话"
+        aria-label="搜索对话"
+        @input="$emit('search', $event.target.value)"
+      />
     </label>
 
     <div class="sidebar-section-label">
       <span>{{ showArchived ? '归档对话' : '最近对话' }}</span>
       <LoaderCircle v-if="loading" class="spin" :size="14" />
-      <span v-else>{{ filtered.length }}</span>
+      <span v-else>{{ conversations.length }}</span>
     </div>
 
     <nav class="conversation-list" aria-label="对话列表">
       <button
-        v-for="conversation in filtered"
+        v-for="conversation in conversations"
         :key="conversation.id"
         class="conversation-row"
-        :class="{ active: conversation.id === currentId }"
+        :class="{
+          active: conversation.id === currentId,
+          warning: conversation.list_state === 'warning',
+          failed: conversation.list_state === 'failed',
+        }"
         data-testid="conversation-item"
         @click="$emit('select', conversation.id)"
       >
@@ -139,9 +150,14 @@ function logout() {
         </span>
         <span class="conversation-copy">
           <strong>{{ compactTitle(conversation.title) }}</strong>
-          <small>
+          <small :title="conversation.last_error || ''">
+            <span
+              class="conversation-list-state"
+              :class="`is-${conversation.list_state || 'completed'}`"
+              data-testid="conversation-list-state"
+            >{{ conversationStateLabel(conversation) }}</span>
+            <span aria-hidden="true">·</span>
             {{ formatRelativeTime(conversation.updated_at) }}
-            <template v-if="conversation.last_error"> · 有错误</template>
           </small>
           <em
             v-if="productionBadges[conversation.id]"
@@ -166,7 +182,18 @@ function logout() {
         </span>
       </button>
 
-      <div v-if="!filtered.length && !loading" class="sidebar-empty">
+      <button
+        v-if="hasMore"
+        class="conversation-load-more"
+        type="button"
+        :disabled="loadingMore"
+        @click="$emit('load-more')"
+      >
+        <LoaderCircle v-if="loadingMore" class="spin" :size="14" />
+        {{ loadingMore ? '加载中' : '加载更多' }}
+      </button>
+
+      <div v-if="!conversations.length && !loading" class="sidebar-empty">
         <p>{{ query ? '没有匹配的对话' : '还没有对话' }}</p>
         <button v-if="!query" @click="$emit('new')">开始第一次对话</button>
       </div>
@@ -249,7 +276,7 @@ function logout() {
       role="separator"
       aria-label="调整会话侧栏宽度"
       aria-orientation="vertical"
-      :aria-valuemin="240"
+      :aria-valuemin="232"
       :aria-valuemax="420"
       :aria-valuenow="width"
       tabindex="0"

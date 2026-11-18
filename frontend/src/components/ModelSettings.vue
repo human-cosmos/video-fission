@@ -12,6 +12,7 @@ const emit = defineEmits(['notify'])
 const loading = ref(true)
 const saving = ref(false)
 const error = ref('')
+const savedSnapshot = ref('')
 
 const form = reactive(emptyForm())
 
@@ -37,15 +38,26 @@ function emptyForm() {
   }
 }
 
+function formSnapshot() {
+  return JSON.stringify({
+    compose: form.compose,
+    understand: form.understand,
+  })
+}
+
 function applySettings(payload) {
   const next = emptyForm()
   Object.assign(next.compose, payload?.compose || {})
   Object.assign(next.understand, payload?.understand || {})
   Object.assign(form.compose, next.compose)
   Object.assign(form.understand, next.understand)
+  savedSnapshot.value = formSnapshot()
 }
 
-const canSave = computed(() => !saving.value && !loading.value)
+const isDirty = computed(
+  () => Boolean(savedSnapshot.value) && formSnapshot() !== savedSnapshot.value,
+)
+const canSave = computed(() => !saving.value && !loading.value && isDirty.value)
 
 async function loadSettings() {
   loading.value = true
@@ -167,9 +179,12 @@ onMounted(loadSettings)
 
         <div class="settings-submit">
           <button class="button primary" type="submit" :disabled="!canSave" data-testid="save-settings">
-            {{ saving ? '保存中…' : '保存设置' }}
+            {{ saving ? '保存中…' : isDirty ? '保存修改' : '已保存' }}
           </button>
           <button class="button subtle" type="button" :disabled="loading" @click="loadSettings">重新加载</button>
+          <span class="settings-save-state" aria-live="polite">
+            {{ isDirty ? '有未保存的修改' : '设置已同步' }}
+          </span>
         </div>
       </form>
       <SystemAssetsSettings

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import sqlite3
 import threading
@@ -33,6 +35,23 @@ def _row_get(row: sqlite3.Row, key: str, default: Any = None) -> Any:
         return row[key]
     except (IndexError, KeyError):
         return default
+
+
+def encode_conversation_cursor(updated_at: str, conversation_id: str) -> str:
+    value = json.dumps([updated_at, conversation_id], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def decode_conversation_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        updated_at, conversation_id = value
+    except (ValueError, TypeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise ValueError("无效的会话游标") from exc
+    if not isinstance(updated_at, str) or not isinstance(conversation_id, str):
+        raise ValueError("无效的会话游标")
+    return updated_at, conversation_id
 
 
 class Database:
@@ -501,27 +520,98 @@ class Database:
         self,
         include_archived: bool = False,
         user_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+        *,
+        archived: bool | None = None,
+        limit: int = 30,
+        cursor: str | None = None,
+        query: str | None = None,
+    ) -> dict[str, Any]:
         conditions: list[str] = []
         values: list[Any] = []
         if user_id is not None:
             conditions.append("c.user_id = ?")
             values.append(user_id)
-        if not include_archived:
+        if archived is True:
+            conditions.append("c.archived_at IS NOT NULL")
+        elif archived is False or not include_archived:
             conditions.append("c.archived_at IS NULL")
+        if query and query.strip():
+            needle = query.strip()
+            conditions.append(
+                """(
+                    instr(lower(c.title), lower(?)) > 0
+                    OR instr(lower(COALESCE(c.last_error, '')), lower(?)) > 0
+                )"""
+            )
+            values.extend((needle, needle))
+        if cursor:
+            cursor_updated_at, cursor_id = decode_conversation_cursor(cursor)
+            conditions.append(
+                "(c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))"
+            )
+            values.extend((cursor_updated_at, cursor_updated_at, cursor_id))
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        page_size = max(1, min(int(limit), 100))
         rows = self.query(
             f"""
+            WITH summaries AS (
+                SELECT
+                    c.id,
+                    c.title,
+                    c.status,
+                    c.model,
+                    c.reasoning_effort,
+                    c.last_error,
+                    c.archived_at,
+                    c.created_at,
+                    c.updated_at,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM items i WHERE i.conversation_id = c.id
+                    ) THEN 1 ELSE 0 END AS has_items,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM items i
+                        WHERE i.conversation_id = c.id
+                          AND (
+                            i.status = 'failed'
+                            OR json_extract(i.payload, '$.status') = 'failed'
+                            OR json_extract(i.payload, '$.success') = 0
+                            OR (
+                                json_extract(i.payload, '$.exitCode') IS NOT NULL
+                                AND json_extract(i.payload, '$.exitCode') != 0
+                            )
+                          )
+                    ) THEN 1 ELSE 0 END AS has_warnings
+                FROM conversations c
+                {where}
+            )
             SELECT
-                c.*,
-                (SELECT COUNT(*) FROM items i WHERE i.conversation_id = c.id) AS item_count
-            FROM conversations c
-            {where}
-            ORDER BY c.updated_at DESC
+                *,
+                CASE
+                    WHEN status = 'failed'
+                      OR (last_error IS NOT NULL AND trim(last_error) != '')
+                    THEN 'failed'
+                    WHEN status = 'running' THEN 'running'
+                    WHEN has_warnings = 1 THEN 'warning'
+                    WHEN has_items = 1 THEN 'completed'
+                    ELSE 'empty'
+                END AS list_state
+            FROM summaries
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
             """,
-            tuple(values),
+            (*values, page_size + 1),
         )
-        return [dict(row) for row in rows]
+        has_more = len(rows) > page_size
+        items = [dict(row) for row in rows[:page_size]]
+        for item in items:
+            item["has_warnings"] = bool(item.get("has_warnings"))
+        next_cursor = (
+            encode_conversation_cursor(items[-1]["updated_at"], items[-1]["id"])
+            if has_more and items
+            else None
+        )
+        return {"items": items, "next_cursor": next_cursor}
 
     def update_conversation(
         self,

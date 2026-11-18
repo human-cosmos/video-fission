@@ -200,7 +200,7 @@ CJK 字幕优先使用 `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.tt
 
 前端采用 Vue 3 单页应用：
 
-- `ConversationSidebar`：搜索、最近/归档、会话状态。
+- `ConversationSidebar`：服务端搜索、最近/归档、Cursor 分页，以及运行中 / 已完成 / 工具警告 / 整体失败状态。
 - `MessageTimeline`：对话、推理、计划、命令、Tool、审批、澄清，以及理解 / 片段 / 观察 / 成片卡片。
 - `CapabilityPanel`：Skill 和 Tool 引用；创建与启停在系统设置中管理。
 - `ModelSettings.vue`：每用户模型、密钥、`gemini_gateway` 可选 `token_url`，以及理解与切片开关。
@@ -210,7 +210,9 @@ CJK 字幕优先使用 `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.tt
 
 视觉方向是“深色剪辑台 + 纸张式对话稿”。贯穿消息的时间线使用由橙到蓝的裂变光束表示 Agent 执行轨迹；工具和命令保持低干扰、可折叠。
 
-SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源；EventSource 自动重连时可以从头重放，最终状态自然收敛。
+SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源；EventSource 自动重连时可以从头重放，最终状态自然收敛。列表刷新与正文 Token 流已解耦：`reasoning.*`、`agent.message.*` 只刷新当前正文，只有 Turn 状态、Tool 完成、标题和归档变化才刷新列表；15 秒轻量轮询补齐后台会话完成态。
+
+`GET /api/conversations` 返回轻量列表 DTO 和 `next_cursor`，不暴露工作目录、Thread ID 或指令正文，也不再逐会话统计未使用的 `item_count`。前端新建对话只创建本地草稿，首次发送时才落库。
 
 ## 9. 与旧实现的关键差异
 
@@ -248,6 +250,8 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 - 页面刷新后会话、消息、Tool 轨迹和 Skill 均恢复
 - Thread 分叉、归档和取消归档
 - 390px 移动端下会话列表与能力抽屉可达
+- 会话列表 Cursor 分页、服务端搜索、归档视图与聚合状态
+- 空草稿延迟创建、工具警告提示与后台运行态轮询
 - 首次对话前上传的附件在创建会话后仍保留
 - 用户名密码登录、HttpOnly Cookie 会话、管理员成员管理、退出登录
 - 两个用户之间无法读取彼此的会话、设置、上传视频、创作任务和产物

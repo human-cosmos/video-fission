@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   compactTitle,
+  conversationStateLabel,
+  groupExecutionItems,
+  isConversationListEvent,
+  isProductionRefreshEvent,
   isRefreshEvent,
   itemLabel,
+  mergeConversationSummaries,
   payloadText,
   toolCallName,
 } from './events'
@@ -32,7 +37,67 @@ describe('conversation event helpers', () => {
     expect(isRefreshEvent('approval.requested')).toBe(true)
     expect(isRefreshEvent('item_upserted')).toBe(true)
     expect(isRefreshEvent('production_updated')).toBe(true)
+    expect(isRefreshEvent('thread.name.updated')).toBe(true)
     expect(isRefreshEvent('stream.heartbeat')).toBe(false)
+  })
+
+  it('refreshes the list on state changes but not token deltas', () => {
+    expect(isConversationListEvent('reasoning.text.delta')).toBe(false)
+    expect(isConversationListEvent('agent.message.delta')).toBe(false)
+    expect(isConversationListEvent('item.completed')).toBe(true)
+    expect(isConversationListEvent('turn.completed')).toBe(true)
+    expect(isConversationListEvent('thread.name.updated')).toBe(true)
+    expect(isProductionRefreshEvent('production_updated')).toBe(true)
+    expect(isProductionRefreshEvent('item.completed')).toBe(false)
+  })
+
+  it('labels aggregated conversation states', () => {
+    expect(conversationStateLabel({ list_state: 'running' })).toBe('运行中')
+    expect(conversationStateLabel({ list_state: 'completed' })).toBe('已完成')
+    expect(conversationStateLabel({ list_state: 'warning' })).toBe('工具警告')
+    expect(conversationStateLabel({ list_state: 'failed' })).toBe('执行失败')
+    expect(conversationStateLabel({ list_state: 'empty' })).toBe('草稿')
+  })
+
+  it('merges a background status update without dropping loaded pages', () => {
+    const merged = mergeConversationSummaries(
+      [
+        { id: 'a', list_state: 'running', title: 'A' },
+        { id: 'b', list_state: 'completed', title: 'B' },
+      ],
+      [{ id: 'a', list_state: 'completed', title: 'A' }],
+    )
+    expect(merged).toEqual([
+      { id: 'a', list_state: 'completed', title: 'A' },
+      { id: 'b', list_state: 'completed', title: 'B' },
+    ])
+  })
+
+  it('groups adjacent execution events while preserving messages', () => {
+    const rows = groupExecutionItems([
+      { id: 'r1', item_type: 'reasoning', status: 'completed' },
+      { id: 'c1', item_type: 'commandExecution', status: 'completed' },
+      { id: 'a1', item_type: 'agentMessage', status: 'completed' },
+      { id: 't1', item_type: 'dynamicToolCall', status: 'inProgress' },
+    ])
+
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toMatchObject({
+      item_type: 'executionGroup',
+      status: 'completed',
+      items: [{ id: 'r1' }, { id: 'c1' }],
+    })
+    expect(rows[1].id).toBe('a1')
+    expect(rows[2]).toMatchObject({ id: 't1', status: 'inProgress' })
+  })
+
+  it('marks grouped execution as failed when a step failed', () => {
+    const [group] = groupExecutionItems([
+      { id: 'r1', item_type: 'reasoning', status: 'completed' },
+      { id: 'c1', item_type: 'commandExecution', status: 'failed' },
+    ])
+
+    expect(group.status).toBe('failed')
   })
 })
 

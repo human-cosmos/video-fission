@@ -12,6 +12,7 @@ import {
 } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { compactTitle, formatRelativeTime } from '../utils/events'
+import BrandLockup from './BrandLockup.vue'
 
 const props = defineProps({
   conversations: { type: Array, default: () => [] },
@@ -53,15 +54,7 @@ const filtered = computed(() => {
     :class="{ 'is-mobile-open': mobileOpen, 'is-collapsed': collapsed }"
   >
     <header class="brand-row">
-      <div class="brand-mark" aria-hidden="true">
-        <span></span>
-        <span></span>
-        <span></span>
-      </div>
-      <div class="brand-copy">
-        <strong>VIDEO FISSION</strong>
-        <small>CREATIVE OPERATIONS</small>
-      </div>
+      <BrandLockup />
       <button
         class="icon-button sidebar-collapse-button"
         :aria-label="collapsed ? '展开会话侧栏' : '折叠会话侧栏'"

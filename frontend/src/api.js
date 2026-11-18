@@ -75,9 +75,39 @@ export const api = {
   deleteSkill: (slug) =>
     request(`/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
   tools: () => request('/tools'),
+  settings: () => request('/settings'),
+  updateSettings: (payload) => request('/settings', json('PUT', payload)),
+  testSettings: (target) => request('/settings/test', json('POST', { target })),
+  uploadProductionVideo: (file) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request('/productions/uploads', { method: 'POST', body })
+  },
+  productions: () => request('/productions'),
+  production: (id) => request(`/productions/${encodeURIComponent(id)}`),
+  createProduction: (payload) => request('/productions', json('POST', payload)),
+  patchProduction: (id, payload) =>
+    request(`/productions/${encodeURIComponent(id)}`, json('PATCH', payload)),
+  runProduction: (id, payload) =>
+    request(
+      `/productions/${encodeURIComponent(id)}/run`,
+      payload === undefined ? { method: 'POST' } : json('POST', payload),
+    ),
+  cancelProduction: (id) =>
+    request(`/productions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  deleteProduction: (id) =>
+    request(`/productions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
 export function eventUrl(conversationId, afterId = 0) {
   return `${BASE}/conversations/${conversationId}/events?after_id=${afterId}`
+}
+
+export function productionEventUrl(productionId, afterId = 0) {
+  return `${BASE}/productions/${encodeURIComponent(productionId)}/events?after_id=${afterId}`
+}
+
+export function productionArtifactUrl(productionId, name) {
+  return `${BASE}/productions/${encodeURIComponent(productionId)}/artifacts/${encodeURIComponent(name)}`
 }
 

@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:5174',
+    baseURL: 'http://127.0.0.1:5175',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -29,9 +29,9 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
-      command: 'VITE_API_TARGET=http://127.0.0.1:8001 npx vite --host 127.0.0.1 --port 5174',
+      command: 'VITE_API_TARGET=http://127.0.0.1:8001 npx vite --host 127.0.0.1 --port 5175',
       cwd: '.',
-      url: 'http://127.0.0.1:5174',
+      url: 'http://127.0.0.1:5175',
       reuseExistingServer: false,
       timeout: 30_000,
     },

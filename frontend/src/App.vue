@@ -18,12 +18,17 @@ import {
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, eventUrl } from './api'
+import BrandLockup from './components/BrandLockup.vue'
 import CapabilityPanel from './components/CapabilityPanel.vue'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
+import ModelSettings from './components/ModelSettings.vue'
 import SkillEditorModal from './components/SkillEditorModal.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
+import VideoStudio from './components/VideoStudio.vue'
+import WorkspaceModeNav from './components/WorkspaceModeNav.vue'
 import { isRefreshEvent } from './utils/events'
+import { WORKSPACE_MODES } from './utils/format'
 
 const conversations = ref([])
 const currentConversation = ref(null)
@@ -56,6 +61,26 @@ let selectionSequence = 0
 let uploadGeneration = 0
 let toastTimer = null
 let titleBeforeEdit = ''
+
+const MODE_STORAGE_KEY = 'video-fission.workspaceMode'
+const MODE_IDS = WORKSPACE_MODES.map((item) => item.id)
+
+function storedWorkspaceMode() {
+  const stored = window.localStorage.getItem(MODE_STORAGE_KEY)
+  return MODE_IDS.includes(stored) ? stored : 'chat'
+}
+
+const workspaceMode = ref(storedWorkspaceMode())
+const isChatMode = computed(() => workspaceMode.value === 'chat')
+
+watch(workspaceMode, (mode) => {
+  window.localStorage.setItem(MODE_STORAGE_KEY, mode)
+  if (mode !== 'chat') {
+    mobileSidebar.value = false
+    mobileCapabilities.value = false
+  }
+})
+
 let sidebarResizeStartX = 0
 let sidebarResizeStartWidth = 0
 
@@ -695,14 +720,20 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="app-shell"
-    :class="{ 'sidebar-collapsed': sidebarCollapsed }"
-    :style="{ '--sidebar-width': `${sidebarGridWidth}px` }"
+    :class="{
+      'sidebar-collapsed': sidebarCollapsed,
+      'mode-chat': isChatMode,
+      'mode-studio': workspaceMode === 'studio',
+      'mode-settings': workspaceMode === 'settings',
+    }"
+    :style="{ '--sidebar-width': isChatMode ? `${sidebarGridWidth}px` : '300px' }"
   >
     <ConversationSidebar
+      v-if="isChatMode"
       :conversations="visibleConversations"
       :current-id="currentConversation?.id || ''"
       :show-archived="showArchived"
-      :loading="listLoading"
+      :loading="loading || listLoading"
       :mobile-open="mobileSidebar"
       :collapsed="sidebarCollapsed"
       :width="sidebarWidth"
@@ -718,9 +749,21 @@ onBeforeUnmount(() => {
       @resize-reset="resetSidebarWidth"
     />
 
-    <main class="workspace">
+    <aside
+      v-else
+      class="sidebar workspace-rail"
+      :class="{ 'is-settings-rail': workspaceMode === 'settings' }"
+    >
+      <header class="brand-row">
+        <BrandLockup />
+      </header>
+      <div v-if="workspaceMode === 'studio'" id="studio-history-rail" class="rail-slot"></div>
+    </aside>
+
+    <main class="workspace" :class="{ 'page-mode': !isChatMode }">
       <header class="topbar">
         <button
+          v-if="isChatMode"
           class="icon-button mobile-only sidebar-toggle"
           aria-label="打开会话列表"
           @click="mobileSidebar = true"
@@ -728,29 +771,38 @@ onBeforeUnmount(() => {
           <Menu :size="19" />
         </button>
         <div class="conversation-heading">
-          <input
-            v-if="currentConversation"
-            v-model="currentConversation.title"
-            class="title-input"
-            aria-label="对话标题"
-            maxlength="120"
-            @focus="titleBeforeEdit = currentConversation.title"
-            @blur="saveTitle"
-            @keydown.enter.target.blur
-          />
-          <h1 v-else>Video Fission</h1>
-          <div class="conversation-meta">
-            <span v-if="streamConnected" class="live-label"><i></i> LIVE</span>
-            <span v-else-if="currentConversation" class="live-label muted">历史已保存</span>
-            <span v-if="currentConversation?.status === 'running'">
-              <Activity :size="12" /> 执行中
-            </span>
-          </div>
+          <template v-if="isChatMode">
+            <input
+              v-if="currentConversation"
+              v-model="currentConversation.title"
+              class="title-input"
+              aria-label="对话标题"
+              maxlength="120"
+              @focus="titleBeforeEdit = currentConversation.title"
+              @blur="saveTitle"
+              @keydown.enter.target.blur
+            />
+            <h1 v-else>Video Fission</h1>
+            <div class="conversation-meta">
+              <span v-if="streamConnected" class="live-label"><i></i> LIVE</span>
+              <span v-else-if="currentConversation" class="live-label muted">历史已保存</span>
+              <span v-if="currentConversation?.status === 'running'">
+                <Activity :size="12" /> 执行中
+              </span>
+            </div>
+          </template>
+          <template v-else>
+            <h1>{{ workspaceMode === 'studio' ? '视频创作' : '模型设置' }}</h1>
+            <div class="conversation-meta">
+              <span class="page-subtitle">{{ workspaceMode === 'studio' ? '本地管线可零配置出片' : '密钥只写不回显' }}</span>
+            </div>
+          </template>
         </div>
 
         <div class="topbar-controls">
+          <WorkspaceModeNav v-model="workspaceMode" />
           <TopbarSelect
-            v-if="currentConversation"
+            v-if="isChatMode && currentConversation"
             v-model="currentConversation.model"
             class="model-control"
             caption="模型"
@@ -761,7 +813,7 @@ onBeforeUnmount(() => {
             <template #icon><span class="control-prefix">M</span></template>
           </TopbarSelect>
           <TopbarSelect
-            v-if="currentConversation"
+            v-if="isChatMode && currentConversation"
             v-model="currentConversation.reasoning_effort"
             class="effort-control"
             caption="推理"
@@ -774,7 +826,7 @@ onBeforeUnmount(() => {
             </template>
           </TopbarSelect>
 
-          <details v-if="currentConversation" class="more-menu">
+          <details v-if="isChatMode && currentConversation" class="more-menu">
             <summary class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></summary>
             <div class="menu-popover">
               <button @click="syncConversation"><RefreshCw :size="14" /> 同步历史</button>
@@ -792,6 +844,7 @@ onBeforeUnmount(() => {
             </div>
           </details>
           <button
+            v-if="isChatMode"
             class="icon-button mobile-only capability-toggle"
             aria-label="打开能力台"
             @click="mobileCapabilities = true"
@@ -801,6 +854,7 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
+      <template v-if="isChatMode">
       <div v-if="bootError" class="boot-error">
         <strong>无法连接 Video Fission</strong>
         <span>{{ bootError }}</span>
@@ -923,9 +977,14 @@ onBeforeUnmount(() => {
           <span>受控执行 · 工具输出进入会话记录</span>
         </p>
       </section>
+      </template>
+
+      <VideoStudio v-else-if="workspaceMode === 'studio'" @notify="notify" />
+      <ModelSettings v-else-if="workspaceMode === 'settings'" @notify="notify" />
     </main>
 
     <CapabilityPanel
+      v-if="isChatMode"
       :skills="skills"
       :tools="tools"
       :mobile-open="mobileCapabilities"

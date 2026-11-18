@@ -94,6 +94,8 @@ class CodexHub:
     def _cleanup_orphan_artifacts(self, max_age_seconds: int = 86_400) -> None:
         cutoff = time.time() - max_age_seconds
         for path in self.settings.artifacts_dir.iterdir():
+            if path.name == "productions":
+                continue
             if not path.is_dir() or path.is_symlink() or self.db.get_conversation(path.name):
                 continue
             try:

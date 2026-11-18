@@ -28,6 +28,14 @@ def _load(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+
+def _row_get(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -163,8 +171,70 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tool_runs_conversation
                     ON tool_runs(conversation_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    public_json TEXT NOT NULL,
+                    secrets_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS video_uploads (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    content_type TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    fps REAL NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS productions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    brief TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_stage TEXT NOT NULL,
+                    error TEXT,
+                    warnings TEXT NOT NULL,
+                    source_video TEXT NOT NULL,
+                    decomposition TEXT,
+                    intent TEXT,
+                    skeleton TEXT,
+                    script TEXT,
+                    clips TEXT NOT NULL,
+                    output TEXT,
+                    video_upload_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_productions_updated
+                    ON productions(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_productions_upload
+                    ON productions(video_upload_id);
+
+                CREATE TABLE IF NOT EXISTS production_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    production_id TEXT NOT NULL REFERENCES productions(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_production_events
+                    ON production_events(production_id, id);
                 """
             )
+            self._ensure_column(connection, "productions", "replace_policy", "TEXT")
+            self._ensure_column(connection, "productions", "replace_plan", "TEXT")
+
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, name: str, decl: str) -> None:
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def create_conversation(self, payload: dict[str, Any]) -> dict[str, Any]:
         conversation_id = uuid.uuid4().hex
@@ -626,3 +696,227 @@ class Database:
             (f"%{path}%",),
         )
         return int(row["count"]) if row else 0
+
+    def get_app_settings(self) -> dict[str, Any] | None:
+        row = self.query_one("SELECT * FROM app_settings WHERE id = 1")
+        if not row:
+            return None
+        return {
+            "public": _load(row["public_json"], {}),
+            "secrets": _load(row["secrets_json"], {}),
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_app_settings(self, public: dict[str, Any], secrets: dict[str, Any]) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO app_settings (id, public_json, secrets_json, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    public_json = excluded.public_json,
+                    secrets_json = excluded.secrets_json,
+                    updated_at = excluded.updated_at
+                """,
+                (_json(public), _json(secrets), now),
+            )
+
+    def create_video_upload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        values = {
+            "id": payload["id"],
+            "name": payload["name"],
+            "path": payload["path"],
+            "size": int(payload["size"]),
+            "content_type": payload["content_type"],
+            "duration_ms": int(payload["duration_ms"]),
+            "width": int(payload["width"]),
+            "height": int(payload["height"]),
+            "fps": float(payload["fps"]),
+            "created_at": payload.get("created_at") or utc_now(),
+        }
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO video_uploads (
+                    id, name, path, size, content_type, duration_ms, width, height, fps, created_at
+                ) VALUES (
+                    :id, :name, :path, :size, :content_type, :duration_ms, :width, :height, :fps, :created_at
+                )
+                """,
+                values,
+            )
+        return self.get_video_upload(values["id"]) or values
+
+    def get_video_upload(self, upload_id: str) -> dict[str, Any] | None:
+        row = self.query_one("SELECT * FROM video_uploads WHERE id = ?", (upload_id,))
+        return dict(row) if row else None
+
+    def count_productions_for_upload(self, upload_id: str) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS count FROM productions WHERE video_upload_id = ?",
+            (upload_id,),
+        )
+        return int(row["count"]) if row else 0
+
+    def delete_video_upload(self, upload_id: str) -> None:
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM video_uploads WHERE id = ?", (upload_id,))
+
+    def create_production(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        values = {
+            "id": payload["id"],
+            "title": payload.get("title") or "",
+            "brief": payload["brief"],
+            "status": payload.get("status") or "draft",
+            "current_stage": payload.get("current_stage") or "ingest",
+            "error": payload.get("error"),
+            "warnings": _json(payload.get("warnings") or []),
+            "source_video": _json(payload.get("source_video") or {}),
+            "decomposition": _json(payload.get("decomposition")),
+            "intent": _json(payload.get("intent")),
+            "skeleton": _json(payload.get("skeleton")),
+            "script": _json(payload.get("script")),
+            "clips": _json(payload.get("clips") or []),
+            "output": _json(payload.get("output")),
+            "replace_policy": json.dumps(payload.get("replace_policy") or {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []}, ensure_ascii=False, separators=(",", ":")),
+            "replace_plan": json.dumps(payload.get("replace_plan"), ensure_ascii=False, separators=(",", ":")),
+            "video_upload_id": payload["video_upload_id"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO productions (
+                    id, title, brief, status, current_stage, error, warnings, source_video,
+                    decomposition, intent, skeleton, script, clips, output, replace_policy,
+                    replace_plan, video_upload_id, created_at, updated_at
+                ) VALUES (
+                    :id, :title, :brief, :status, :current_stage, :error, :warnings, :source_video,
+                    :decomposition, :intent, :skeleton, :script, :clips, :output, :replace_policy,
+                    :replace_plan, :video_upload_id, :created_at, :updated_at
+                )
+                """,
+                values,
+            )
+        return self.get_production(values["id"]) or {}
+
+    def get_production(self, production_id: str) -> dict[str, Any] | None:
+        row = self.query_one("SELECT * FROM productions WHERE id = ?", (production_id,))
+        return self._production_from_row(row) if row else None
+
+    def list_productions(self) -> list[dict[str, Any]]:
+        rows = self.query("SELECT * FROM productions ORDER BY created_at DESC, id DESC")
+        return [self._production_from_row(row) for row in rows]
+
+    def update_production(self, production_id: str, fields: dict[str, Any]) -> None:
+        allowed = {
+            "title",
+            "brief",
+            "status",
+            "current_stage",
+            "error",
+            "warnings",
+            "source_video",
+            "decomposition",
+            "intent",
+            "skeleton",
+            "script",
+            "clips",
+            "output",
+            "replace_policy",
+            "replace_plan",
+        }
+        json_fields = {
+            "warnings",
+            "source_video",
+            "decomposition",
+            "intent",
+            "skeleton",
+            "script",
+            "clips",
+            "output",
+            "replace_policy",
+            "replace_plan",
+        }
+        values: dict[str, Any] = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key in {"replace_policy", "replace_plan"}:
+                values[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            elif key in json_fields:
+                values[key] = _json(value)
+            else:
+                values[key] = value
+        values["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self.transaction() as connection:
+            connection.execute(
+                f"UPDATE productions SET {assignments} WHERE id = ?",
+                (*values.values(), production_id),
+            )
+
+    def delete_production(self, production_id: str) -> None:
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM productions WHERE id = ?", (production_id,))
+
+    def append_production_event(self, production_id: str, kind: str, payload: Any) -> int:
+        now = utc_now()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "INSERT INTO production_events (production_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (production_id, kind, _json(payload), now),
+            )
+            connection.execute(
+                "UPDATE productions SET updated_at = ? WHERE id = ?",
+                (now, production_id),
+            )
+            return int(cursor.lastrowid)
+
+    def list_production_events(self, production_id: str, after_id: int = 0, limit: int = 300) -> list[dict[str, Any]]:
+        rows = self.query(
+            """
+            SELECT * FROM production_events
+            WHERE production_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (production_id, after_id, limit),
+        )
+        return [
+            {
+                "id": row["id"],
+                "type": row["kind"],
+                "payload": _load(row["payload"], {}),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def _production_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        production_id = row["id"]
+        output = _load(row["output"], None)
+        return {
+            "id": production_id,
+            "title": row["title"],
+            "brief": row["brief"],
+            "status": row["status"],
+            "current_stage": row["current_stage"],
+            "error": row["error"],
+            "warnings": _load(row["warnings"], []),
+            "source_video": _load(row["source_video"], {}),
+            "decomposition": _load(row["decomposition"], None),
+            "intent": _load(row["intent"], None),
+            "skeleton": _load(row["skeleton"], None),
+            "script": _load(row["script"], None),
+            "clips": _load(row["clips"], []),
+            "output": output,
+            "replace_policy": _load(_row_get(row, "replace_policy"), {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []}),
+            "replace_plan": _load(_row_get(row, "replace_plan"), None),
+            "video_upload_id": row["video_upload_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }

@@ -38,22 +38,29 @@
 ## 3. 模块图
 
 ```text
-Vue Conversation UI
-  ├─ conversation list / transcript / approvals / clarifications
-  └─ Skill and Tool capability deck
+Vue UI
+  ├─ Conversation workbench
+  ├─ Video studio
+  └─ Model settings
           │ REST + SSE
           ▼
 FastAPI
-  ├─ routes.py          HTTP contract and upload
-  └─ service.py         conversation orchestration
-          ├─ app_server.py   stdio JSON-RPC client
-          ├─ protocol.py     input/event/approval mappings
-          ├─ tools.py        safe dynamic tool registry
-          ├─ skills.py       SKILL.md lifecycle
-          └─ db.py           SQLite persistence
+  ├─ routes.py            HTTP contract, settings, productions
+  ├─ service.py           conversation orchestration
+  │     ├─ app_server.py  stdio JSON-RPC client
+  │     ├─ protocol.py    input/event/approval mappings
+  │     ├─ tools.py       dynamic tools (incl. start/get video production)
+  │     └─ skills.py      SKILL.md lifecycle
+  ├─ settings_store.py    public settings + write-only keys
+  ├─ productions.py       upload / run / cancel / SSE / artifacts
+  ├─ pipeline.py          ingest → decompose → intent → script → generate → compose
+  ├─ providers.py         openai-compatible chat / video / TTS adapters
+  ├─ references.py        real retrieval over skills/video-references
+  ├─ media.py             ffmpeg / ffprobe helpers
+  └─ db.py                SQLite persistence
                  ▼
-              Codex CLI
-              app-server --stdio
+         Codex CLI (conversations only)
+         local ffmpeg (default video pipeline)
 ```
 
 ## 4. Codex CLI 对接
@@ -151,7 +158,29 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 独立于对话消息保存 Tool 调用，便于审计和后续统计。
 
-## 7. 前端
+### `app_settings`
+
+单行 JSON：多模态、视频生成、TTS 和合成开关。密钥与公开配置分开存；对外读取只出现 `api_key_set`，不会回显 Key。`PUT` 时省略或 `""` 保留原 Key，JSON `null` 清除。
+
+### `video_uploads` / `productions` / `production_events`
+
+参考视频元数据、创作任务快照（拆解、意图、骨架、脚本、clips、output、`replace_policy`、只读 `replace_plan`）以及按自增 ID 重放的管线 SSE。对话上传仍走 `POST /api/uploads`（20MB）；创作上传走 `POST /api/productions/uploads`（500MB），写入 `data/uploads/productions/`。产物在 `data/artifacts/productions/{id}/`，清理对话孤儿目录时会跳过 `productions/`。
+
+## 7. 视频创作管线
+
+管线独立于 Codex CLI，由 `PipelineEngine` 同步执行、后台线程启动。默认提供者 `local_ffmpeg`，无 API Key 也能跑完全程。
+
+阶段固定为：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。状态可落盘恢复；已有拆解结果时可再次 `POST /run`（默认 `resume_from=intent`，空 body 兼容），也可 `PATCH` 更新 `brief` / `replace_policy`。SSE 事件至少包括 `stage_started`、`stage_completed`、`warning`、`error`、`completed`。
+
+- **decompose**：先用 `select='gt(scene,0.15)'` 切镜；切点不足则按 Hook/Value/CTA 时间窗切分。Hook/CTA 会吸附到合法窗口内最近的主切点（不限于目标前后 400ms）。无切点时 Hook/CTA 窗口为片头/片尾 `min(3000ms, max(1500ms, 15%))`。官方夹具切在 2700ms / 5400ms，分成 hook / value / cta 三段。片段覆盖源视频 `[0, duration_ms)`，允许 100ms 误差且互不重叠。每段写出 1–3 张关键帧，文件名为 `{seg_id}_frame_01.jpg`（以及 `_02` / `_03`），不把帧 URL 写进契约字段。若配置了远程多模态，本地切分后再做 refine，失败则保留本地结果并写 warning。
+- **intent**：必须真实检索 `skills/video-references`：3 篇同品类 + 1 篇跨品类。此阶段只读首行骨架和第二条 `---` 之前的注意项；`intent.references[].path` 是相对项目根的真实路径。
+- **script**：至少读 3 篇参考全文。镜头策略以解析后的 `replace_plan` 为准：`mode=default` 且 brief 未点名片段时，Hook/CTA `generate`、中间 Value `reuse`；也可按 `all` / `selected` / brief 点名任意段生成。结构化勾选优先于 brief。
+- **generate**：reuse 按源片段裁切并保留原声；generate 默认对关键帧做 Ken Burns。无 TTS 时垫源片对应时间窗音频。默认硬烧字幕时不再叠一层 drawtext。H.264 yuv420p + AAC。远程失败且 `fallback_to_local=true` 时回退本地。分辨率跟随源视频（竖屏封顶 1080×1920，横屏长边 ≤1920）。
+- **compose**：拼接镜头；generate/reuse 交界做短淡化（约 8–12 帧画面 + 80–120ms 音频）；可选把参考音频按 `bgm_volume` 垫为 BGM；由旁白/屏上字生成 `final.srt`（不含「时长 Nms」调试句，也不烧替换指令；有开场/中间/结尾时按角色拆句），默认烧录并可另存 sidecar；最后把音画锁到同一精确时长。TTS 未配置不阻塞出片。`final.mp4` 须能被 ffprobe 解析，时长约等于脚本总时长 ±100ms，视频与音频时长差很小，`pix_fmt=yuv420p` 且 `color_range` 不是 pc；生成与拼接强制 `setsar=1`。
+
+CJK 字幕优先使用 `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`。
+
+## 8. 前端
 
 前端采用 Vue 3 单页应用：
 
@@ -165,7 +194,7 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源；EventSource 自动重连时可以从头重放，最终状态自然收敛。
 
-## 8. 与旧实现的关键差异
+## 9. 与旧实现的关键差异
 
 | 维度 | 原智能中枢 | Video Fission |
 | --- | --- | --- |
@@ -173,17 +202,19 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 | 鉴权 | 用户/角色/管理员 | 本地单用户 |
 | 会话范围 | 多 Profile + 业务上下文 | 自由对话单 Profile |
 | 写代码 | Git Worktree | 固定只读沙箱 |
-| Tool | 大量业务领域 Tool | 4 个通用/视频策划 Tool |
+| Tool | 大量业务领域 Tool | 6 个通用/视频策划与创作 Tool |
 | Skill | 用户目录、商店、物化 | 项目目录 + 用户目录 + UGC 共享参考库 |
 | 前端 | 大后台中的一个页面 | 独立完整工作台 |
 | 部署 | MongoDB/Redis 等基础设施 | Python + Node build + Codex CLI |
 
-## 9. 验证结果
+## 10. 验证结果
 
-验证日期：2026-11-17。
+验证日期：2026-11-17。视频管线后端于同日补测。
 
 - Codex CLI：`0.169.0`
-- 后端基础测试：15 passed
+- 后端测试（含管线、设置与指定片段替换）：`uv run pytest -q` → 35 passed, 1 skipped
+- 夹具：`backend/tests/fixtures/sample-reference.mp4`
+- 无 Key 本地跑通：可下载 ffprobe 可解析的 `final.mp4` 与 `final.srt`
 - 真实 Codex 集成：1 passed
 - 前端单元测试：4 passed
 - 前端生产构建：passed

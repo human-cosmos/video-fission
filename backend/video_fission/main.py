@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router
 from .config import settings
-from .container import hub
+from . import container
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,9 +20,9 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    hub.initialize()
+    container.hub.initialize()
     yield
-    hub.shutdown()
+    container.hub.shutdown()
 
 
 app = FastAPI(

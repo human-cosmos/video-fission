@@ -105,7 +105,7 @@ def _slug(text: str) -> str:
     return f"{value[:45] or 'brief'}-{stamp}"
 
 
-def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRegistry:
+def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productions=None) -> ToolRegistry:
     registry = ToolRegistry(db, workspace.resolve(), artifacts_dir.resolve())
 
     def workspace_snapshot(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -302,6 +302,78 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path) -> ToolRe
                 "additionalProperties": False,
             },
             handler=create_video_brief,
+        )
+    )
+
+    def start_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if productions is None:
+            raise ValueError("视频创作管线尚未就绪")
+        brief = str(arguments.get("brief") or "").strip()
+        upload_id = str(arguments.get("video_upload_id") or "").strip() or None
+        source_path = str(arguments.get("source_path") or arguments.get("path") or "").strip() or None
+        policy = arguments.get("replace_policy")
+        result = productions.start_from_tool(
+            brief,
+            video_upload_id=upload_id,
+            source_path=source_path,
+            replace_policy=policy if isinstance(policy, dict) else None,
+        )
+        return {
+            "production": result,
+            "message": f"已启动创作任务 {result['id']}，状态 {result['status']}",
+        }
+
+    def get_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if productions is None:
+            raise ValueError("视频创作管线尚未就绪")
+        production_id = str(arguments.get("production_id") or arguments.get("id") or "").strip()
+        result = productions.get(production_id)
+        return {"production": result}
+
+    registry.register(
+        ToolDefinition(
+            name="start_video_production",
+            title="开始视频创作",
+            description=(
+                "Create and start a video production from a creative brief and an uploaded reference video. "
+                "Use video_upload_id from the video studio upload, or a allowed local source_path."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "brief": {"type": "string", "maxLength": 20000},
+                    "video_upload_id": {"type": "string", "maxLength": 80},
+                    "source_path": {"type": "string", "maxLength": 500},
+                    "replace_policy": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"type": "string"},
+                            "roles": {"type": "array", "items": {"type": "string"}},
+                            "segment_ids": {"type": "array", "items": {"type": "string"}},
+                            "time_ranges": {"type": "array"},
+                        },
+                    },
+                },
+                "required": ["brief"],
+                "additionalProperties": False,
+            },
+            handler=start_video_production,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="get_video_production",
+            title="查询视频创作",
+            description="Look up a video production's status, stages, and artifact paths.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "production_id": {"type": "string", "maxLength": 80},
+                },
+                "required": ["production_id"],
+                "additionalProperties": False,
+            },
+            handler=get_video_production,
         )
     )
     return registry

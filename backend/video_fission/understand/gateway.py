@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from video_fission.logging_utils import file_summary, prompt_preview, safe_url
+
 from .normalize import extract_json
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,14 @@ class GeminiGatewayClient:
         with _TOKEN_LOCK:
             cached = _TOKEN_CACHE.get(cache_key)
             if not force and cached and cached[1] > now:
+                logger.info("gemini_gateway.token_cache_hit endpoint=%s", safe_url(self.token_url))
                 return cached[0]
+        started = time.perf_counter()
+        logger.info(
+            "gemini_gateway.token_request_started endpoint=%s force=%s",
+            safe_url(self.token_url),
+            force,
+        )
         try:
             request = urllib.request.Request(self.token_url, method="GET")
             if self.api_key:
@@ -82,9 +91,21 @@ class GeminiGatewayClient:
             if token:
                 with _TOKEN_LOCK:
                     _TOKEN_CACHE[cache_key] = (token, now + 3600 - 300)
+                logger.info(
+                    "gemini_gateway.token_request_completed endpoint=%s token_chars=%s elapsed_ms=%.1f",
+                    safe_url(self.token_url),
+                    len(token),
+                    (time.perf_counter() - started) * 1000,
+                )
                 return token
         except Exception as exc:  # noqa: BLE001
-            logger.info("gemini_gateway 取 token 失败: %s", exc)
+            logger.warning(
+                "gemini_gateway.token_request_failed endpoint=%s error=%s elapsed_ms=%.1f",
+                safe_url(self.token_url),
+                exc.__class__.__name__,
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
         if self.api_key:
             return self.api_key
         raise GatewayError("Gemini 网关换票失败")
@@ -121,6 +142,7 @@ class GeminiGatewayClient:
     ) -> dict[str, Any] | None:
         if not self.base_url:
             raise GatewayError("未配置 gemini_gateway base_url")
+        started = time.perf_counter()
         token = self.get_access_token()
         parts: list[dict[str, Any]] = []
         if file_uri:
@@ -148,6 +170,22 @@ class GeminiGatewayClient:
         }
         if self.source:
             payload_body["source"] = self.source
+        input_mode = "file_uri" if file_uri else ("video" if video_path else ("frames" if frames else "text"))
+        logger.info(
+            "gemini_gateway.request_started endpoint=%s model=%s input_mode=%s "
+            "prompt_chars=%s frames=%s timeout_s=%s max_tokens=%s temperature=%.2f",
+            safe_url(self.base_url),
+            self.model or "-",
+            input_mode,
+            len(prompt),
+            len(frames or []),
+            self.timeout_seconds,
+            int(max_tokens or self.max_tokens),
+            temperature,
+        )
+        preview = prompt_preview(prompt)
+        if preview:
+            logger.info("gemini_gateway.prompt_preview preview=%s", preview)
         body = json.dumps(payload_body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if token:
@@ -161,25 +199,52 @@ class GeminiGatewayClient:
             if remaining <= 0:
                 break
             request = urllib.request.Request(self.base_url, data=body, headers=headers, method="POST")
+            logger.info(
+                "gemini_gateway.request_attempt endpoint=%s attempt=%s max_attempts=%s body_bytes=%s",
+                safe_url(self.base_url),
+                attempt + 1,
+                self.max_retries + 1,
+                len(body),
+            )
             try:
                 with urllib.request.urlopen(request, timeout=max(0.5, remaining)) as response:
                     raw = response.read().decode("utf-8", errors="replace")
+                    logger.info(
+                        "gemini_gateway.response_received status=%s response_chars=%s elapsed_ms=%.1f",
+                        getattr(response, "status", "-"),
+                        len(raw),
+                        (time.perf_counter() - started) * 1000,
+                    )
                 break
             except urllib.error.HTTPError as exc:
+                logger.warning(
+                    "gemini_gateway.request_attempt_failed attempt=%s status=%s elapsed_ms=%.1f",
+                    attempt + 1,
+                    exc.code,
+                    (time.perf_counter() - started) * 1000,
+                )
                 if exc.code == 401 and self.token_url and not refreshed_401:
                     refreshed_401 = True
+                    logger.warning("gemini_gateway.unauthorized_refresh attempt=%s", attempt + 1)
                     token = self.get_access_token(force=True)
                     if token:
                         headers["Authorization"] = token
                         continue
                 last_error = GatewayError(f"HTTP {exc.code}")
                 if 400 <= exc.code < 500 and exc.code != 429:
+                    logger.warning("gemini_gateway.request_failed status=%s retry=false", exc.code)
                     raise last_error from exc
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = GatewayError(f"{exc.__class__.__name__}")
+                logger.warning(
+                    "gemini_gateway.request_attempt_failed attempt=%s error=%s",
+                    attempt + 1,
+                    exc.__class__.__name__,
+                )
             if attempt < self.max_retries:
                 delay = min(2**attempt, max(0.0, deadline - time.monotonic()))
                 if delay > 0:
+                    logger.info("gemini_gateway.retry_scheduled attempt=%s delay_s=%.2f", attempt + 1, delay)
                     time.sleep(delay)
         if not raw:
             raise last_error or GatewayError("Gemini 请求超时")
@@ -189,6 +254,12 @@ class GeminiGatewayClient:
             payload = {"data": raw}
         if isinstance(payload, dict) and payload.get("code") not in (None, 0, "0"):
             raise GatewayError(f"gateway code={payload.get('code')}")
+        logger.info(
+            "gemini_gateway.request_completed input_mode=%s response_chars=%s elapsed_ms=%.1f",
+            input_mode,
+            len(raw),
+            (time.perf_counter() - started) * 1000,
+        )
         return payload if isinstance(payload, dict) else {"data": payload}
 
     def extract_payload(self, response: dict[str, Any] | None) -> dict[str, Any] | list[Any] | None:
@@ -207,6 +278,13 @@ class GeminiGatewayClient:
         if not self.upload_url:
             return ""
         mime = video_mime(path)
+        started = time.perf_counter()
+        logger.info(
+            "gemini_gateway.upload_started endpoint=%s file=%s mime=%s",
+            safe_url(self.upload_url),
+            file_summary(path),
+            mime,
+        )
         try:
             with path.open("rb") as handle:
                 response = httpx.post(
@@ -219,14 +297,27 @@ class GeminiGatewayClient:
             response.raise_for_status()
             payload = response.json()
         except (OSError, httpx.HTTPError, ValueError) as exc:
-            logger.warning("gemini_gateway 视频上传失败，将尝试内联: %s", exc.__class__.__name__)
+            logger.warning(
+                "gemini_gateway.upload_failed endpoint=%s error=%s fallback=inline",
+                safe_url(self.upload_url),
+                exc.__class__.__name__,
+                exc_info=True,
+            )
             return ""
         if not isinstance(payload, dict) or payload.get("code") not in (None, 0, 200, "0", "200"):
             return ""
         data = payload.get("data")
         if not isinstance(data, dict):
             return ""
-        return str(data.get("gsutil_uri") or data.get("url") or data.get("file_uri") or "")
+        uri = str(data.get("gsutil_uri") or data.get("url") or data.get("file_uri") or "")
+        logger.info(
+            "gemini_gateway.upload_completed endpoint=%s status=%s uri=%s elapsed_ms=%.1f",
+            safe_url(self.upload_url),
+            getattr(response, "status_code", "-"),
+            safe_url(uri),
+            (time.perf_counter() - started) * 1000,
+        )
+        return uri
 
 
 def _extract_payload_value(value: Any, depth: int = 0) -> dict[str, Any] | list[Any] | None:

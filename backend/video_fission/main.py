@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +15,10 @@ from . import container
 from .api.auth import router as auth_router
 from .api.routes import router
 from .config import settings
+from .logging_utils import configure_logging, log_context, safe_request_id
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+configure_logging(Path(__file__).resolve().parents[2])
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -53,6 +55,63 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _request_scope(path: str) -> tuple[str, str]:
+    conversation_id = "-"
+    production_id = "-"
+    parts = [part for part in path.split("/") if part]
+    for index, part in enumerate(parts):
+        if index + 1 >= len(parts):
+            continue
+        if part == "conversations":
+            conversation_id = parts[index + 1]
+        elif part == "productions" and parts[index + 1].startswith("prd_"):
+            production_id = parts[index + 1]
+    return conversation_id, production_id
+
+
+@app.middleware("http")
+async def request_logging(request: Request, call_next):
+    if not request.url.path.startswith("/api"):
+        return await call_next(request)
+    request_id = safe_request_id(request.headers.get("x-request-id")) or f"req_{uuid.uuid4().hex[:12]}"
+    conversation_id, production_id = _request_scope(request.url.path)
+    started = time.perf_counter()
+    client = request.client.host if request.client else "-"
+    with log_context(
+        request_id=request_id,
+        conversation_id=conversation_id,
+        production_id=production_id,
+    ):
+        logger.info(
+            "api.request_started method=%s path=%s client=%s",
+            request.method,
+            request.url.path,
+            client,
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "api.request_failed method=%s path=%s elapsed_ms=%.1f",
+                request.method,
+                request.url.path,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers["X-Request-ID"] = request_id
+        log = logger.warning if response.status_code >= 400 else logger.info
+        log(
+            "api.request_completed method=%s path=%s status=%s elapsed_ms=%.1f bytes=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+            response.headers.get("content-length", "-"),
+        )
+        return response
 
 
 @app.middleware("http")

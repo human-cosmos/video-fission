@@ -12,6 +12,43 @@ VIDEO_CARD_TYPES = (
     "video_output",
 )
 
+PRODUCTION_STAGES = (
+    ("ingest", "接入", "读取参考视频和媒体信息"),
+    ("decompose", "拆解", "识别转场、镜头和画面内容"),
+    ("intent", "意图", "提炼目标、受众和核心承诺"),
+    ("script", "脚本", "生成候选创意与分镜脚本"),
+    ("generate", "生成", "生成或复用每个镜头片段"),
+    ("compose", "合成", "混合音轨、字幕并输出成片"),
+    ("done", "完成", "成片已交付"),
+)
+
+STEP_LABELS = {
+    "transition": "场景转场",
+    "understand": "整片理解",
+    "refine": "切片校正",
+    "clip_analysis": "关键帧与片段",
+    "observe": "片段观察",
+    "assemble": "片段拼接",
+    "audio": "音轨混合",
+    "subtitles": "字幕处理",
+    "finalize": "音画对齐",
+}
+
+DETAIL_LABELS = {
+    "segments": "切片",
+    "cuts": "转场切点",
+    "tags": "标签",
+    "provider": "方式",
+    "model": "模型",
+    "clips": "片段",
+    "duration_ms": "耗时",
+    "resolution": "分辨率",
+    "fps": "帧率",
+    "file": "文件",
+    "observed": "已观察",
+    "failed": "失败",
+}
+
 
 def stable_item_id(production_id: str, item_type: str) -> str:
     suffix = item_type.removeprefix("video_")
@@ -33,17 +70,404 @@ def _upload_id(public: dict[str, Any]) -> str:
     return str(source.get("upload_id") or public.get("video_upload_id") or "")
 
 
-def progress_payload(public: dict[str, Any]) -> dict[str, Any]:
+def _stage_index(stage_id: str) -> int:
+    for index, (candidate, _label, _description) in enumerate(PRODUCTION_STAGES):
+        if candidate == stage_id:
+            return index
+    return -1
+
+
+def _stage_state(public: dict[str, Any], stage_id: str) -> str:
+    status = str(public.get("status") or "draft")
+    current = str(public.get("current_stage") or "ingest")
+    index = _stage_index(stage_id)
+    current_index = _stage_index(current)
+    if index < 0:
+        return "pending"
+    if status == "completed" or current == "done":
+        return "done"
+    if status == "awaiting_script_choice":
+        script_index = _stage_index("script")
+        if index < script_index:
+            return "done"
+        if index == script_index:
+            return "awaiting"
+        return "pending"
+    if status in {"failed", "cancelled"}:
+        if current_index < 0:
+            return "pending"
+        if index < current_index:
+            return "done"
+        if index == current_index:
+            return status
+        return "pending"
+    if status == "running" and current_index >= 0:
+        if index < current_index:
+            return "done"
+        if index == current_index:
+            return "active"
+        return "pending"
+    return "pending"
+
+
+def _format_duration(ms: Any) -> str:
+    try:
+        value = max(0, int(ms))
+    except (TypeError, ValueError):
+        return ""
+    if value < 1000:
+        return f"{value} ms"
+    seconds = value / 1000
+    return f"{seconds:.1f} 秒" if value % 1000 else f"{int(seconds)} 秒"
+
+
+def _short_text(value: Any, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 1)]}…"
+
+
+def _resolution_text(source: dict[str, Any]) -> str:
+    try:
+        width = int(source.get("width") or 0)
+        height = int(source.get("height") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"{width} × {height}" if width > 0 and height > 0 else ""
+
+
+def _role_counts(segments: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for segment in segments:
+        role = str(segment.get("role") or "other")
+        counts[role] = counts.get(role, 0) + 1
+    return " / ".join(
+        f"{role} {counts[role]}"
+        for role in ("hook", "value", "cta", "other")
+        if counts.get(role)
+    )
+
+
+def _output_row(label: str, value: Any) -> dict[str, str] | None:
+    text = _short_text(value, 180)
+    return {"label": label, "value": text} if text else None
+
+
+def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[dict[str, str]]:
+    if state == "pending":
+        return []
+    rows: list[dict[str, str] | None] = []
+    source = public.get("source_video") if isinstance(public.get("source_video"), dict) else {}
+    decomposition = (
+        public.get("decomposition")
+        if isinstance(public.get("decomposition"), dict)
+        else {}
+    )
+    segments = decomposition.get("segments") or []
+    intent = public.get("intent") if isinstance(public.get("intent"), dict) else {}
+    skeleton = public.get("skeleton") if isinstance(public.get("skeleton"), dict) else {}
+
+    if stage_id == "ingest" and source:
+        filename = str(
+            source.get("filename") or Path(str(source.get("path") or "")).name or ""
+        )
+        fps = source.get("fps")
+        rows.extend(
+            [
+                _output_row("文件", filename),
+                _output_row("时长", _format_duration(source.get("duration_ms"))),
+                _output_row("分辨率", _resolution_text(source)),
+                _output_row("帧率", f"{float(fps):.2f} fps" if fps else ""),
+            ]
+        )
+    elif stage_id == "decompose" and decomposition:
+        tags = (
+            decomposition.get("video_tags")
+            if isinstance(decomposition.get("video_tags"), dict)
+            else {}
+        )
+        tag_count = sum(1 for value in tags.values() if value not in (None, "", [], {}))
+        opening = (
+            decomposition.get("opening")
+            if isinstance(decomposition.get("opening"), dict)
+            else {}
+        )
+        rows.extend(
+            [
+                _output_row(
+                    "整片摘要",
+                    decomposition.get("summary") or decomposition.get("description"),
+                ),
+                _output_row(
+                    "切片结果",
+                    f"{len(segments)} 段 · {_role_counts(segments)}" if segments else "",
+                ),
+                _output_row(
+                    "理解方式",
+                    " / ".join(
+                        filter(
+                            None,
+                            [
+                                decomposition.get("provider"),
+                                decomposition.get("model"),
+                            ],
+                        )
+                    ),
+                ),
+                _output_row("视频标签", f"{tag_count} 类" if tag_count else ""),
+                _output_row(
+                    "开头区间",
+                    f"0–{_format_duration(opening.get('end_ms'))}"
+                    if opening.get("end_ms")
+                    else "",
+                ),
+            ]
+        )
+    elif stage_id == "intent":
+        rows.extend(
+            [
+                _output_row("目标", intent.get("goal")),
+                _output_row("受众", intent.get("audience")),
+                _output_row("核心承诺", intent.get("promise")),
+                _output_row("一句话骨架", skeleton.get("one_liner")),
+                _output_row(
+                    "Hook / Value / CTA",
+                    " / ".join(
+                        filter(
+                            None,
+                            [
+                                skeleton.get("hook"),
+                                skeleton.get("value"),
+                                skeleton.get("cta"),
+                            ],
+                        )
+                    ),
+                ),
+            ]
+        )
+    elif stage_id == "script":
+        candidates = public.get("script_candidates") or []
+        selected_id = str(public.get("selected_script_id") or "")
+        selected = next(
+            (item for item in candidates if str(item.get("id") or "") == selected_id),
+            None,
+        )
+        chosen_script = (
+            (selected or {}).get("script")
+            if isinstance(selected, dict)
+            else public.get("script")
+        )
+        shots = (chosen_script or {}).get("shots") or []
+        titles = [
+            str(item.get("title") or item.get("angle") or item.get("id") or "")
+            for item in candidates
+        ]
+        rows.extend(
+            [
+                _output_row("候选脚本", f"{len(candidates)} 份" if candidates else ""),
+                _output_row("脚本角度", " / ".join(title for title in titles if title)),
+                _output_row(
+                    "当前选用",
+                    (selected or {}).get("title") if selected else "等待选择",
+                ),
+                _output_row("分镜结果", f"{len(shots)} 个镜头" if shots else ""),
+                _output_row(
+                    "脚本时长",
+                    _format_duration((chosen_script or {}).get("total_duration_ms")),
+                ),
+            ]
+        )
+    elif stage_id == "generate":
+        clips = public.get("clips") or []
+        script = public.get("script") if isinstance(public.get("script"), dict) else {}
+        shots = script.get("shots") or []
+        actions = {
+            str(shot.get("id") or ""): str(shot.get("action") or "")
+            for shot in shots
+        }
+        generated = sum(
+            1
+            for clip in clips
+            if actions.get(str(clip.get("shot_id") or "")) == "generate"
+        )
+        reused = sum(
+            1
+            for clip in clips
+            if actions.get(str(clip.get("shot_id") or "")) == "reuse"
+        )
+        providers = sorted(
+            {str(clip.get("provider") or "") for clip in clips if clip.get("provider")}
+        )
+        rows.extend(
+            [
+                _output_row(
+                    "片段结果",
+                    f"{len(clips)} / {len(shots)} 个镜头已输出" if clips else "",
+                ),
+                _output_row(
+                    "生成方式",
+                    f"新生成 {generated} · 复用 {reused}" if clips else "",
+                ),
+                _output_row("执行通道", " / ".join(providers)),
+            ]
+        )
+    elif stage_id == "compose":
+        output = public.get("output") if isinstance(public.get("output"), dict) else {}
+        script = public.get("script") if isinstance(public.get("script"), dict) else {}
+        video_path = Path(str(output.get("video_path") or ""))
+        try:
+            size_text = (
+                f"{video_path.stat().st_size / (1024 * 1024):.1f} MB"
+                if video_path.is_file()
+                else ""
+            )
+        except OSError:
+            size_text = ""
+        rows.extend(
+            [
+                _output_row(
+                    "成片时长",
+                    _format_duration(script.get("total_duration_ms")),
+                ),
+                _output_row(
+                    "成片文件",
+                    f"{video_path.name} · {size_text}" if video_path.name else "",
+                ),
+                _output_row("字幕文件", Path(str(output.get("srt_path") or "")).name),
+                _output_row("输出地址", output.get("video_url")),
+            ]
+        )
+    elif stage_id == "done" and public.get("status") == "completed":
+        rows.append(_output_row("交付状态", "成片与字幕已生成"))
+    return [row for row in rows if row]
+
+
+def _detail_text(details: Any) -> str:
+    if not isinstance(details, dict):
+        return ""
+    parts: list[str] = []
+    for key, value in details.items():
+        if value in (None, "", [], {}):
+            continue
+        label = DETAIL_LABELS.get(str(key), str(key))
+        if str(key).endswith("_ms"):
+            text = _format_duration(value)
+        elif isinstance(value, list):
+            text = "、".join(str(item) for item in value[:6])
+        else:
+            text = str(value)
+        if text:
+            parts.append(f"{label} {text}")
+    return " · ".join(parts[:5])
+
+
+def _activity_item(
+    raw: dict[str, Any],
+    fallback_stage: str = "",
+) -> dict[str, Any] | None:
+    payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+    kind = str(raw.get("type") or raw.get("kind") or "")
+    raw_stage = str(payload.get("stage") or fallback_stage or "")
+    cancelled = raw_stage == "cancelled"
+    stage = raw_stage
+    if cancelled:
+        stage = fallback_stage
+    step = str(payload.get("step") or "")
+    message = _short_text(payload.get("message") or payload.get("summary") or "", 220)
+    stage_label = next(
+        (label for ident, label, _ in PRODUCTION_STAGES if ident == stage),
+        stage or "任务",
+    )
+    step_label = STEP_LABELS.get(step, step)
+    if kind == "stage_started":
+        text = message or f"开始{step_label or stage_label}"
+    elif kind == "stage_completed":
+        text = message or f"{step_label or stage_label}完成"
+    elif kind == "warning":
+        text = message or f"{step_label or stage_label}出现提示"
+    elif kind == "error":
+        if cancelled or message == "已取消":
+            text = "任务已取消"
+        else:
+            text = f"执行失败：{message}" if message else "执行失败"
+    elif kind == "awaiting_script_choice":
+        text = message or "等待选择创意脚本"
+    elif kind == "completed":
+        text = "全部步骤完成，成片已生成"
+    else:
+        text = message or kind.replace("_", " ")
+    detail = _detail_text(payload.get("details"))
+    if not stage and not text:
+        return None
+    if text == "任务已取消":
+        tone = "warning"
+    elif kind == "error":
+        tone = "error"
+    elif kind == "warning":
+        tone = "warning"
+    elif kind == "stage_started":
+        tone = "active"
+    else:
+        tone = "done"
+    return {
+        "id": raw.get("id"),
+        "stage": stage,
+        "step": step,
+        "kind": kind,
+        "tone": tone,
+        "text": text,
+        "detail": detail,
+        "created_at": raw.get("created_at"),
+    }
+
+
+def _activity_items(
+    events: list[dict[str, Any]],
+    current_stage: str,
+) -> list[dict[str, Any]]:
+    items = []
+    for raw in events:
+        item = _activity_item(raw, fallback_stage=current_stage)
+        if item:
+            items.append(item)
+    return items
+
+
+def progress_payload(
+    public: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     status = public.get("status") or "draft"
+    activity = _activity_items(events or [], str(public.get("current_stage") or ""))
+    stages = []
+    for stage_id, label, description in PRODUCTION_STAGES:
+        state = _stage_state(public, stage_id)
+        outputs = _stage_outputs(public, stage_id, state)
+        stage_activity = [item for item in activity if item.get("stage") == stage_id]
+        stages.append(
+            {
+                "id": stage_id,
+                "label": label,
+                "description": description,
+                "state": state,
+                "summary": outputs[0]["value"] if outputs else "",
+                "outputs": outputs,
+                "activities": stage_activity[-20:],
+            }
+        )
     return {
         "production_id": public["id"],
         "title": public.get("title") or "",
         "brief": public.get("brief") or "",
         "status": status,
         "current_stage": public.get("current_stage") or "",
+        "updated_at": public.get("updated_at"),
         "warnings": public.get("warnings") or [],
         "error": public.get("error"),
         "cancellable": status == "running",
+        "stages": stages,
+        "activity": activity[-120:],
     }
 
 
@@ -236,8 +660,12 @@ def observe_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def cards_for(public: dict[str, Any], artifact_dir: Path | None = None) -> list[tuple[str, dict[str, Any]]]:
-    cards: list[tuple[str, dict[str, Any]]] = [("video_progress", progress_payload(public))]
+def cards_for(
+    public: dict[str, Any],
+    artifact_dir: Path | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    cards: list[tuple[str, dict[str, Any]]] = [("video_progress", progress_payload(public, events))]
     understanding = understanding_payload(public)
     if understanding:
         cards.append(("video_understanding", understanding))

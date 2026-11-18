@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from . import media
+
+logger = logging.getLogger(__name__)
 
 _STYLE_LINE = re.compile(
     r"^Style:\s*([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),"
@@ -34,17 +38,25 @@ def default_safe_style(width: int = 1280, height: int = 720) -> dict[str, Any]:
 
 
 def detect_subtitle_style(source: Path, dest_dir: Path | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
     info = media.probe(source)
     width = int(info["width"])
     height = int(info["height"])
     fallback = default_safe_style(width, height)
     stream = _subtitle_stream(source)
     if not stream:
+        logger.info("subtitle.style_detected method=default_safe reason=no_soft_subtitle")
         return fallback
+    logger.info(
+        "subtitle.soft_stream_detected codec=%s language=%s",
+        stream.get("codec_name") or "-",
+        stream.get("tags", {}).get("language") or "-",
+    )
     work = Path(dest_dir or source.parent)
     work.mkdir(parents=True, exist_ok=True)
     extracted = work / "reference-subtitles.ass"
     if not _extract_subtitles(source, extracted):
+        logger.warning("subtitle.extract_failed fallback=default_safe file=%s", source.name)
         return fallback
     parsed = parse_ass_style(extracted, width, height)
     if not parsed:
@@ -59,11 +71,20 @@ def detect_subtitle_style(source: Path, dest_dir: Path | None = None) -> dict[st
                     "note": "参考含软字幕但未读到字体位置，使用安全默认样式硬烧",
                 }
             )
+            logger.info("subtitle.style_detected method=soft_sub aligned=false format=srt")
             return fallback
+        logger.warning("subtitle.style_parse_failed fallback=default_safe")
         return fallback
     parsed["method"] = "soft_sub"
     parsed["aligned"] = True
     parsed["note"] = "按参考软字幕样式硬烧"
+    logger.info(
+        "subtitle.style_detected method=soft_sub aligned=true font=%s font_size=%s margin_v=%s elapsed_ms=%.1f",
+        parsed.get("font_name"),
+        parsed.get("font_size"),
+        parsed.get("margin_v"),
+        (time.perf_counter() - started) * 1000,
+    )
     return parsed
 
 

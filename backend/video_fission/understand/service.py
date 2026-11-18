@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
 from video_fission import media, providers
+from video_fission.logging_utils import clip_text, file_summary, safe_url
 
 from .clips import build_lens_prompt, cut_playback_clip, empty_lens_info, ensure_under_size, normalize_clip_result
 from .gateway import GeminiGatewayClient, video_mime
@@ -59,7 +62,8 @@ def _run_cancellable(work: Callable[[], Any], cancel: Any) -> Any:
         except BaseException as exc:  # noqa: BLE001
             results.put((False, exc))
 
-    threading.Thread(target=run, name="video-understand-request", daemon=True).start()
+    context = copy_context()
+    threading.Thread(target=context.run, args=(run,), name="video-understand-request", daemon=True).start()
     while True:
         _raise_if_cancelled(cancel)
         try:
@@ -103,6 +107,24 @@ def run_decompose(
     options = understand_settings(public)
     mm = public.get("multimodal") or {}
     provider = str(mm.get("provider") or "local_ffmpeg")
+    remote_ready = bool(
+        provider in {"openai_compatible", "gemini_gateway"}
+        and bool(mm.get("base_url"))
+        and (bool(secrets.get("multimodal")) or (provider == "gemini_gateway" and bool(mm.get("token_url"))))
+    )
+    logger.info(
+        "decompose.started file=%s duration_ms=%s resolution=%sx%s fps=%.3f "
+        "provider=%s model=%s remote_ready=%s options=%s",
+        file_summary(src),
+        duration_ms,
+        info["width"],
+        info["height"],
+        float(info["fps"] or 0),
+        provider,
+        mm.get("model") or "-",
+        remote_ready,
+        options,
+    )
 
     def _emit(kind: str, payload: dict[str, Any]) -> None:
         if emit:
@@ -114,10 +136,21 @@ def run_decompose(
     transition_info = TransitionInfo(ok=False)
     cuts: list[int] = []
     _emit("stage_started", {"stage": "decompose", "step": "transition"})
+    transition_started = time.perf_counter()
     if options["transition_detection"]:
         if detection_available():
             try:
                 transition_info = TransitionDetector().analyze(src)
+                logger.info(
+                    "decompose.transition_model_completed ok=%s fps=%.3f total_frames=%s "
+                    "frame_scores=%s cnn_scores=%s warning=%s",
+                    transition_info.ok,
+                    transition_info.fps,
+                    transition_info.total_frames,
+                    len(transition_info.frame_scores),
+                    len(transition_info.cnn_scores),
+                    clip_text(transition_info.warning, 200),
+                )
                 if transition_info.warning:
                     warnings.append(transition_info.warning)
                     _emit("warning", {"stage": "decompose", "step": "transition", "message": transition_info.warning})
@@ -126,18 +159,44 @@ def run_decompose(
             except Exception as exc:  # noqa: BLE001
                 message = f"转场检测失败，已退化为 ffmpeg 场景切分：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("decompose.transition_failed fallback=ffmpeg_scene", exc_info=True)
                 _emit("warning", {"stage": "decompose", "step": "transition", "message": message})
         else:
             message = "转场检测依赖未安装，已退化为 ffmpeg 场景切分"
             warnings.append(message)
+            logger.warning("decompose.transition_unavailable fallback=ffmpeg_scene")
             _emit("warning", {"stage": "decompose", "step": "transition", "message": message})
     if not cuts:
         cuts = media.scene_cut_ms(src)
-    _emit("stage_completed", {"stage": "decompose", "step": "transition"})
+    logger.info(
+        "decompose.transition_completed elapsed_ms=%.1f cuts=%s preview=%s",
+        (time.perf_counter() - transition_started) * 1000,
+        len(cuts),
+        cuts[:20],
+    )
+    _emit(
+        "stage_completed",
+        {
+            "stage": "decompose",
+            "step": "transition",
+            "message": f"识别到 {len(cuts)} 个转场切点",
+            "details": {
+                "cuts": len(cuts),
+                "resolution": f"{info['width']} × {info['height']}",
+                "fps": f"{float(info.get('fps') or 0):.2f}",
+            },
+        },
+    )
     _check()
 
     silence = media.silence_points_ms(src) if info["has_audio"] else []
     local_plan = plan_segments(duration_ms, cuts, silence, info["has_audio"])
+    logger.info(
+        "decompose.local_plan segments=%s silence_points=%s ranges=%s",
+        len(local_plan),
+        len(silence),
+        [(item["role"], item["start_ms"], item["end_ms"]) for item in local_plan],
+    )
     local_lenses = [
         {
             "id": item["id"],
@@ -159,12 +218,8 @@ def run_decompose(
     remote_lenses: list[dict[str, Any]] | None = None
     model_opening: dict[str, Any] | None = None
 
-    remote_ready = (
-        provider in {"openai_compatible", "gemini_gateway"}
-        and bool(mm.get("base_url"))
-        and (bool(secrets.get("multimodal")) or (provider == "gemini_gateway" and mm.get("token_url")))
-    )
     _emit("stage_started", {"stage": "decompose", "step": "understand"})
+    understand_started = time.perf_counter()
     if remote_ready:
         try:
             remote_lenses, video_tags, used_provider, model_name, remote_warning, model_opening = _remote_split(
@@ -180,10 +235,12 @@ def run_decompose(
             )
             if remote_warning:
                 warnings.append(remote_warning)
+                logger.warning("decompose.understand_warning message=%s", remote_warning)
                 _emit("warning", {"stage": "decompose", "step": "understand", "message": remote_warning})
             if remote_lenses is not None and model_opening is None:
                 message = "模型未给出有效开头区间，已改用本地暂估，不能当作模型开头"
                 warnings.append(message)
+                logger.warning("decompose.opening_missing fallback=local")
                 _emit("warning", {"stage": "decompose", "step": "understand", "message": message})
         except Exception as exc:  # noqa: BLE001
             from video_fission.pipeline import PipelineCancelled
@@ -192,16 +249,45 @@ def run_decompose(
                 raise
             message = f"整片理解失败，已保留本地切分：{exc.__class__.__name__}"
             warnings.append(message)
+            logger.warning("decompose.understand_failed fallback=local_plan", exc_info=True)
             _emit("warning", {"stage": "decompose", "step": "understand", "message": message})
             remote_lenses = None
             used_provider = "local_ffmpeg"
             video_tags = empty_video_tags()
             model_opening = None
-    _emit("stage_completed", {"stage": "decompose", "step": "understand"})
+    logger.info(
+        "decompose.understand_completed elapsed_ms=%.1f provider=%s segments=%s tags=%s opening=%s",
+        (time.perf_counter() - understand_started) * 1000,
+        used_provider,
+        len(remote_lenses or []),
+        len(video_tags),
+        len(str((model_opening or {}).get("reason") or "")),
+    )
+    understood_segments = len(remote_lenses or [])
+    tag_count = sum(1 for value in video_tags.values() if value not in (None, "", [], {}))
+    _emit(
+        "stage_completed",
+        {
+            "stage": "decompose",
+            "step": "understand",
+            "message": (
+                f"整片理解完成，得到 {understood_segments} 个镜头"
+                if understood_segments
+                else "整片理解完成，已保留本地切分"
+            ),
+            "details": {
+                "segments": understood_segments,
+                "tags": tag_count,
+                "provider": used_provider,
+                "model": model_name or "",
+            },
+        },
+    )
     _check()
 
     if remote_lenses:
         _emit("stage_started", {"stage": "decompose", "step": "refine"})
+        refine_started = time.perf_counter()
         fps = transition_info.fps or float(info.get("fps") or 30)
         if transition_info.ok:
             try:
@@ -209,13 +295,30 @@ def run_decompose(
             except Exception as exc:  # noqa: BLE001
                 message = f"转场精修失败，已使用模型时间点：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("decompose.refine_failed use_model_timing", exc_info=True)
                 _emit("warning", {"stage": "decompose", "step": "refine", "message": message})
         remote_lenses = validate_segments(remote_lenses, duration_s, fps)
-        _emit("stage_completed", {"stage": "decompose", "step": "refine"})
+        _emit(
+            "stage_completed",
+            {
+                "stage": "decompose",
+                "step": "refine",
+                "message": f"切片边界校正完成，共 {len(remote_lenses)} 个镜头",
+                "details": {"segments": len(remote_lenses)},
+            },
+        )
         segments = to_production_segments(remote_lenses, duration_ms, production_id)
+        logger.info(
+            "decompose.refine_completed elapsed_ms=%.1f model_segments=%s production_segments=%s coverage=%s",
+            (time.perf_counter() - refine_started) * 1000,
+            len(remote_lenses),
+            len(segments),
+            coverage_ok(segments, duration_ms),
+        )
         if not coverage_ok(segments, duration_ms):
             message = "模型切片未覆盖全片，已回退本地切分"
             warnings.append(message)
+            logger.warning("decompose.coverage_failed fallback=local_plan")
             _emit("warning", {"stage": "decompose", "step": "refine", "message": message})
             segments = to_production_segments(local_lenses, duration_ms, production_id)
             used_provider = "local_ffmpeg"
@@ -240,6 +343,13 @@ def run_decompose(
     else:
         opening = estimate_local_opening(duration_ms, cuts, silence)
     opening = finalize_opening(opening, segments, duration_ms, production_id)
+    logger.info(
+        "decompose.opening_completed method=%s range=0-%sms segment_ids=%s reason=%s",
+        opening.get("method") or "-",
+        opening.get("end_ms"),
+        ",".join(opening.get("segment_ids") or []),
+        len(str(opening.get("reason") or "")),
+    )
 
     _emit("stage_started", {"stage": "decompose", "step": "clip_analysis"})
     _cut_and_frame(src, artifact_dir, segments, info, production_id, cancel, _check)
@@ -257,7 +367,15 @@ def run_decompose(
             _emit,
             cancel,
         )
-    _emit("stage_completed", {"stage": "decompose", "step": "clip_analysis"})
+    _emit(
+        "stage_completed",
+        {
+            "stage": "decompose",
+            "step": "clip_analysis",
+            "message": f"已提取 {len(segments)} 组片段与关键帧",
+            "details": {"segments": len(segments)},
+        },
+    )
     _check()
 
     if remote_ready and used_provider != "local_ffmpeg" and options["clip_analysis"] and options["observe"]:
@@ -273,7 +391,23 @@ def run_decompose(
             _emit,
             cancel,
         )
-        _emit("stage_completed", {"stage": "decompose", "step": "observe"})
+        observed = sum(
+            1 for segment in segments if not observe_is_empty(segment.get("observe"))
+        )
+        failed = sum(1 for segment in segments if segment.get("error"))
+        _emit(
+            "stage_completed",
+            {
+                "stage": "decompose",
+                "step": "observe",
+                "message": f"片段观察完成，{observed}/{len(segments)} 段有结果",
+                "details": {
+                    "observed": observed,
+                    "failed": failed,
+                    "segments": len(segments),
+                },
+            },
+        )
     elif not options["observe"] or provider == "local_ffmpeg" or not remote_ready:
         if options["observe"] and (provider == "local_ffmpeg" or not remote_ready):
             message = "当前无法调用模型，已省略 observe"
@@ -284,6 +418,14 @@ def run_decompose(
         f"参考视频 {duration_ms}ms，{info['width']}x{info['height']}，共 {len(segments)} 段（Hook / Value / CTA）。"
     )
     description = str(video_tags.get("video_describe") or "").strip()
+    logger.info(
+        "decompose.completed provider=%s model=%s segments=%s opening_ms=%s summary=%s",
+        used_provider,
+        model_name or "-",
+        len(segments),
+        opening.get("end_ms"),
+        len(summary),
+    )
     return {
         "summary": summary,
         "description": description,
@@ -328,6 +470,7 @@ def _cut_and_frame(
         check()
         seg_id = segment["id"]
         dest = artifact_dir / "clips" / f"{seg_id}.mp4"
+        started = time.perf_counter()
         try:
             cut_playback_clip(
                 src,
@@ -341,8 +484,16 @@ def _cut_and_frame(
             )
             segment["clip_path"] = f"clips/{seg_id}.mp4"
             segment["clip_url"] = f"/api/productions/{production_id}/artifacts/clips/{seg_id}.mp4"
+            logger.info(
+                "decompose.clip_cut seg_id=%s range=%s-%sms output=%s elapsed_ms=%.1f",
+                seg_id,
+                segment["start_ms"],
+                segment["end_ms"],
+                file_summary(dest),
+                (time.perf_counter() - started) * 1000,
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.info("切片失败 %s: %s", seg_id, exc)
+            logger.warning("decompose.clip_cut_failed seg_id=%s", seg_id, exc_info=True)
             segment["error"] = f"切片失败：{exc.__class__.__name__}"
         span = max(int(segment["end_ms"]) - int(segment["start_ms"]), 1)
         stamps = [int(segment["start_ms"]) + int(span * ratio) for ratio in (0.15, 0.5, 0.82)]
@@ -351,9 +502,10 @@ def _cut_and_frame(
             for ts in stamps
         ]
         try:
-            media.extract_frames(src, stamps, artifact_dir, f"{seg_id}_frame")
-        except Exception as exc:  # noqa: BLE001
-            logger.info("抽帧失败 %s: %s", seg_id, exc)
+            frames = media.extract_frames(src, stamps, artifact_dir, f"{seg_id}_frame")
+            logger.info("decompose.frames_extracted seg_id=%s timestamps=%s frames=%s", seg_id, stamps, len(frames))
+        except Exception:  # noqa: BLE001
+            logger.warning("decompose.frame_extract_failed seg_id=%s", seg_id, exc_info=True)
 
 
 
@@ -370,6 +522,7 @@ def _cut_opening_clip(
         opening.pop("clip_url", None)
         return
     dest = artifact_dir / "clips" / "opening.mp4"
+    started = time.perf_counter()
     try:
         cut_playback_clip(
             src,
@@ -383,8 +536,14 @@ def _cut_opening_clip(
         )
         opening["clip_path"] = "clips/opening.mp4"
         opening["clip_url"] = f"/api/productions/{production_id}/artifacts/clips/opening.mp4"
-    except Exception as exc:  # noqa: BLE001
-        logger.info("开头连续块切片失败: %s", exc)
+        logger.info(
+            "decompose.opening_clip_cut range=0-%sms output=%s elapsed_ms=%.1f",
+            end_ms,
+            file_summary(dest),
+            (time.perf_counter() - started) * 1000,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("decompose.opening_clip_cut_failed", exc_info=True)
         opening.pop("clip_path", None)
         opening.pop("clip_url", None)
 
@@ -401,6 +560,7 @@ def _remote_split(
     cancel: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str, str, dict[str, Any] | None]:
     _raise_if_cancelled(cancel)
+    started = time.perf_counter()
     prompt = build_split_prompt(duration_s)
     compressed, warning = ensure_under_size(src, artifact_dir / "tmp", options["gemini_max_size_mb"])
     use_video = compressed.is_file() and compressed.stat().st_size <= options["gemini_max_size_mb"] * 1024 * 1024
@@ -410,6 +570,17 @@ def _remote_split(
         duration_ms = int(duration_s * 1000)
         stamps = [int(duration_ms * ratio) for ratio in (0.08, 0.2, 0.35, 0.5, 0.65, 0.8, 0.92)]
         frames = media.extract_frames(src, stamps, artifact_dir / "tmp", "understand_frame")
+    logger.info(
+        "decompose.remote_split_request provider=%s endpoint=%s model=%s use_video=%s "
+        "compressed=%s frames=%s prompt_chars=%s",
+        provider,
+        safe_url(str(mm.get("base_url") or "")),
+        mm.get("model") or "-",
+        use_video,
+        file_summary(compressed),
+        len(frames),
+        len(prompt),
+    )
     data, used_frames = _call_understand(
         provider,
         mm,
@@ -432,6 +603,15 @@ def _remote_split(
         raise RuntimeError("模型切片未覆盖全片或存在明显空隙")
     tags = extract_video_tags(data)
     opening = parse_opening(data, int(duration_s * 1000))
+    logger.info(
+        "decompose.remote_split_completed provider=%s segments=%s tags=%s opening=%s used_frames=%s elapsed_ms=%.1f",
+        provider,
+        len(lenses),
+        len(tags),
+        opening.get("end_ms") if opening else "-",
+        used_frames,
+        (time.perf_counter() - started) * 1000,
+    )
     return lenses, tags, provider, str(mm.get("model") or ""), warning, opening
 
 
@@ -449,6 +629,19 @@ def _call_understand(
 ) -> tuple[Any, bool]:
     timeout = int(timeout_seconds or mm.get("timeout_seconds") or 120)
     output_tokens = int(max_tokens or mm.get("max_tokens") or 12000)
+    logger.info(
+        "llm.understand_call_started provider=%s endpoint=%s model=%s video=%s frames=%s "
+        "prompt_chars=%s timeout_s=%s max_tokens=%s temperature=%.2f",
+        provider,
+        safe_url(str(mm.get("base_url") or "")),
+        mm.get("model") or "-",
+        bool(video_path),
+        len(frames),
+        len(prompt),
+        timeout,
+        output_tokens,
+        temperature,
+    )
     if provider == "gemini_gateway":
         client = GeminiGatewayClient(
             base_url=str(mm.get("base_url") or ""),
@@ -468,25 +661,30 @@ def _call_understand(
                 )
                 payload = client.extract_payload(response)
                 if payload is not None:
+                    logger.info("llm.understand_call_completed provider=%s input=video", provider)
                     return payload, False
             except Exception:  # noqa: BLE001
                 if _cancel_requested(cancel):
                     _raise_if_cancelled(cancel)
+                logger.warning("llm.understand_video_failed provider=%s fallback=frames", provider, exc_info=True)
             response = _run_cancellable(
                 lambda: client.call(prompt, frames=frames, temperature=temperature),
                 cancel,
             )
+            logger.info("llm.understand_call_completed provider=%s input=frames", provider)
             return client.extract_payload(response), True
         if video_path is not None:
             response = _run_cancellable(
                 lambda: client.call(prompt, video_path=video_path, temperature=temperature),
                 cancel,
             )
+            logger.info("llm.understand_call_completed provider=%s input=video", provider)
             return client.extract_payload(response), False
         response = _run_cancellable(
             lambda: client.call(prompt, frames=frames, temperature=temperature),
             cancel,
         )
+        logger.info("llm.understand_call_completed provider=%s input=frames", provider)
         return client.extract_payload(response), True
 
     def _chat(content: list[dict[str, Any]]) -> Any:
@@ -500,6 +698,7 @@ def _call_understand(
             ),
             cancel,
         )
+        logger.info("llm.chat_response_received chars=%s", len(raw))
         return providers.extract_json(raw) or extract_json(raw)
 
     if video_path is not None:
@@ -516,12 +715,15 @@ def _call_understand(
             ]
             payload = _chat(content)
             if payload is not None:
+                logger.info("llm.understand_call_completed provider=%s input=video", provider)
                 return payload, False
         except Exception:
-            pass
+            logger.warning("llm.understand_video_failed provider=%s fallback=frames", provider, exc_info=True)
     content = [{"type": "text", "text": prompt}]
     content.extend(providers.encode_image(path) for path in frames[:16])
-    return _chat(content), True
+    payload = _chat(content)
+    logger.info("llm.understand_call_completed provider=%s input=frames", provider)
+    return payload, True
 
 
 def _analyze_clips(
@@ -543,9 +745,19 @@ def _analyze_clips(
     prompt = build_lens_prompt(product)
 
     def work(segment: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+        started = time.perf_counter()
         clip = artifact_dir / str(segment.get("clip_path") or "")
         frames = sorted(artifact_dir.glob(f"{segment['id']}_frame_*.jpg"))[:8]
         video = clip if clip.is_file() else None
+        logger.info(
+            "decompose.clip_analysis_started seg_id=%s range=%s-%sms video=%s frames=%s prompt_chars=%s",
+            segment["id"],
+            segment["start_ms"],
+            segment["end_ms"],
+            file_summary(video),
+            len(frames),
+            len(prompt),
+        )
         try:
             data, _used = _call_understand(
                 provider,
@@ -559,10 +771,25 @@ def _analyze_clips(
             )
             if not isinstance(data, dict):
                 raise RuntimeError("片段解析不是对象")
-            return segment["id"], normalize_clip_result(data), ""
+            normalized = normalize_clip_result(data)
+            logger.info(
+                "decompose.clip_analysis_completed seg_id=%s tags=%s product=%s description=%s elapsed_ms=%.1f",
+                segment["id"],
+                sum(1 for value in normalized.values() if value not in (None, "", [], {})),
+                normalized.get("is_include_product"),
+                len(str(normalized.get("clip_description") or "")),
+                (time.perf_counter() - started) * 1000,
+            )
+            return segment["id"], normalized, ""
         except Exception as exc:  # noqa: BLE001
             if _cancel_requested(cancel):
                 _raise_if_cancelled(cancel)
+            logger.warning(
+                "decompose.clip_analysis_failed seg_id=%s elapsed_ms=%.1f",
+                segment["id"],
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             return segment["id"], empty_lens_info(segment), f"{segment['id']} 片段解析失败：{exc.__class__.__name__}"
 
     _run_workers(
@@ -589,12 +816,23 @@ def _observe_clips(
     cancel: Any,
 ) -> None:
     def work(segment: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+        started = time.perf_counter()
         clip = artifact_dir / str(segment.get("clip_path") or "")
         duration_s = max(int(segment["end_ms"]) - int(segment["start_ms"]), 1) / 1000
         has_audio = probe_has_audio(str(clip)) if clip.is_file() else None
         prompt = observe_prompt(duration_s, has_audio, int(segment["start_ms"]) / 1000)
         frames = sorted(artifact_dir.glob(f"{segment['id']}_frame_*.jpg"))[:8]
         video = clip if clip.is_file() else None
+        logger.info(
+            "decompose.observe_started seg_id=%s range=%s-%sms video=%s frames=%s audio=%s prompt_chars=%s",
+            segment["id"],
+            segment["start_ms"],
+            segment["end_ms"],
+            file_summary(video),
+            len(frames),
+            has_audio,
+            len(prompt),
+        )
         try:
             data, _used = _call_understand(
                 provider,
@@ -618,10 +856,22 @@ def _observe_clips(
             )
             if observe_is_empty(result):
                 raise RuntimeError("observe 为空")
+            logger.info(
+                "decompose.observe_completed seg_id=%s elapsed_ms=%.1f result_chars=%s",
+                segment["id"],
+                (time.perf_counter() - started) * 1000,
+                len(str(result)),
+            )
             return segment["id"], result, ""
         except Exception as exc:  # noqa: BLE001
             if _cancel_requested(cancel):
                 _raise_if_cancelled(cancel)
+            logger.warning(
+                "decompose.observe_failed seg_id=%s elapsed_ms=%.1f",
+                segment["id"],
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             return segment["id"], empty_observe(), f"{segment['id']} observe 失败：{exc.__class__.__name__}"
 
     results = _run_workers(
@@ -655,8 +905,13 @@ def _run_workers(
     results: dict[str, dict[str, Any]] = {}
     if not segments:
         return results
+    started = time.perf_counter()
+    logger.info("decompose.workers_started step=%s segments=%s workers=%s", step, len(segments), workers)
     pool = ThreadPoolExecutor(max_workers=max(1, workers))
-    futures = {pool.submit(work, segment): segment["id"] for segment in segments}
+    futures = {
+        pool.submit(copy_context().run, work, segment): segment["id"]
+        for segment in segments
+    }
     cancelled = False
     try:
         for future in as_completed(futures):
@@ -671,6 +926,7 @@ def _run_workers(
                 if segment["id"] == seg_id and field == "lens_info":
                     segment["lens_info"] = payload
             if error:
+                logger.warning("decompose.worker_failed step=%s seg_id=%s message=%s", step, seg_id, error)
                 warnings.append(error)
                 emit("warning", {"stage": "decompose", "step": step, "message": error})
                 for segment in segments:
@@ -684,4 +940,11 @@ def _run_workers(
         raise
     finally:
         pool.shutdown(wait=not cancelled, cancel_futures=cancelled)
+    logger.info(
+        "decompose.workers_completed step=%s results=%s warnings=%s elapsed_ms=%.1f",
+        step,
+        len(results),
+        len(warnings),
+        (time.perf_counter() - started) * 1000,
+    )
     return results

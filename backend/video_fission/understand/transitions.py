@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,12 +55,22 @@ class TransitionDetector:
 
     def analyze(self, video_path: str | Path) -> TransitionInfo:
         if self.shot_detector is None:
+            logger.warning("transition.detector_unavailable file=%s", Path(video_path).name)
             return TransitionInfo(ok=False, warning="转场检测依赖不可用，已退化为 ffmpeg 场景切分")
+        started = time.perf_counter()
+        logger.info("transition.analysis_started file=%s", Path(video_path).name)
         try:
             total_frames, duration, fps, frame_scores = self.shot_detector.get_frame_scores(str(video_path))
         except Exception as exc:  # noqa: BLE001
-            logger.info("PySceneDetect 帧分数失败: %s", exc)
+            logger.warning("transition.pyscenedetect_failed", exc_info=True)
             return TransitionInfo(ok=False, warning=f"转场检测失败，已退化为 ffmpeg 场景切分：{exc.__class__.__name__}")
+        logger.info(
+            "transition.pyscenedetect_completed total_frames=%s duration_s=%.3f fps=%.3f scores=%s",
+            total_frames,
+            duration,
+            fps,
+            len(frame_scores or []),
+        )
 
         cnn_scores: list[float] = []
         cnn_warning = ""
@@ -67,7 +78,15 @@ class TransitionDetector:
             _, cnn_scores = self.transnet.predict_video(str(video_path), total_frames)
         except Exception as exc:  # noqa: BLE001
             cnn_warning = f"TransNetV2 不可用，仅使用 PySceneDetect：{exc.__class__.__name__}"
-            logger.info("TransNetV2 推理失败: %s", exc)
+            logger.warning("transition.transnet_failed fallback=pyscenedetect", exc_info=True)
+        logger.info(
+            "transition.analysis_completed total_frames=%s frame_scores=%s cnn_scores=%s elapsed_ms=%.1f warning=%s",
+            total_frames,
+            len(frame_scores or []),
+            len(cnn_scores or []),
+            (time.perf_counter() - started) * 1000,
+            cnn_warning or "-",
+        )
 
         return TransitionInfo(
             fps=fps,
@@ -133,6 +152,7 @@ class TransitionDetector:
                 ms = int(round(index / max(fps, 1e-6) * 1000))
                 if not peaks or ms - peaks[-1] >= 200:
                     peaks.append(ms)
+        logger.info("transition.cuts_completed cuts=%s preview=%s", len(peaks), peaks[:20])
         return peaks
 
     @staticmethod

@@ -10,6 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .logging_utils import clip_text, summarize_value
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,7 @@ class CodexAppServer:
     def start(self) -> CodexAppServer:
         is_shell = os.name == "nt" and self.codex_bin.lower().endswith((".cmd", ".bat"))
         command = f'"{self.codex_bin}" app-server --stdio' if is_shell else [self.codex_bin, "app-server", "--stdio"]
+        logger.info("codex.runtime_starting cwd=%s shell=%s", self.cwd, is_shell)
         try:
             self.proc = subprocess.Popen(
                 command,
@@ -64,11 +67,13 @@ class CodexAppServer:
                 start_new_session=os.name != "nt",
             )
         except OSError as exc:
+            logger.error("codex.runtime_start_failed cwd=%s", self.cwd, exc_info=True)
             raise CodexAppServerError(f"无法启动智能中枢运行时: {exc}") from exc
         thread = threading.Thread(target=self._read_loop, daemon=True, name="codex-stdout")
         thread.start()
         stderr_thread = threading.Thread(target=self._read_stderr, daemon=True, name="codex-stderr")
         stderr_thread.start()
+        logger.info("codex.runtime_started pid=%s", self.proc.pid)
         return self
 
     def _read_stderr(self) -> None:
@@ -78,6 +83,7 @@ class CodexAppServer:
             text = line.rstrip()
             if text:
                 self.stderr = text[-4000:]
+                logger.debug("codex.stderr line=%s", clip_text(text, 1000))
 
     def _read_loop(self) -> None:
         if not self.proc or not self.proc.stdout:
@@ -178,26 +184,56 @@ class CodexAppServer:
     ) -> Any:
         if not self.running:
             raise CodexAppServerError(self.stderr or "智能中枢运行时未运行")
+        started = time.perf_counter()
         with self._lock:
             request_id = self._next_id
             self._next_id += 1
             waiter = {"event": threading.Event(), "result": None, "error": None}
             self._pending[request_id] = waiter
+        timeout = timeout_seconds or self.timeout_seconds
+        logger.info(
+            "codex.rpc_started method=%s rpc_id=%s timeout_s=%s params=%s",
+            method,
+            request_id,
+            timeout,
+            summarize_value(params or {}),
+        )
         try:
             self._send({"method": method, "id": request_id, "params": params or {}})
         except Exception:
             with self._lock:
                 self._pending.pop(request_id, None)
+            logger.error("codex.rpc_send_failed method=%s rpc_id=%s", method, request_id, exc_info=True)
             raise
-        timeout = timeout_seconds or self.timeout_seconds
         if not waiter["event"].wait(timeout):
             with self._lock:
                 self._pending.pop(request_id, None)
+            logger.error(
+                "codex.rpc_timeout method=%s rpc_id=%s timeout_s=%s elapsed_ms=%.1f",
+                method,
+                request_id,
+                timeout,
+                (time.perf_counter() - started) * 1000,
+            )
             raise CodexAppServerError(f"{method} 在 {timeout}s 后超时")
         if waiter["error"]:
             error = waiter["error"]
             message = error.get("message") if isinstance(error, dict) else str(error)
+            logger.error(
+                "codex.rpc_failed method=%s rpc_id=%s error=%s elapsed_ms=%.1f",
+                method,
+                request_id,
+                clip_text(message, 1000),
+                (time.perf_counter() - started) * 1000,
+            )
             raise CodexAppServerError(f"{method}: {message}")
+        logger.info(
+            "codex.rpc_completed method=%s rpc_id=%s result=%s elapsed_ms=%.1f",
+            method,
+            request_id,
+            summarize_value(waiter["result"]),
+            (time.perf_counter() - started) * 1000,
+        )
         return waiter["result"]
 
     def initialize(self) -> dict[str, Any]:
@@ -292,6 +328,7 @@ class CodexAppServer:
         proc = self.proc
         if not proc:
             return
+        logger.info("codex.runtime_stopping pid=%s", proc.pid)
         try:
             if proc.stdin:
                 proc.stdin.close()
@@ -303,3 +340,4 @@ class CodexAppServer:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        logger.info("codex.runtime_stopped pid=%s", proc.pid)

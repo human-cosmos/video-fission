@@ -49,6 +49,8 @@ npm install --prefix frontend
 
 工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 
+运行日志默认同时写入终端和 `status/video-fission.log`，单文件 20MB、保留 10 份。日志带 `request_id` / `production_id` / `stage` 等关联字段，覆盖 API 请求、外部模型与视频 Provider、Codex RPC、转场/切片、片段理解、镜头生成和 FFmpeg 合成。用 `VF_LOG_LEVEL=DEBUG` 可查看更细的媒体探测和 FFmpeg 命令；提示词默认只记录长度与摘要，调试时可临时设置 `VF_LOG_PROMPTS=1` 输出截断预览。
+
 ### 视频创作
 
 默认无需 API Key。在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片；配置了理解模型后还会出现整片标签、三级标签和观察卡。完成后可播放并下载 `final.mp4` 和字幕 `final.srt`。刷新后会从已有任务恢复进度。

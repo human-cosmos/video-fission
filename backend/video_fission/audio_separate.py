@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from . import media
+
+logger = logging.getLogger(__name__)
 
 
 def _has_demucs() -> bool:
@@ -14,12 +18,21 @@ def _has_demucs() -> bool:
 
 def separate_reference_audio(source: Path, dest_dir: Path) -> dict[str, Any]:
     """Split reference audio into vocals and BGM. Never copy the mix twice."""
+    started = time.perf_counter()
     dest_dir.mkdir(parents=True, exist_ok=True)
     vocals = dest_dir / "reference-vocals.m4a"
     bgm = dest_dir / "reference-bgm.m4a"
     info = media.probe(source)
+    logger.info(
+        "audio.separation_started source=%s duration_ms=%s channels=%s demucs=%s",
+        source.name,
+        info.get("duration_ms"),
+        info.get("audio_channels"),
+        _has_demucs(),
+    )
     if not info.get("has_audio"):
         _silent_pair(vocals, bgm, int(info.get("duration_ms") or 1000))
+        logger.warning("audio.separation_completed method=placeholder reason=no_audio")
         return {
             "vocals_path": str(vocals),
             "bgm_path": str(bgm),
@@ -31,33 +44,48 @@ def separate_reference_audio(source: Path, dest_dir: Path) -> dict[str, Any]:
         try:
             _separate_demucs(source, vocals, bgm)
             _assert_distinct(vocals, bgm, source)
-            return {
+            result = {
                 "vocals_path": str(vocals),
                 "bgm_path": str(bgm),
                 "method": "demucs",
                 "usable": True,
                 "warning": "",
             }
+            logger.info(
+                "audio.separation_completed method=demucs vocals=%s bgm=%s elapsed_ms=%.1f",
+                vocals.stat().st_size,
+                bgm.stat().st_size,
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
         except Exception as exc:
+            logger.warning("audio.demucs_failed fallback=local_ms", exc_info=True)
             warning = f"Demucs 分离失败，已改用本地中置/侧边：{exc.__class__.__name__}"
             _separate_local_ms(source, vocals, bgm)
             _assert_distinct(vocals, bgm, source)
-            return {
+            result = {
                 "vocals_path": str(vocals),
                 "bgm_path": str(bgm),
                 "method": "local_ms",
                 "usable": True,
                 "warning": warning,
             }
+            logger.info(
+                "audio.separation_completed method=local_ms fallback=true elapsed_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
     _separate_local_ms(source, vocals, bgm)
     _assert_distinct(vocals, bgm, source)
-    return {
+    result = {
         "vocals_path": str(vocals),
         "bgm_path": str(bgm),
         "method": "local_ms",
         "usable": True,
         "warning": "",
     }
+    logger.info("audio.separation_completed method=local_ms elapsed_ms=%.1f", (time.perf_counter() - started) * 1000)
+    return result
 
 
 def _separate_demucs(source: Path, vocals: Path, bgm: Path) -> None:
@@ -68,12 +96,20 @@ def _separate_demucs(source: Path, vocals: Path, bgm: Path) -> None:
         [media.ffmpeg_bin(), "-y", "-i", str(source), "-vn", "-ac", "2", "-ar", "44100", str(wav)],
         timeout=60,
     )
-    subprocess.run(
+    started = time.perf_counter()
+    logger.info("audio.demucs_started input=%s output_dir=%s timeout_s=180", wav.name, work)
+    result = subprocess.run(
         ["demucs", "--two-stems", "vocals", "-o", str(work), str(wav)],
-        check=True,
+        check=False,
         capture_output=True,
+        text=True,
         timeout=180,
     )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        logger.error("audio.demucs_failed returncode=%s stderr=%s", result.returncode, detail[-2000:])
+        raise RuntimeError(f"Demucs 执行失败：{detail[-500:]}")
+    logger.info("audio.demucs_completed elapsed_ms=%.1f", (time.perf_counter() - started) * 1000)
     found_vocals = next(work.rglob("vocals.wav"), None)
     found_bgm = next(work.rglob("no_vocals.wav"), None) or next(work.rglob("accompaniment.wav"), None)
     if not found_vocals or not found_bgm:
@@ -91,7 +127,10 @@ def _separate_local_ms(source: Path, vocals: Path, bgm: Path) -> None:
     else:
         # Mono: complementary bands so the two files are not byte-identical copies.
         vocals_filter = "highpass=f=200,lowpass=f=4000,aformat=sample_fmts=fltp:sample_rates=44100"
-        bgm_filter = "lowpass=f=180,highpass=f=4500,amix=inputs=2:dropout_transition=0,aformat=sample_fmts=fltp:sample_rates=44100"
+        bgm_filter = (
+            "lowpass=f=180,highpass=f=4500,amix=inputs=2:dropout_transition=0,"
+            "aformat=sample_fmts=fltp:sample_rates=44100"
+        )
     _ffmpeg_audio(source, vocals, vocals_filter)
     if channels >= 2:
         _ffmpeg_audio(source, bgm, bgm_filter)

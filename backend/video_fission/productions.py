@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import threading
 import uuid
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,8 @@ from .pipeline import PipelineEngine
 from .replace import normalize_replace_policy, resolve_replace_plan
 from .script_flow import candidate_by_id, classify_followup
 from .settings_store import SettingsStore
+
+logger = logging.getLogger(__name__)
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v", ".qt"}
 VIDEO_CONTENT_TYPES = {
@@ -289,19 +293,25 @@ class ProductionService:
             self._cancels[production_id] = cancel
         if wait:
             try:
+                logger.info("production.run_wait_started resume_from=%s", resume or "-")
                 self.engine.run(production_id, cancel, resume_from=resume)
             finally:
                 with self._lock:
                     self._cancels.pop(production_id, None)
             return self.public(production_id, user_id=user_id)
+        context = copy_context()
+
+        def run_pipeline_thread() -> None:
+            context.run(self._run_thread, production_id, cancel, resume)
+
         thread = threading.Thread(
-            target=self._run_thread,
-            args=(production_id, cancel, resume),
+            target=run_pipeline_thread,
             name=f"production-{production_id}",
             daemon=True,
         )
         with self._lock:
             self._threads[production_id] = thread
+        logger.info("production.run_queued resume_from=%s", resume or "-")
         thread.start()
         return self.public(production_id, user_id=user_id)
 
@@ -526,7 +536,17 @@ class ProductionService:
         legacy_artifact_dir = self.settings.artifacts_dir / "productions" / production_id
         if not artifact_dir.is_dir() and legacy_artifact_dir.is_dir():
             artifact_dir = legacy_artifact_dir
-        cards = cards_for(public, artifact_dir if artifact_dir.is_dir() else None)
+        events = self.db.list_production_events(
+            production_id,
+            limit=180,
+            newest_first=True,
+        )
+        events.reverse()
+        cards = cards_for(
+            public,
+            artifact_dir if artifact_dir.is_dir() else None,
+            events=events,
+        )
         current_types = {item_type for item_type, _payload in cards}
         for item_type in VIDEO_CARD_TYPES:
             if item_type in current_types:
@@ -611,9 +631,11 @@ class ProductionService:
 
     def _run_thread(self, production_id: str, cancel: threading.Event, resume_from: str | None = None) -> None:
         thread = threading.current_thread()
+        logger.info("production.run_thread_started resume_from=%s", resume_from or "-")
         try:
             self.engine.run(production_id, cancel, resume_from=resume_from)
         except Exception:
+            logger.exception("production.run_thread_failed")
             pass
         finally:
             with self._lock:
@@ -621,6 +643,7 @@ class ProductionService:
                     self._cancels.pop(production_id, None)
                 if self._threads.get(production_id) is thread:
                     self._threads.pop(production_id, None)
+            logger.info("production.run_thread_finished")
 
     def _to_public(self, production: dict[str, Any]) -> dict[str, Any]:
         production_id = production["id"]

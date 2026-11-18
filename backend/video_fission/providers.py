@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 import mimetypes
 import time
@@ -13,6 +14,9 @@ from threading import Event
 from typing import Any
 
 from . import media
+from .logging_utils import prompt_preview, safe_url, summarize_messages
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderError(RuntimeError):
@@ -36,9 +40,10 @@ def chat_completions(
     timeout: int,
 ) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
+    model_name = model or "gpt-4o-mini"
     body = json.dumps(
         {
-            "model": model or "gpt-4o-mini",
+            "model": model_name,
             "messages": messages,
             "temperature": 0.2,
         }
@@ -52,17 +57,63 @@ def chat_completions(
         },
         method="POST",
     )
+    stats = summarize_messages(messages)
+    started = time.perf_counter()
+    logger.info(
+        "llm.request_started provider=openai_compatible endpoint=%s model=%s messages=%s roles=%s "
+        "prompt_chars=%s image_parts=%s video_parts=%s timeout_s=%s",
+        safe_url(url),
+        model_name,
+        stats["messages"],
+        stats["roles"],
+        stats["text_chars"],
+        stats["image_parts"],
+        stats["video_parts"],
+        timeout,
+    )
+    preview = prompt_preview(
+        "\n".join(
+            str(message.get("content") or "")
+            for message in messages
+            if isinstance(message.get("content"), str)
+        )
+    )
+    if preview:
+        logger.info("llm.prompt_preview provider=openai_compatible preview=%s", preview)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
     except urllib.error.HTTPError as exc:
+        logger.warning(
+            "llm.request_failed provider=openai_compatible status=%s elapsed_ms=%.1f",
+            exc.code,
+            (time.perf_counter() - started) * 1000,
+        )
         raise ProviderError(f"模型请求失败 HTTP {exc.code}") from exc
     except Exception as exc:
+        logger.warning(
+            "llm.request_failed provider=openai_compatible error=%s elapsed_ms=%.1f",
+            exc.__class__.__name__,
+            (time.perf_counter() - started) * 1000,
+            exc_info=True,
+        )
         raise ProviderError(f"模型请求失败：{exc.__class__.__name__}") from exc
     try:
-        return str(payload["choices"][0]["message"]["content"])
+        content = str(payload["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError) as exc:
+        logger.warning("llm.response_invalid provider=openai_compatible payload_keys=%s", list(payload)[:12])
         raise ProviderError("模型响应缺少 content") from exc
+    logger.info(
+        "llm.request_completed provider=openai_compatible status=%s response_chars=%s elapsed_ms=%.1f",
+        getattr(response, "status", "-"),
+        len(content),
+        (time.perf_counter() - started) * 1000,
+    )
+    preview = prompt_preview(content, 1000)
+    if preview:
+        logger.debug("llm.response_preview provider=openai_compatible preview=%s", preview)
+    return content
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -72,6 +123,7 @@ def extract_json(text: str) -> dict[str, Any]:
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
+            logger.debug("llm.json_parsed mode=direct keys=%s", list(data)[:16])
             return data
     except json.JSONDecodeError:
         pass
@@ -80,7 +132,13 @@ def extract_json(text: str) -> dict[str, Any]:
     if start >= 0 and end > start:
         data = json.loads(raw[start : end + 1])
         if isinstance(data, dict):
+            logger.debug("llm.json_parsed mode=embedded keys=%s", list(data)[:16])
             return data
+    preview = prompt_preview(raw, 240)
+    if preview:
+        logger.warning("llm.json_parse_failed chars=%s preview=%s", len(raw), preview)
+    else:
+        logger.warning("llm.json_parse_failed chars=%s", len(raw))
     raise ProviderError("模型未返回合法 JSON")
 
 
@@ -120,6 +178,23 @@ def generate_remote_video(
     input_contents: list[dict[str, Any]] | None = None,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    logger.info(
+        "video.generate_request_started provider=%s endpoint=%s model=%s duration_ms=%s "
+        "target=%sx%s fps=%.3f prompt_chars=%s inputs=%s",
+        provider,
+        safe_url(base_url),
+        model or "-",
+        duration_ms,
+        width,
+        height,
+        fps,
+        len(prompt),
+        len(input_contents or []),
+    )
+    preview = prompt_preview(prompt)
+    if preview:
+        logger.info("video.prompt_preview provider=%s preview=%s", provider, preview)
     if provider == "seedance":
         return generate_seedance_video(
             base_url,
@@ -162,11 +237,33 @@ def generate_remote_video(
             content_type = response.headers.get("Content-Type", "")
             data = response.read()
     except urllib.error.HTTPError as exc:
+        logger.warning(
+            "video.generate_request_failed provider=%s status=%s elapsed_ms=%.1f",
+            provider,
+            exc.code,
+            (time.perf_counter() - started) * 1000,
+        )
         raise ProviderError(f"视频生成失败 HTTP {exc.code}") from exc
     except Exception as exc:
+        logger.warning(
+            "video.generate_request_failed provider=%s error=%s elapsed_ms=%.1f",
+            provider,
+            exc.__class__.__name__,
+            (time.perf_counter() - started) * 1000,
+            exc_info=True,
+        )
         raise ProviderError(f"视频生成失败：{exc.__class__.__name__}") from exc
+    logger.info(
+        "video.generate_response_received provider=%s status=%s content_type=%s bytes=%s elapsed_ms=%.1f",
+        provider,
+        getattr(response, "status", "-"),
+        content_type or "-",
+        len(data),
+        (time.perf_counter() - started) * 1000,
+    )
     if "video/" in content_type or data[:8].find(b"ftyp") != -1 or data.startswith(b"\x00\x00\x00"):
         dest.write_bytes(data)
+        logger.info("video.generate_download_completed provider=%s output=%s bytes=%s", provider, dest.name, len(data))
         return dest
     try:
         parsed = json.loads(data.decode("utf-8"))
@@ -174,11 +271,24 @@ def generate_remote_video(
         raise ProviderError("视频生成响应无法识别") from exc
     video_url = parsed.get("url")
     job_id = parsed.get("job_id")
+    logger.info(
+        "video.generate_response_parsed provider=%s job_id=%s video_url=%s",
+        provider,
+        job_id or "-",
+        safe_url(str(video_url or "")),
+    )
     if job_id and not video_url:
         video_url = _poll_job(base_url, api_key, job_id, timeout, cancel)
     if not video_url:
         raise ProviderError("视频生成响应缺少 url")
     _download(video_url, dest, api_key, timeout, base_url)
+    logger.info(
+        "video.generate_request_completed provider=%s output=%s size=%s elapsed_ms=%.1f",
+        provider,
+        dest.name,
+        dest.stat().st_size,
+        (time.perf_counter() - started) * 1000,
+    )
     return dest
 
 
@@ -260,6 +370,7 @@ def generate_seedance_video(
     input_contents: list[dict[str, Any]] | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel)
+    started = time.perf_counter()
     if not base_url:
         raise ProviderError("Seedance 未配置 base_url")
     if not api_key:
@@ -275,6 +386,18 @@ def generate_seedance_video(
         input_contents=input_contents,
     )
     submit_url = _seedance_endpoint(base_url, SEEDANCE_SUBMIT_PATH)
+    logger.info(
+        "video.seedance_submit_started endpoint=%s model=%s duration_ms=%s "
+        "target=%sx%s resolution=%s prompt_chars=%s inputs=%s",
+        safe_url(submit_url),
+        payload.get("model"),
+        duration_ms,
+        width,
+        height,
+        resolution,
+        len(prompt),
+        len(input_contents or []),
+    )
     response = _request_seedance(
         submit_url,
         api_key,
@@ -287,13 +410,16 @@ def generate_seedance_video(
     task_id = str(data.get("task_id") or data.get("taskId") or "").strip()
     if not task_id:
         raise ProviderError(f"Seedance 提交响应缺少 task_id：{_provider_message(response)}")
+    logger.info("video.seedance_task_created task_id=%s", task_id)
     # The submit response currently returns a gateway-local /api/v1/tasks path
     # that is not exposed on api.giikin.com. The documented /acore route is the
     # stable task query endpoint.
     deadline = time.monotonic() + max(timeout, 10)
     last_status = ""
+    poll_count = 0
     while time.monotonic() < deadline:
         _raise_if_cancelled(cancel)
+        poll_count += 1
         query_url = _seedance_query_url(base_url, task_id)
         task = _request_seedance(query_url, api_key, timeout=min(30, max(timeout, 5)))
         task_data = task.get("data")
@@ -303,12 +429,28 @@ def generate_seedance_video(
                 time.sleep(1)
                 continue
             raise ProviderError(f"Seedance 任务查询失败：{message}")
-        last_status = str(task_data.get("status") or "").strip().lower()
+        status = str(task_data.get("status") or "").strip().lower()
+        if status != last_status:
+            logger.info("video.seedance_status task_id=%s status=%s poll=%s", task_id, status or "-", poll_count)
+        last_status = status
         if last_status == "completed":
             video_url = _seedance_video_url(task_data)
             if not video_url:
                 raise ProviderError("Seedance 任务已完成但未返回视频 URL")
+            logger.info(
+                "video.seedance_completed task_id=%s poll=%s video_url=%s elapsed_ms=%.1f",
+                task_id,
+                poll_count,
+                safe_url(video_url),
+                (time.perf_counter() - started) * 1000,
+            )
             _download_seedance_video(video_url, dest, api_key, timeout, base_url)
+            logger.info(
+                "video.seedance_download_completed task_id=%s output=%s size=%s",
+                task_id,
+                dest.name,
+                dest.stat().st_size,
+            )
             return dest
         if last_status in {"failed", "cancelled", "canceled"}:
             error = task_data.get("error")
@@ -320,6 +462,7 @@ def generate_seedance_video(
             cancel.wait(2)
         else:
             time.sleep(2)
+    logger.warning("video.seedance_timeout task_id=%s last_status=%s poll=%s", task_id, last_status or "-", poll_count)
     suffix = f"，最后状态 {last_status}" if last_status else ""
     raise ProviderError(f"Seedance 视频生成超时{suffix}")
 
@@ -330,6 +473,8 @@ def probe_seedance(base_url: str, api_key: str, timeout: int, model: str = "") -
     if not api_key:
         return {"ok": False, "provider": "seedance", "detail": "未配置 API Key"}
     url = _seedance_endpoint(base_url, SEEDANCE_MODELS_PATH)
+    started = time.perf_counter()
+    logger.info("seedance.probe_started endpoint=%s model=%s", safe_url(url), model or "-")
     request = urllib.request.Request(url, headers=_seedance_headers(api_key), method="GET")
     try:
         with urllib.request.urlopen(request, timeout=min(max(timeout, 5), 20)) as response:
@@ -344,21 +489,35 @@ def probe_seedance(base_url: str, api_key: str, timeout: int, model: str = "") -
         }
         expected = _seedance_model(model)
         if expected not in model_ids:
+            logger.warning("seedance.probe_failed model_not_enabled model=%s", expected)
             return {
                 "ok": False,
                 "provider": "seedance",
                 "detail": f"模型未启用：{expected}",
             }
-        return {
+        result = {
             "ok": True,
             "provider": "seedance",
             "detail": f"模型已启用：{expected}",
         }
+        logger.info(
+            "seedance.probe_completed model=%s models=%s elapsed_ms=%.1f",
+            expected,
+            len(model_ids),
+            (time.perf_counter() - started) * 1000,
+        )
+        return result
     except urllib.error.HTTPError as exc:
+        logger.warning(
+            "seedance.probe_failed status=%s elapsed_ms=%.1f",
+            exc.code,
+            (time.perf_counter() - started) * 1000,
+        )
         if exc.code in {401, 403}:
             return {"ok": False, "provider": "seedance", "detail": f"认证失败 HTTP {exc.code}"}
         return {"ok": False, "provider": "seedance", "detail": f"探活失败 HTTP {exc.code}"}
     except Exception as exc:
+        logger.warning("seedance.probe_failed error=%s", exc.__class__.__name__, exc_info=True)
         return {"ok": False, "provider": "seedance", "detail": f"探活失败：{exc.__class__.__name__}"}
 
 
@@ -370,20 +529,44 @@ def _request_seedance(
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    method = "POST" if body is not None else "GET"
+    started = time.perf_counter()
     request = urllib.request.Request(
         url,
         data=body,
         headers=_seedance_headers(api_key),
-        method="POST" if body is not None else "GET",
+        method=method,
+    )
+    logger.info(
+        "seedance.http_request_started method=%s endpoint=%s timeout_s=%s payload_keys=%s",
+        method,
+        safe_url(url),
+        timeout,
+        list(payload)[:16] if payload else "-",
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        logger.warning(
+            "seedance.http_request_failed method=%s endpoint=%s status=%s elapsed_ms=%.1f",
+            method,
+            safe_url(url),
+            exc.code,
+            (time.perf_counter() - started) * 1000,
+        )
         if exc.code in {401, 403}:
             raise ProviderError(f"Seedance 认证失败 HTTP {exc.code}") from exc
         raise ProviderError(f"Seedance 请求失败 HTTP {exc.code}") from exc
     except Exception as exc:
+        logger.warning(
+            "seedance.http_request_failed method=%s endpoint=%s error=%s elapsed_ms=%.1f",
+            method,
+            safe_url(url),
+            exc.__class__.__name__,
+            (time.perf_counter() - started) * 1000,
+            exc_info=True,
+        )
         raise ProviderError(f"Seedance 请求失败：{exc.__class__.__name__}") from exc
     try:
         parsed = json.loads(raw)
@@ -391,6 +574,14 @@ def _request_seedance(
         raise ProviderError("Seedance 返回了非 JSON 响应") from exc
     if not isinstance(parsed, dict):
         raise ProviderError("Seedance 返回结构不是对象")
+    logger.info(
+        "seedance.http_request_completed method=%s endpoint=%s status=%s response_chars=%s elapsed_ms=%.1f",
+        method,
+        safe_url(url),
+        getattr(response, "status", "-"),
+        len(raw),
+        (time.perf_counter() - started) * 1000,
+    )
     return parsed
 
 
@@ -511,6 +702,8 @@ def _download_seedance_video(
     timeout: int,
     api_base_url: str,
 ) -> None:
+    started = time.perf_counter()
+    logger.info("seedance.download_started url=%s", safe_url(url))
     request = urllib.request.Request(
         url,
         headers=_media_download_headers(api_base_url, url, api_key),
@@ -524,6 +717,13 @@ def _download_seedance_video(
     if not data:
         raise ProviderError("Seedance 视频下载结果为空")
     dest.write_bytes(data)
+    logger.info(
+        "seedance.download_completed url=%s content_type=%s bytes=%s elapsed_ms=%.1f",
+        safe_url(url),
+        content_type or "-",
+        len(data),
+        (time.perf_counter() - started) * 1000,
+    )
 
 
 def _poll_job(
@@ -536,12 +736,18 @@ def _poll_job(
     url = base_url.rstrip("/") + f"/jobs/{job_id}"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     deadline = time.time() + max(timeout, 5)
+    last_status = ""
+    poll_count = 0
     while time.time() < deadline:
         _raise_if_cancelled(cancel)
+        poll_count += 1
         request = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(request, timeout=20) as response:
             parsed = json.loads(response.read().decode("utf-8"))
         status = str(parsed.get("status") or "")
+        if status != last_status:
+            logger.info("video.job_status job_id=%s status=%s poll=%s", job_id, status or "-", poll_count)
+        last_status = status
         if status == "completed" and parsed.get("url"):
             return str(parsed["url"])
         if status in {"failed", "error"}:
@@ -554,10 +760,19 @@ def _poll_job(
 
 
 def _download(url: str, dest: Path, api_key: str, timeout: int, api_base_url: str) -> None:
+    started = time.perf_counter()
+    logger.info("video.download_started url=%s", safe_url(url))
     headers = _media_download_headers(api_base_url, url, api_key)
     request = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         dest.write_bytes(response.read())
+    logger.info(
+        "video.download_completed url=%s output=%s bytes=%s elapsed_ms=%.1f",
+        safe_url(url),
+        dest.name,
+        dest.stat().st_size,
+        (time.perf_counter() - started) * 1000,
+    )
 
 
 def _media_download_headers(api_base_url: str, media_url: str, api_key: str) -> dict[str, str]:
@@ -585,6 +800,7 @@ def synthesize_speech(
     dest: Path,
 ) -> Path:
     url = base_url.rstrip("/") + "/audio/speech"
+    started = time.perf_counter()
     body = json.dumps(
         {
             "model": model or "gpt-4o-mini-tts",
@@ -602,11 +818,33 @@ def synthesize_speech(
         },
         method="POST",
     )
+    logger.info(
+        "tts.request_started endpoint=%s model=%s voice=%s text_chars=%s timeout_s=%s",
+        safe_url(url),
+        model or "gpt-4o-mini-tts",
+        voice or "alloy",
+        len(text),
+        timeout,
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             dest.write_bytes(response.read())
     except Exception as exc:
+        logger.warning(
+            "tts.request_failed endpoint=%s error=%s elapsed_ms=%.1f",
+            safe_url(url),
+            exc.__class__.__name__,
+            (time.perf_counter() - started) * 1000,
+            exc_info=True,
+        )
         raise ProviderError(f"TTS 失败：{exc.__class__.__name__}") from exc
+    logger.info(
+        "tts.request_completed endpoint=%s output=%s bytes=%s elapsed_ms=%.1f",
+        safe_url(url),
+        dest.name,
+        dest.stat().st_size,
+        (time.perf_counter() - started) * 1000,
+    )
     return dest
 
 

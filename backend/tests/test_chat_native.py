@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.helpers import finish_production
 from video_fission.container import configure
 from video_fission.main import app
 from video_fission.tools import build_registry
+
+from tests.helpers import finish_production
 
 
 @pytest.fixture
@@ -200,6 +201,26 @@ def test_send_message_auto_starts_upserts_cards_and_dedups_tool(client: TestClie
     assert items[f"{production_id}:output"]["payload"].get("updated_at")
     assert items[f"{production_id}:segments"]["payload"].get("status") == "completed"
     assert items[f"{production_id}:understanding"]["payload"]["source_video_url"].endswith(upload["id"])
+    progress = items[f"{production_id}:progress"]["payload"]
+    stage_map = {stage["id"]: stage for stage in progress["stages"]}
+    assert list(stage_map) == [
+        "ingest",
+        "decompose",
+        "intent",
+        "script",
+        "generate",
+        "compose",
+        "done",
+    ]
+    assert stage_map["decompose"]["outputs"]
+    assert stage_map["intent"]["outputs"]
+    assert stage_map["script"]["outputs"]
+    assert stage_map["generate"]["outputs"]
+    assert stage_map["compose"]["outputs"]
+    assert any(
+        "整片理解" in item["text"]
+        for item in progress["activity"]
+    )
 
     events = container.db.list_events(conversation["id"])
     kinds = {event["kind"] for event in events}

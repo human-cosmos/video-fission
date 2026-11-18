@@ -1405,24 +1405,26 @@ class Database:
         after_id: int = 0,
         limit: int = 300,
         user_id: str | None = None,
+        newest_first: bool = False,
     ) -> list[dict[str, Any]]:
+        order = "DESC" if newest_first else "ASC"
         if user_id is None:
             rows = self.query(
-                """
+                f"""
                 SELECT * FROM production_events
                 WHERE production_id = ? AND id > ?
-                ORDER BY id ASC
+                ORDER BY id {order}
                 LIMIT ?
                 """,
                 (production_id, after_id, limit),
             )
         else:
             rows = self.query(
-                """
+                f"""
                 SELECT e.* FROM production_events e
                 JOIN productions p ON p.id = e.production_id
                 WHERE e.production_id = ? AND e.id > ? AND p.user_id = ?
-                ORDER BY e.id ASC
+                ORDER BY e.id {order}
                 LIMIT ?
                 """,
                 (production_id, after_id, user_id, limit),

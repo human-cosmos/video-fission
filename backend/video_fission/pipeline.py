@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from . import media, providers
 from .config import Settings
 from .db import Database
+from .logging_utils import clip_text, file_summary, log_context, safe_url
 from .paths import production_artifact_dir
 from .references import ReferenceLibrary
 from .replace import apply_replace_plan, resolve_replace_plan, strip_rewrite_instructions
@@ -85,44 +87,79 @@ class PipelineEngine:
                     raise ValueError("还没有选定脚本，无法从 generate 恢复")
             stages = list(STAGES[STAGES.index(resume_from):])
         warnings: list[str] = list(production.get("warnings") or [])
-        try:
-            for stage in stages:
-                self._raise_if_cancelled(cancel)
-                self._emit(production_id, "stage_started", {"stage": stage})
-                self.db.update_production(production_id, {"current_stage": stage, "status": "running"})
-                handler = getattr(self, f"_stage_{stage}")
-                handler(production_id, cancel, warnings)
-                current = self.db.get_production(production_id)
-                if current and current.get("status") == "awaiting_script_choice":
-                    self._emit(production_id, "stage_completed", {"stage": stage})
-                    self._emit(
-                        production_id,
-                        "awaiting_script_choice",
-                        {"message": "请选择创意脚本"},
-                    )
-                    return current
-                self._emit(production_id, "stage_completed", {"stage": stage})
-            self.db.update_production(
-                production_id,
-                {"status": "completed", "current_stage": "done", "error": None, "warnings": warnings},
+        started = time.perf_counter()
+        with log_context(production_id=production_id):
+            logger.info(
+                "pipeline.started stages=%s resume_from=%s warnings=%s",
+                ",".join(stages),
+                resume_from or "-",
+                len(warnings),
             )
-            self._emit(production_id, "completed", {"stage": "done"})
-        except PipelineCancelled:
-            self.db.update_production(production_id, {"status": "cancelled", "warnings": warnings})
-            self._emit(production_id, "error", {"stage": "cancelled", "message": "已取消"})
-        except Exception as exc:
-            logger.exception("production %s failed", production_id)
-            message = str(exc) or exc.__class__.__name__
-            self.db.update_production(
-                production_id,
-                {"status": "failed", "error": message, "warnings": warnings},
-            )
-            self._emit(production_id, "error", {"message": message})
-            raise
-        result = self.db.get_production(production_id)
-        if not result:
-            raise RuntimeError("创作任务在完成后丢失")
-        return result
+            try:
+                for stage in stages:
+                    self._raise_if_cancelled(cancel)
+                    stage_started = time.perf_counter()
+                    self.db.update_production(production_id, {"current_stage": stage, "status": "running"})
+                    self._emit(production_id, "stage_started", {"stage": stage})
+                    handler = getattr(self, f"_stage_{stage}")
+                    with log_context(stage=stage, step="-"):
+                        logger.info("pipeline.stage_started stage=%s", stage)
+                        try:
+                            handler(production_id, cancel, warnings)
+                        except PipelineCancelled:
+                            raise
+                        except Exception:
+                            logger.exception("pipeline.stage_failed stage=%s", stage)
+                            raise
+                        current = self.db.get_production(production_id)
+                        if current and current.get("status") == "awaiting_script_choice":
+                            logger.info(
+                                "pipeline.awaiting_script_choice stage=%s elapsed_ms=%.1f candidates=%s",
+                                stage,
+                                (time.perf_counter() - stage_started) * 1000,
+                                len(current.get("script_candidates") or []),
+                            )
+                            self._emit(production_id, "stage_completed", {"stage": stage})
+                            self._emit(
+                                production_id,
+                                "awaiting_script_choice",
+                                {"message": "请选择创意脚本"},
+                            )
+                            return current
+                        logger.info(
+                            "pipeline.stage_completed stage=%s elapsed_ms=%.1f warnings=%s",
+                            stage,
+                            (time.perf_counter() - stage_started) * 1000,
+                            len(warnings),
+                        )
+                        self._emit(production_id, "stage_completed", {"stage": stage})
+                self.db.update_production(
+                    production_id,
+                    {"status": "completed", "current_stage": "done", "error": None, "warnings": warnings},
+                )
+                logger.info(
+                    "pipeline.completed elapsed_ms=%.1f warnings=%s",
+                    (time.perf_counter() - started) * 1000,
+                    len(warnings),
+                )
+                self._emit(production_id, "completed", {"stage": "done"})
+            except PipelineCancelled:
+                logger.warning("pipeline.cancelled elapsed_ms=%.1f", (time.perf_counter() - started) * 1000)
+                self.db.update_production(production_id, {"status": "cancelled", "warnings": warnings})
+                self._emit(production_id, "error", {"stage": "cancelled", "message": "已取消"})
+            except Exception as exc:
+                logger.exception("pipeline.failed elapsed_ms=%.1f", (time.perf_counter() - started) * 1000)
+                message = str(exc) or exc.__class__.__name__
+                self.db.update_production(
+                    production_id,
+                    {"status": "failed", "error": message, "warnings": warnings},
+                )
+                self._emit(production_id, "error", {"message": message})
+                raise
+            result = self.db.get_production(production_id)
+            if not result:
+                raise RuntimeError("创作任务在完成后丢失")
+            return result
 
     def _stage_ingest(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
         production = self._get(production_id)
@@ -135,6 +172,16 @@ class PipelineEngine:
         if src.resolve() != dest.resolve():
             dest.write_bytes(src.read_bytes())
         info = media.probe(dest)
+        logger.info(
+            "pipeline.ingest source=%s size=%s duration_ms=%s resolution=%sx%s fps=%.3f audio=%s",
+            file_summary(dest),
+            dest.stat().st_size,
+            info["duration_ms"],
+            info["width"],
+            info["height"],
+            float(info["fps"] or 0),
+            info["has_audio"],
+        )
         source.update(
             {
                 "path": str(dest),
@@ -159,6 +206,14 @@ class PipelineEngine:
             warnings,
             emit=lambda kind, payload: self._emit(production_id, kind, payload),
             cancel=cancel,
+        )
+        logger.info(
+            "pipeline.decompose_completed provider=%s model=%s segments=%s summary_chars=%s warnings=%s",
+            decomposition.get("provider") or "-",
+            decomposition.get("model") or "-",
+            len(decomposition.get("segments") or []),
+            len(str(decomposition.get("summary") or "")),
+            len(warnings),
         )
         self.db.update_production(production_id, {"decomposition": decomposition, "warnings": warnings})
         self._prepare_media(production_id, warnings)
@@ -196,6 +251,13 @@ class PipelineEngine:
         duration_ms = int(production["source_video"]["duration_ms"])
         incoming = data.get("segments") or []
         cleaned = normalize_model_segments(incoming, duration_ms, segments)
+        logger.info(
+            "llm.segment_refine_completed model=%s raw_segments=%s normalized_segments=%s summary_chars=%s",
+            mm.get("model") or "-",
+            len(incoming),
+            len(cleaned),
+            len(str(data.get("summary") or "")),
+        )
         return {
             "summary": str(data.get("summary") or production_summary_fallback(segments, duration_ms)),
             "provider": "openai_compatible",
@@ -215,9 +277,16 @@ class PipelineEngine:
             production.get("brief") or "",
             opening=decomposition.get("opening"),
         )
+        logger.info(
+            "pipeline.intent_plan mode=%s resolved_segments=%s reasons=%s",
+            (plan.get("policy") or {}).get("mode") or "-",
+            len(plan.get("resolved_segment_ids") or []),
+            len(plan.get("reasons") or []),
+        )
         self.db.update_production(production_id, {"replace_plan": plan})
         production = self._get(production_id)
         refs = self.library.retrieve(production["brief"])
+        logger.info("pipeline.intent_references count=%s", len(refs))
         for item in refs:
             path = self.settings.project_root / item["path"]
             if not path.is_file():
@@ -231,9 +300,17 @@ class PipelineEngine:
             except Exception as exc:
                 message = f"意图模型失败，已用本地规划器：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("pipeline.intent_llm_failed fallback=local", exc_info=True)
                 self._emit(production_id, "warning", {"stage": "intent", "message": message})
         # Strip excerpts before persisting references (contract only has path/why)
         intent["references"] = [{"path": item["path"], "why": item["why"]} for item in refs]
+        logger.info(
+            "pipeline.intent_completed goal_chars=%s audience_chars=%s promise_chars=%s skeleton_chars=%s",
+            len(str(intent.get("goal") or "")),
+            len(str(intent.get("audience") or "")),
+            len(str(intent.get("promise") or "")),
+            len(str(skeleton)),
+        )
         self.db.update_production(production_id, {"intent": intent, "skeleton": skeleton, "warnings": warnings})
 
     def _llm_intent(self, production, refs, mm, api_key, fallback_intent, fallback_skeleton):
@@ -281,6 +358,13 @@ class PipelineEngine:
             "value": str(skeleton.get("value") or fallback_skeleton["value"]),
             "cta": str(skeleton.get("cta") or fallback_skeleton["cta"]),
         }
+        logger.info(
+            "llm.intent_completed model=%s goal_chars=%s promise_chars=%s assumptions=%s",
+            mm.get("model") or "-",
+            len(merged_intent["goal"]),
+            len(merged_intent["promise"]),
+            len(merged_intent["assumptions"]),
+        )
         return merged_intent, merged_skeleton
 
     def _stage_script(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
@@ -308,6 +392,12 @@ class PipelineEngine:
         if len(full_texts) < 3:
             warnings.append("完整参考脚本不足 3 篇，已尽可能读取现有参考")
             self._emit(production_id, "warning", {"stage": "script", "message": warnings[-1]})
+        logger.info(
+            "pipeline.script_inputs references=%s full_texts=%s reference_chars=%s",
+            len(refs),
+            len(full_texts),
+            sum(len(text) for text in full_texts),
+        )
         timeline = local_script(production)
         candidates = build_local_candidates(production, timeline)
         public, secrets = self._settings_for_production(production_id)
@@ -320,11 +410,18 @@ class PipelineEngine:
             except Exception as exc:
                 message = f"分镜模型失败，已用本地规划器：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("pipeline.script_llm_failed fallback=local", exc_info=True)
                 self._emit(production_id, "warning", {"stage": "script", "message": message})
         for item in candidates:
             locked = lock_script_to_timeline(item.get("script") or timeline, timeline)
             item["script"] = apply_replace_plan(locked, production)
         display = (candidates[0]["script"] if candidates else timeline)
+        logger.info(
+            "pipeline.script_completed candidates=%s shots=%s display_duration_ms=%s",
+            len(candidates),
+            len(display.get("shots") or []),
+            display.get("total_duration_ms"),
+        )
         self.db.update_production(
             production_id,
             {
@@ -386,6 +483,12 @@ class PipelineEngine:
                     "script": locked,
                 }
             )
+        logger.info(
+            "llm.script_candidates_completed model=%s raw_candidates=%s candidates=%s",
+            mm.get("model") or "-",
+            len(incoming),
+            len(merged),
+        )
         return merged
 
     def _llm_script(self, production, full_texts, mm, api_key, fallback):
@@ -408,11 +511,41 @@ class PipelineEngine:
         public, secrets = self._settings_for_production(production_id)
         vg = public["video_generator"]
         input_contents = self._seedance_input_contents(production_id, public, warnings)
+        logger.info(
+            "pipeline.generate_config provider=%s model=%s target=%sx%s "
+            "fps=%.3f fallback=%s reference_inputs=%s shots=%s",
+            vg.get("provider") or "local_ffmpeg",
+            vg.get("model") or "-",
+            width,
+            height,
+            fps,
+            vg.get("fallback_to_local", True),
+            ",".join(str(item.get("role") or item.get("type") or "?") for item in input_contents) or "-",
+            len(script.get("shots") or []),
+        )
         clips: list[dict[str, Any]] = []
         for shot in script.get("shots") or []:
             self._raise_if_cancelled(cancel)
             dest = art / f"{shot['id']}.mp4"
             duration_ms = int(shot["duration_ms"])
+            action_label = "复用原片" if shot["action"] == "reuse" else "生成新镜头"
+            logger.info(
+                "generate.shot_started shot_id=%s action=%s duration_ms=%s source_segment=%s",
+                shot["id"],
+                shot.get("action") or "-",
+                duration_ms,
+                shot.get("source_segment_id") or "-",
+            )
+            self._emit(
+                production_id,
+                "stage_started",
+                {
+                    "stage": "generate",
+                    "step": shot["id"],
+                    "message": f"{shot['id']} 开始{action_label}",
+                    "details": {"duration_ms": duration_ms},
+                },
+            )
             start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
             if shot["action"] == "reuse":
                 if _end_ms <= start_ms:
@@ -422,6 +555,13 @@ class PipelineEngine:
                     dest, shot, production, art, public, secrets, warnings, duration_ms, start_ms
                 )
                 provider_name = "local_ffmpeg"
+                logger.info(
+                    "generate.shot_reused shot_id=%s source_range=%s-%sms output=%s",
+                    shot["id"],
+                    start_ms,
+                    _end_ms,
+                    file_summary(dest),
+                )
             else:
                 provider_name = vg.get("provider") or "local_ffmpeg"
                 generated = False
@@ -457,6 +597,12 @@ class PipelineEngine:
                             generated = dest.is_file() and dest.stat().st_size > 0
                             if not generated:
                                 raise providers.ProviderError("远端 Provider 返回了空文件")
+                            logger.info(
+                                "generate.remote_completed shot_id=%s provider=%s raw_output=%s",
+                                shot["id"],
+                                provider_name,
+                                file_summary(dest),
+                            )
                             normalized = dest.with_name(dest.stem + "_normalized.mp4")
                             media.normalize_video_clip(
                                 dest,
@@ -467,6 +613,12 @@ class PipelineEngine:
                                 fps,
                             )
                             normalized.replace(dest)
+                            logger.info(
+                                "generate.remote_normalized shot_id=%s provider=%s output=%s",
+                                shot["id"],
+                                provider_name,
+                                file_summary(dest),
+                            )
                             self._raise_if_cancelled(cancel)
                         except providers.ProviderCancelled as exc:
                             raise PipelineCancelled("任务已取消") from exc
@@ -476,6 +628,12 @@ class PipelineEngine:
                             if vg.get("fallback_to_local", True):
                                 message = f"{shot['id']} 远端生成失败，已回退本地：{exc.__class__.__name__}"
                                 warnings.append(message)
+                                logger.warning(
+                                    "generate.remote_failed shot_id=%s provider=%s fallback=local",
+                                    shot["id"],
+                                    provider_name,
+                                    exc_info=True,
+                                )
                                 self._emit(production_id, "warning", {"stage": "generate", "message": message})
                                 provider_name = "local_ffmpeg"
                             else:
@@ -495,6 +653,12 @@ class PipelineEngine:
                         overlay_text=not burn_in,
                     )
                     provider_name = "local_ffmpeg"
+                    logger.info(
+                        "generate.local_clip_completed shot_id=%s frame=%s output=%s",
+                        shot["id"],
+                        file_summary(frame),
+                        file_summary(dest),
+                    )
                 if not _has_audio(dest):
                     self._apply_voiceover(
                         dest, shot, production, art, public, secrets, warnings, duration_ms, start_ms
@@ -506,6 +670,14 @@ class PipelineEngine:
                 )
             if dest.stat().st_size < 1000:
                 raise RuntimeError(f"{shot['id']} 生成了空文件")
+            logger.info(
+                "generate.shot_completed shot_id=%s provider=%s duration_ms=%s size=%s audio=%s",
+                shot["id"],
+                provider_name,
+                info["duration_ms"],
+                dest.stat().st_size,
+                info.get("has_audio"),
+            )
             clips.append(
                 {
                     "shot_id": shot["id"],
@@ -515,6 +687,25 @@ class PipelineEngine:
                     "duration_ms": info["duration_ms"],
                 }
             )
+            self._emit(
+                production_id,
+                "stage_completed",
+                {
+                    "stage": "generate",
+                    "step": shot["id"],
+                    "message": f"{shot['id']} 已输出",
+                    "details": {
+                        "provider": provider_name,
+                        "duration_ms": info["duration_ms"],
+                        "file": dest.name,
+                    },
+                },
+            )
+        logger.info(
+            "pipeline.generate_completed clips=%s providers=%s",
+            len(clips),
+            ",".join(sorted({str(item.get("provider") or "-") for item in clips})),
+        )
         self.db.update_production(production_id, {"clips": clips, "warnings": warnings})
 
     def _stage_compose(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
@@ -532,6 +723,25 @@ class PipelineEngine:
         fps = float(source_info.get("fps") or 30)
         opening_shot_id = str((script.get("opening") or {}).get("shot_id") or "")
         faded: list[Path] = []
+        total_ms = int(script.get("total_duration_ms") or source_info["duration_ms"])
+        logger.info(
+            "pipeline.compose_config clips=%s total_ms=%s fps=%.3f mix_bgm=%s burn_subtitles=%s bgm_volume=%s",
+            len(clips),
+            total_ms,
+            fps,
+            compose.get("mix_reference_bgm", True),
+            compose.get("burn_in_subtitles", True),
+            compose.get("bgm_volume") or 0.18,
+        )
+        self._emit(
+            production_id,
+            "stage_started",
+            {
+                "stage": "compose",
+                "step": "assemble",
+                "message": f"拼接 {len(clips)} 个镜头",
+            },
+        )
         for index, item in enumerate(clips):
             path = Path(item["path"])
             fade_in, fade_out = shot_edge_fades(index, shots, opening_shot_id)
@@ -540,13 +750,38 @@ class PipelineEngine:
                 faded_path = art / f"{item['shot_id']}_fade.mp4"
                 media.apply_edge_fades(path, faded_path, duration_ms, fps, fade_in, fade_out)
                 faded.append(faded_path)
+                logger.info(
+                    "compose.fade_applied shot_id=%s fade_in=%s fade_out=%s output=%s",
+                    item.get("shot_id") or index,
+                    fade_in,
+                    fade_out,
+                    file_summary(faded_path),
+                )
             else:
                 faded.append(path)
         concat_path = art / "concat.mp4"
         media.concat_clips(faded, concat_path)
         current = concat_path
-        source = Path(source_info["path"])
-        total_ms = int(script.get("total_duration_ms") or source_info["duration_ms"])
+        logger.info("compose.concat_completed clips=%s output=%s", len(faded), file_summary(concat_path))
+        self._emit(
+            production_id,
+            "stage_completed",
+            {
+                "stage": "compose",
+                "step": "assemble",
+                "message": "镜头拼接完成",
+                "details": {"clips": len(clips), "duration_ms": total_ms},
+            },
+        )
+        self._emit(
+            production_id,
+            "stage_started",
+            {
+                "stage": "compose",
+                "step": "audio",
+                "message": "混合原片背景音",
+            },
+        )
         if compose.get("mix_reference_bgm", True):
             try:
                 bgm = art / "reference-bgm.m4a"
@@ -555,34 +790,111 @@ class PipelineEngine:
                 mixed = art / "with-bgm.mp4"
                 media.mix_bgm(current, bgm, mixed, float(compose.get("bgm_volume") or 0.18), total_ms)
                 current = mixed
+                logger.info(
+                    "compose.bgm_mixed bgm=%s volume=%s output=%s",
+                    file_summary(bgm),
+                    compose.get("bgm_volume") or 0.18,
+                    file_summary(mixed),
+                )
             except Exception as exc:
                 message = f"参考 BGM 混合失败，已保留片段音轨：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("compose.bgm_mix_failed continue_without_bgm", exc_info=True)
                 self._emit(production_id, "warning", {"stage": "compose", "message": message})
+        self._emit(
+            production_id,
+            "stage_completed",
+            {
+                "stage": "compose",
+                "step": "audio",
+                "message": "背景音处理完成",
+            },
+        )
+        self._emit(
+            production_id,
+            "stage_started",
+            {
+                "stage": "compose",
+                "step": "subtitles",
+                "message": "生成字幕并处理画面花字",
+            },
+        )
         srt_path = art / "final.srt"
         write_srt(srt_path, shots)
+        logger.info("compose.subtitles_written shots=%s output=%s", len(shots), file_summary(srt_path))
         burned = art / "burned.mp4"
         final_path = art / "final.mp4"
         if compose.get("burn_in_subtitles", True):
             try:
                 media.burn_subtitles(current, srt_path, burned, production.get("subtitle_style"))
                 current = burned
+                logger.info("compose.subtitles_burned output=%s", file_summary(burned))
             except Exception as exc:
                 message = f"字幕硬烧失败，已输出无硬字幕成片：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("compose.subtitle_burn_failed continue_without_burn", exc_info=True)
                 self._emit(production_id, "warning", {"stage": "compose", "message": message})
+        self._emit(
+            production_id,
+            "stage_completed",
+            {
+                "stage": "compose",
+                "step": "subtitles",
+                "message": "字幕文件已生成",
+                "details": {"file": srt_path.name},
+            },
+        )
+        self._emit(
+            production_id,
+            "stage_started",
+            {
+                "stage": "compose",
+                "step": "finalize",
+                "message": "对齐音画并校验成片",
+            },
+        )
         try:
             media.fit_av_duration(current, final_path, total_ms, fps)
+            logger.info(
+                "compose.duration_aligned source=%s target_ms=%s output=%s",
+                file_summary(current),
+                total_ms,
+                file_summary(final_path),
+            )
         except Exception as exc:
             warnings.append(f"音画对齐失败，已保留当前成片：{exc.__class__.__name__}")
+            logger.warning("compose.duration_align_failed preserve_current", exc_info=True)
             self._emit(production_id, "warning", {"stage": "compose", "message": warnings[-1]})
             if current != final_path:
                 final_path.write_bytes(current.read_bytes())
         info = media.probe(final_path)
+        logger.info(
+            "pipeline.compose_completed output=%s duration_ms=%s resolution=%sx%s fps=%.3f size=%s audio=%s",
+            file_summary(final_path),
+            info["duration_ms"],
+            info["width"],
+            info["height"],
+            float(info["fps"] or 0),
+            final_path.stat().st_size,
+            info["has_audio"],
+        )
         if abs(info["duration_ms"] - total_ms) > 500:
             warnings.append(
                 f"成片时长 {info['duration_ms']}ms 与脚本 {total_ms}ms 偏差超过 0.5s"
             )
+        self._emit(
+            production_id,
+            "stage_completed",
+            {
+                "stage": "compose",
+                "step": "finalize",
+                "message": "成片校验完成",
+                "details": {
+                    "duration_ms": info["duration_ms"],
+                    "file": final_path.name,
+                },
+            },
+        )
         output = {
             "video_path": str(final_path),
             "video_url": self.artifact_url(production_id, "final.mp4"),
@@ -597,8 +909,17 @@ class PipelineEngine:
         production = self._get(production_id)
         landing = analyze_landing(production.get("brief") or "")
         if not landing:
+            logger.info("landing.skipped reason=no_url_or_body")
             return
         status = landing.get("parse_status") or ""
+        logger.info(
+            "landing.completed status=%s method=%s product_chars=%s selling_points=%s source=%s",
+            status,
+            landing.get("method") or "-",
+            len(str(landing.get("product") or "")),
+            len(landing.get("selling_points") or []),
+            safe_url(str(landing.get("source_url") or "")),
+        )
         if status == "failed":
             message = "落地页抓取失败，可在对话里粘贴页面正文后再解析"
             warnings.append(message)
@@ -622,12 +943,27 @@ class PipelineEngine:
         bgm = art / "reference-bgm.m4a"
         if not production.get("audio_separation") or not vocals.is_file() or not bgm.is_file():
             result = separate_reference_audio(source_path, art)
+            logger.info(
+                "media.audio_separation_completed method=%s usable=%s vocals=%s bgm=%s warning=%s",
+                result.get("method") or "-",
+                result.get("usable"),
+                file_summary(vocals),
+                file_summary(bgm),
+                clip_text(result.get("warning"), 200),
+            )
             if result.get("warning"):
                 warnings.append(str(result["warning"]))
                 self._emit(production_id, "warning", {"stage": "decompose", "message": result["warning"]})
             self.db.update_production(production_id, {"audio_separation": result, "warnings": warnings})
         if not production.get("subtitle_style"):
             style = detect_subtitle_style(source_path, art)
+            logger.info(
+                "media.subtitle_style_detected method=%s aligned=%s font=%s font_size=%s",
+                style.get("method") or "-",
+                style.get("aligned"),
+                style.get("font_name") or "-",
+                style.get("font_size") or "-",
+            )
             self.db.update_production(production_id, {"subtitle_style": style})
 
     def _landing_prompt(self, production: dict[str, Any]) -> str:
@@ -655,13 +991,23 @@ class PipelineEngine:
         production = self._get(production_id)
         source = Path((production.get("source_video") or {}).get("path") or "")
         base = str((public.get("video_generator") or {}).get("media_public_base_url") or "")
-        video_url, video_warn = providers.public_media_url(base, production_id, source.name if source.name else "source.mp4")
+        video_url, video_warn = providers.public_media_url(
+            base,
+            production_id,
+            source.name if source.name else "source.mp4",
+        )
         vocals_url, _ = providers.public_media_url(base, production_id, "reference-vocals.m4a")
         bgm_url, _ = providers.public_media_url(base, production_id, "reference-bgm.m4a")
         if video_warn:
             warnings.append(video_warn)
             self._emit(production_id, "warning", {"stage": "generate", "message": video_warn})
-        return providers.build_reference_input_contents(video_url, vocals_url, bgm_url)
+        contents = providers.build_reference_input_contents(video_url, vocals_url, bgm_url)
+        logger.info(
+            "generate.reference_inputs count=%s urls=%s",
+            len(contents),
+            ",".join(safe_url(str(item.get("url") or "")) for item in contents) or "-",
+        )
+        return contents
 
     def _apply_voiceover(
         self,
@@ -682,6 +1028,14 @@ class PipelineEngine:
         if tts.get("provider") == "openai_compatible" and tts.get("base_url") and tts_key and text:
             try:
                 speech = art / f"{shot['id']}_tts.mp3"
+                logger.info(
+                    "voiceover.tts_started shot_id=%s provider=%s model=%s voice=%s text_chars=%s",
+                    shot["id"],
+                    tts.get("provider"),
+                    tts.get("model") or "-",
+                    tts.get("voice") or "alloy",
+                    len(text),
+                )
                 providers.synthesize_speech(
                     tts.get("base_url") or "",
                     tts_key,
@@ -693,25 +1047,45 @@ class PipelineEngine:
                 )
                 media.mux_timeline_audio(dest, speech, 0, tmp, duration_ms)
                 tmp.replace(dest)
+                logger.info(
+                    "voiceover.tts_completed shot_id=%s speech=%s output=%s",
+                    shot["id"],
+                    file_summary(speech),
+                    file_summary(dest),
+                )
                 return
             except Exception as exc:
                 message = f"{shot['id']} TTS 口播失败，将尝试参考人声：{exc.__class__.__name__}"
                 warnings.append(message)
-                self._emit(production_id := production["id"], "warning", {"stage": "generate", "message": message})
+                logger.warning("voiceover.tts_failed shot_id=%s fallback=reference_vocals", shot["id"], exc_info=True)
+                self._emit(
+                    production["id"],
+                    "warning",
+                    {"stage": "generate", "message": message},
+                )
         vocals = art / "reference-vocals.m4a"
         if _vocals_stem_usable(production.get("audio_separation"), vocals):
             try:
                 media.mux_timeline_audio(dest, vocals, start_ms, tmp, duration_ms)
                 tmp.replace(dest)
+                logger.info(
+                    "voiceover.reference_vocals_completed shot_id=%s start_ms=%s output=%s",
+                    shot["id"],
+                    start_ms,
+                    file_summary(dest),
+                )
                 return
             except Exception as exc:
                 message = f"{shot['id']} 参考人声混入失败：{exc.__class__.__name__}"
                 warnings.append(message)
+                logger.warning("voiceover.reference_vocals_failed shot_id=%s", shot["id"], exc_info=True)
                 self._emit(production["id"], "warning", {"stage": "generate", "message": message})
         if _has_audio(dest):
+            logger.info("voiceover.kept_existing_audio shot_id=%s", shot["id"])
             return
         message = f"{shot['id']} 没有可用口播，未写入静音轨"
         warnings.append(message)
+        logger.warning("voiceover.unavailable shot_id=%s", shot["id"])
         self._emit(production["id"], "warning", {"stage": "generate", "message": message})
 
     def _get(self, production_id: str) -> dict[str, Any]:

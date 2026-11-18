@@ -67,19 +67,22 @@ test("runs a production inside a conversation, then regenerates a selected segme
 
   await expect(page.getByTestId("user-message-video")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-progress-card")).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByTestId("video-production-steps")).toBeVisible()
+  await expect(page.getByTestId("video-production-step-decompose")).toContainText("拆解")
   await expect(page.getByTestId("video-understanding-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-plan-card")).toBeVisible({ timeout: 180_000 })
   const chooseScript = page.getByTestId("video-script-choose").first()
   const segmentsCard = page.getByTestId("video-segments-card")
-  await expect(chooseScript.or(segmentsCard)).toBeVisible({ timeout: 180_000 })
-  if (await chooseScript.isVisible()) {
-    await chooseScript.click()
-  }
+  await expect(chooseScript).toBeVisible({ timeout: 180_000 })
+  await chooseScript.click()
   await expect(segmentsCard).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-player")).toBeVisible()
   await expect(page.getByTestId("video-download-mp4")).toBeVisible()
   await expect(page.getByTestId("video-download-srt")).toBeVisible()
+  await expect(page.getByTestId("video-production-step-decompose")).toContainText("切片结果")
+  await expect(page.getByTestId("video-production-step-generate")).toContainText("片段结果")
+  await expect(page.getByTestId("video-production-step-compose")).toContainText("成片文件")
 
   const productionId = (await page.getByTestId("video-production-id").innerText()).trim()
   const detail = await request.get(`/api/productions/${productionId}`)

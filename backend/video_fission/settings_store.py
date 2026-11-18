@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 import urllib.error
 import urllib.request
 from copy import deepcopy
@@ -9,6 +11,9 @@ from typing import Any
 from . import media
 from .config import Settings
 from .db import Database
+from .logging_utils import safe_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "multimodal": {
@@ -97,7 +102,16 @@ class SettingsStore:
                 if provider not in PROVIDER_ENUMS[section]:
                     raise ValueError(f"{section}.provider 不支持 {provider}")
                 public[section]["provider"] = provider
-            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice", "resolution", "media_public_base_url"):
+            for field in (
+                "base_url",
+                "upload_url",
+                "token_url",
+                "source",
+                "model",
+                "voice",
+                "resolution",
+                "media_public_base_url",
+            ):
                 if field in incoming and incoming[field] is not None and field in public[section]:
                     public[section][field] = str(incoming[field]).strip()
             if section == "video_generator":
@@ -169,15 +183,32 @@ class SettingsStore:
         public, secrets = self._load(user_id)
         section = public[target]
         provider = section.get("provider") or "local_ffmpeg"
+        started = time.perf_counter()
+        logger.info(
+            "settings.probe_started target=%s provider=%s endpoint=%s model=%s",
+            target,
+            provider,
+            safe_url(str(section.get("base_url") or "")),
+            section.get("model") or "-",
+        )
         if target == "tts" and provider == "none":
+            logger.info("settings.probe_completed target=%s provider=none", target)
             return {"ok": True, "provider": "none", "detail": "TTS 未启用，出片时不会阻塞"}
         if provider == "local_ffmpeg":
             probe = media.ffmpeg_available()
-            return {
+            result = {
                 "ok": bool(probe.get("ok")),
                 "provider": provider,
                 "detail": probe.get("version") or probe.get("detail") or "ffmpeg 不可用",
             }
+            logger.info(
+                "settings.probe_completed target=%s provider=%s ok=%s elapsed_ms=%.1f",
+                target,
+                provider,
+                result["ok"],
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
         key = secrets.get(target) or ""
         base_url = str(section.get("base_url") or "").rstrip("/")
         if not base_url:
@@ -185,7 +216,7 @@ class SettingsStore:
         if provider == "gemini_gateway":
             from .understand.gateway import GeminiGatewayClient
 
-            return GeminiGatewayClient(
+            result = GeminiGatewayClient(
                 base_url=base_url,
                 upload_url=str(section.get("upload_url") or ""),
                 token_url=str(section.get("token_url") or ""),
@@ -195,36 +226,74 @@ class SettingsStore:
                 max_tokens=int(section.get("max_tokens") or 12000),
                 timeout_seconds=int(section.get("timeout_seconds") or 30),
             ).probe()
+            logger.info(
+                "settings.probe_completed target=%s provider=%s ok=%s elapsed_ms=%.1f",
+                target,
+                provider,
+                result.get("ok"),
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
         if provider == "seedance":
             from .providers import probe_seedance
 
-            return probe_seedance(
+            result = probe_seedance(
                 base_url,
                 key,
                 int(section.get("timeout_seconds") or 30),
                 str(section.get("model") or ""),
             )
+            logger.info(
+                "settings.probe_completed target=%s provider=%s ok=%s elapsed_ms=%.1f",
+                target,
+                provider,
+                result.get("ok"),
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
         if not key:
             return {"ok": False, "provider": provider, "detail": "未配置 API Key"}
-        return self._probe_remote(
+        result = self._probe_remote(
             base_url,
             key,
             str(section.get("model") or ""),
             int(section.get("timeout_seconds") or 30),
             provider,
         )
+        logger.info(
+            "settings.probe_completed target=%s provider=%s ok=%s elapsed_ms=%.1f",
+            target,
+            provider,
+            result.get("ok"),
+            (time.perf_counter() - started) * 1000,
+        )
+        return result
 
     def _probe_remote(self, base_url: str, api_key: str, model: str, timeout: int, provider: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         models_url = f"{base_url}/models"
+        started = time.perf_counter()
+        logger.info("provider.probe_request_started provider=%s endpoint=%s", provider, safe_url(models_url))
         try:
             request = urllib.request.Request(models_url, headers=headers, method="GET")
             with urllib.request.urlopen(request, timeout=min(timeout, 20)) as response:
                 payload = response.read(4000).decode("utf-8", errors="replace")
             if "sk-" in payload or api_key in payload:
                 payload = "模型列表已返回"
+            logger.info(
+                "provider.probe_request_completed provider=%s endpoint=%s status=%s elapsed_ms=%.1f",
+                provider,
+                safe_url(models_url),
+                getattr(response, "status", "-"),
+                (time.perf_counter() - started) * 1000,
+            )
             return {"ok": True, "provider": provider, "detail": f"已连通 {models_url}"}
         except Exception:
+            logger.warning(
+                "provider.probe_models_failed provider=%s endpoint=%s fallback=chat",
+                provider,
+                safe_url(models_url),
+            )
             body = json.dumps(
                 {
                     "model": model or "gpt-4o-mini",
@@ -235,12 +304,27 @@ class SettingsStore:
             url = f"{base_url}/chat/completions"
             try:
                 request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                logger.info("provider.probe_request_started provider=%s endpoint=%s", provider, safe_url(url))
                 with urllib.request.urlopen(request, timeout=min(timeout, 20)) as response:
                     response.read(2000)
+                    logger.info(
+                        "provider.probe_request_completed provider=%s endpoint=%s status=%s elapsed_ms=%.1f",
+                        provider,
+                        safe_url(url),
+                        getattr(response, "status", "-"),
+                        (time.perf_counter() - started) * 1000,
+                    )
                 return {"ok": True, "provider": provider, "detail": f"已连通 {url}"}
             except urllib.error.HTTPError as exc:
+                logger.warning("provider.probe_request_failed provider=%s status=%s", provider, exc.code)
                 return {"ok": False, "provider": provider, "detail": f"探活失败 HTTP {exc.code}"}
             except Exception as exc:
+                logger.warning(
+                    "provider.probe_request_failed provider=%s error=%s",
+                    provider,
+                    exc.__class__.__name__,
+                    exc_info=True,
+                )
                 return {"ok": False, "provider": provider, "detail": f"探活失败：{exc.__class__.__name__}"}
 
     def _load(self, user_id: str | None = None) -> tuple[dict[str, Any], dict[str, str]]:

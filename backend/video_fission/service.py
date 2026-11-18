@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
@@ -506,9 +507,13 @@ class CodexHub:
             if row.get("title") in {None, "", "新对话"}:
                 updates["title"] = self._fallback_title(text, files)
             self.db.update_conversation(conversation_id, updates)
+            context = copy_context()
+
+            def run_turn_thread() -> None:
+                context.run(self._run_turn, conversation_id, model_text, mentions, generation, lock)
+
             thread = threading.Thread(
-                target=self._run_turn,
-                args=(conversation_id, model_text, mentions, generation, lock),
+                target=run_turn_thread,
                 daemon=True,
                 name=f"video-fission-turn-{conversation_id[:8]}",
             )

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from html.parser import HTMLParser
-from typing import Any, Callable
+from typing import Any
+
+from .logging_utils import clip_text, safe_url
+
+logger = logging.getLogger(__name__)
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 MAX_BYTES = 1_500_000
@@ -129,6 +136,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def safe_fetch(url: str, timeout: int = FETCH_TIMEOUT, max_bytes: int = MAX_BYTES) -> tuple[str, str]:
     assert_public_url(url)
+    started = time.perf_counter()
+    logger.info("landing.http_request_started url=%s timeout_s=%s max_bytes=%s", safe_url(url), timeout, max_bytes)
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "video-fission-landing/1.0", "Accept": "text/html,application/xhtml+xml"},
@@ -142,8 +151,16 @@ def safe_fetch(url: str, timeout: int = FETCH_TIMEOUT, max_bytes: int = MAX_BYTE
             content_type = str(response.headers.get("Content-Type") or "")
             data = response.read(max_bytes + 1)
     except ValueError:
+        logger.warning("landing.http_request_rejected url=%s", safe_url(url))
         raise
     except Exception as exc:
+        logger.warning(
+            "landing.http_request_failed url=%s error=%s elapsed_ms=%.1f",
+            safe_url(url),
+            exc.__class__.__name__,
+            (time.perf_counter() - started) * 1000,
+            exc_info=True,
+        )
         raise ValueError(f"落地页抓取失败：{exc.__class__.__name__}") from exc
     if len(data) > max_bytes:
         data = data[:max_bytes]
@@ -154,6 +171,16 @@ def safe_fetch(url: str, timeout: int = FETCH_TIMEOUT, max_bytes: int = MAX_BYTE
         text = data.decode(charset, errors="replace")
     except LookupError:
         text = data.decode("utf-8", errors="replace")
+    logger.info(
+        "landing.http_request_completed url=%s final=%s status=%s content_type=%s bytes=%s charset=%s elapsed_ms=%.1f",
+        safe_url(url),
+        safe_url(final),
+        getattr(response, "status", "-"),
+        content_type or "-",
+        len(data),
+        charset,
+        (time.perf_counter() - started) * 1000,
+    )
     return text, final
 
 
@@ -257,23 +284,41 @@ def analyze_landing(
         return None
     if urls:
         url = urls[0]
+        logger.info("landing.analysis_started url=%s pasted_text=%s", safe_url(url), bool(paste))
         try:
             html, final = (fetch or safe_fetch)(url)
             if "<" in html:
                 result = extract_from_html(html, final or url)
             else:
                 result = extract_from_text(html, final or url, method="local_extract")
+            logger.info(
+                "landing.analysis_completed status=%s method=%s product_chars=%s "
+                "selling_points=%s excerpt_chars=%s",
+                result.get("parse_status"),
+                result.get("method"),
+                len(str(result.get("product") or "")),
+                len(result.get("selling_points") or []),
+                len(str(result.get("raw_excerpt") or "")),
+            )
             return result
         except ValueError as exc:
+            logger.warning("landing.analysis_failed url=%s error=%s", safe_url(url), clip_text(exc, 240))
             if paste:
                 result = extract_from_text(paste, url, method="pasted_text")
                 if result["parse_status"] == "ok":
                     result["parse_status"] = "partial"
                 result["raw_excerpt"] = f"{exc}\n{result.get('raw_excerpt') or ''}".strip()
+                logger.info("landing.analysis_fallback method=pasted_text status=%s", result.get("parse_status"))
                 return result
             item = failed_landing(url, str(exc))
             return item
     result = extract_from_text(paste, method="pasted_text")
+    logger.info(
+        "landing.analysis_completed status=%s method=pasted_text product_chars=%s selling_points=%s",
+        result.get("parse_status"),
+        len(str(result.get("product") or "")),
+        len(result.get("selling_points") or []),
+    )
     return result
 
 

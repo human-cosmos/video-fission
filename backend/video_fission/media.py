@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
+
+from .logging_utils import clip_text
+
+logger = logging.getLogger(__name__)
 
 FONT_CANDIDATES = [
     Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
@@ -104,23 +110,62 @@ def limited_x264_args() -> list[str]:
 
 
 def run_ffmpeg(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+    inputs = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "-i"]
+    output = args[-1] if args else "-"
+    started = time.perf_counter()
+    logger.info(
+        "media.ffmpeg_started inputs=%s output=%s timeout_s=%s args=%s",
+        ",".join(Path(value).name for value in inputs) or "-",
+        Path(output).name,
+        timeout,
+        len(args),
     )
+    logger.debug("media.ffmpeg_command command=%s", clip_text(args, 2400))
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "media.ffmpeg_timeout output=%s timeout_s=%s elapsed_ms=%.1f",
+            Path(output).name,
+            timeout,
+            (time.perf_counter() - started) * 1000,
+        )
+        raise
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         tail = detail[-2000:] if detail else "unknown ffmpeg error"
+        logger.error(
+            "media.ffmpeg_failed output=%s returncode=%s elapsed_ms=%.1f stderr=%s",
+            Path(output).name,
+            result.returncode,
+            (time.perf_counter() - started) * 1000,
+            clip_text(tail, 2000),
+        )
         raise MediaError(f"ffmpeg 失败: {tail}")
+    output_path = Path(output)
+    try:
+        output_size = output_path.stat().st_size
+    except OSError:
+        output_size = "-"
+    logger.info(
+        "media.ffmpeg_completed output=%s size=%s elapsed_ms=%.1f",
+        output_path.name,
+        output_size,
+        (time.perf_counter() - started) * 1000,
+    )
     return result
 
 
 def probe(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise MediaError("视频文件不存在")
+    started = time.perf_counter()
     result = subprocess.run(
         [
             ffprobe_bin(),
@@ -138,6 +183,7 @@ def probe(path: Path) -> dict[str, Any]:
         check=False,
     )
     if result.returncode != 0:
+        logger.warning("media.probe_failed file=%s returncode=%s", path.name, result.returncode)
         raise MediaError("无法解析视频，请确认文件是可播放的 mp4/mov/webm")
     try:
         info = json.loads(result.stdout or "{}")
@@ -169,7 +215,7 @@ def probe(path: Path) -> dict[str, Any]:
             audio_duration = float(raw_audio or 0)
         except (TypeError, ValueError):
             audio_duration = 0.0
-    return {
+    info_result = {
         "duration_ms": int(round(duration * 1000)),
         "audio_duration_ms": int(round(audio_duration * 1000)) if audio else 0,
         "width": width,
@@ -180,6 +226,17 @@ def probe(path: Path) -> dict[str, Any]:
         "pix_fmt": str(video.get("pix_fmt") or ""),
         "color_range": str(video.get("color_range") or ""),
     }
+    logger.debug(
+        "media.probe_completed file=%s duration_ms=%s resolution=%sx%s fps=%.3f audio=%s elapsed_ms=%.1f",
+        path.name,
+        info_result["duration_ms"],
+        width,
+        height,
+        fps,
+        audio is not None,
+        (time.perf_counter() - started) * 1000,
+    )
+    return info_result
 
 
 def probe_audio(path: Path) -> dict[str, Any]:
@@ -268,6 +325,7 @@ def _parse_fps(value: str) -> float:
 
 
 def scene_cut_ms(path: Path, threshold: float = 0.15) -> list[int]:
+    started = time.perf_counter()
     result = subprocess.run(
         [
             ffmpeg_bin(),
@@ -289,10 +347,19 @@ def scene_cut_ms(path: Path, threshold: float = 0.15) -> list[int]:
     times: list[int] = []
     for match in re.finditer(r"pts_time:([0-9.]+)", result.stderr or ""):
         times.append(int(round(float(match.group(1)) * 1000)))
-    return sorted(set(t for t in times if t > 0))
+    cuts = sorted(set(t for t in times if t > 0))
+    logger.info(
+        "media.scene_detection_completed file=%s threshold=%s cuts=%s elapsed_ms=%.1f",
+        path.name,
+        threshold,
+        len(cuts),
+        (time.perf_counter() - started) * 1000,
+    )
+    return cuts
 
 
 def silence_points_ms(path: Path) -> list[int]:
+    started = time.perf_counter()
     result = subprocess.run(
         [
             ffmpeg_bin(),
@@ -313,11 +380,20 @@ def silence_points_ms(path: Path) -> list[int]:
     points: list[int] = []
     for match in re.finditer(r"silence_(?:start|end):\s*([0-9.]+)", result.stderr or ""):
         points.append(int(round(float(match.group(1)) * 1000)))
-    return sorted(set(p for p in points if p > 0))
+    result_points = sorted(set(p for p in points if p > 0))
+    logger.info(
+        "media.silence_detection_completed file=%s points=%s elapsed_ms=%.1f",
+        path.name,
+        len(result_points),
+        (time.perf_counter() - started) * 1000,
+    )
+    return result_points
 
 
 def extract_frames(path: Path, timestamps_ms: list[int], output_dir: Path, prefix: str) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    logger.info("media.frame_extract_started file=%s timestamps=%s prefix=%s", path.name, timestamps_ms, prefix)
     frames: list[Path] = []
     for index, ts in enumerate(timestamps_ms, start=1):
         dest = output_dir / f"{prefix}_{index:02d}.jpg"
@@ -340,11 +416,19 @@ def extract_frames(path: Path, timestamps_ms: list[int], output_dir: Path, prefi
         )
         if dest.is_file() and dest.stat().st_size > 0:
             frames.append(dest)
+    logger.info(
+        "media.frame_extract_completed file=%s requested=%s frames=%s elapsed_ms=%.1f",
+        path.name,
+        len(timestamps_ms),
+        len(frames),
+        (time.perf_counter() - started) * 1000,
+    )
     return frames
 
 
 def extract_audio(path: Path, dest: Path, timeout: int = 60) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("media.audio_extract_started input=%s output=%s timeout_s=%s", path.name, dest.name, timeout)
     run_ffmpeg(
         [
             ffmpeg_bin(),
@@ -362,6 +446,7 @@ def extract_audio(path: Path, dest: Path, timeout: int = 60) -> Path:
         ],
         timeout=timeout,
     )
+    logger.info("media.audio_extract_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -377,6 +462,17 @@ def cut_segment(
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     duration = max(end_ms - start_ms, 1) / 1000
+    logger.info(
+        "media.cut_segment_started source=%s output=%s range=%s-%sms target=%sx%s fps=%.3f audio=%s",
+        path.name,
+        dest.name,
+        start_ms,
+        end_ms,
+        width,
+        height,
+        fps,
+        keep_audio,
+    )
     args = [
         ffmpeg_bin(),
         "-y",
@@ -401,6 +497,7 @@ def cut_segment(
         args.extend(["-an"])
     args.append(str(dest))
     run_ffmpeg(args, timeout=120)
+    logger.info("media.cut_segment_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -415,6 +512,17 @@ def ken_burns_clip(
     overlay_text: bool = True,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.ken_burns_started image=%s output=%s duration_ms=%s target=%sx%s fps=%.3f text_chars=%s overlay_text=%s",
+        image.name,
+        dest.name,
+        duration_ms,
+        width,
+        height,
+        fps,
+        len(text),
+        overlay_text,
+    )
     _frames, duration = exact_seconds(max(duration_ms, 200), fps)
     # Slow pan + zoom. Skip drawtext when overlay_text is off so burned
     # subtitles do not stack on top of the same words.
@@ -452,6 +560,7 @@ def ken_burns_clip(
         ],
         timeout=120,
     )
+    logger.info("media.ken_burns_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -494,6 +603,14 @@ def mux_timeline_audio(
 ) -> Path:
     """Lay the source timeline audio for this window onto a generated clip."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.audio_mux_started video=%s audio=%s output=%s audio_start_ms=%s duration_ms=%s",
+        video.name,
+        source.name,
+        dest.name,
+        start_ms,
+        duration_ms,
+    )
     _frames, duration = exact_seconds(duration_ms, probe(video).get("fps") or 30)
     start = max(start_ms, 0) / 1000
     fades: list[str] = []
@@ -539,6 +656,7 @@ def mux_timeline_audio(
         ],
         timeout=120,
     )
+    logger.info("media.audio_mux_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -553,6 +671,14 @@ def apply_edge_fades(
     audio_fade_ms: int = 100,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.edge_fade_started input=%s output=%s duration_ms=%s fade_in=%s fade_out=%s",
+        path.name,
+        dest.name,
+        duration_ms,
+        fade_in,
+        fade_out,
+    )
     _frames, duration = exact_seconds(duration_ms, fps)
     max_each = max(duration / 3, 0.04)
     video_d = min(max(video_fade_frames, 8) / max(fps, 1), max_each)
@@ -590,12 +716,20 @@ def apply_edge_fades(
         args.append("-an")
     args.append(str(dest))
     run_ffmpeg(args, timeout=120)
+    logger.info("media.edge_fade_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
 def fit_av_duration(path: Path, dest: Path, duration_ms: int, fps: float) -> Path:
     """Force video and audio to the same exact duration (no one-frame tail)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.av_align_started input=%s output=%s target_ms=%s fps=%.3f",
+        path.name,
+        dest.name,
+        duration_ms,
+        fps,
+    )
     frames, duration = exact_seconds(duration_ms, fps)
     vf = limited_range_vf(
         f"fps={fps:.4f},tpad=stop_mode=clone:stop_duration={duration:.6f},"
@@ -628,6 +762,7 @@ def fit_av_duration(path: Path, dest: Path, duration_ms: int, fps: float) -> Pat
         args.append("-an")
     args.append(str(dest))
     run_ffmpeg(args, timeout=180)
+    logger.info("media.av_align_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -641,6 +776,15 @@ def normalize_video_clip(
 ) -> Path:
     """Normalize a remote clip to the project's exact visual contract."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.normalize_clip_started input=%s output=%s duration_ms=%s target=%sx%s fps=%.3f",
+        path.name,
+        dest.name,
+        duration_ms,
+        width,
+        height,
+        fps,
+    )
     frames, duration = exact_seconds(duration_ms, fps)
     vf = limited_range_vf(
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
@@ -675,11 +819,18 @@ def normalize_video_clip(
         args.append("-an")
     args.append(str(dest))
     run_ffmpeg(args, timeout=180)
+    logger.info("media.normalize_clip_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
 def concat_clips(clips: list[Path], dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "media.concat_started clips=%s output=%s inputs=%s",
+        len(clips),
+        dest.name,
+        ",".join(item.name for item in clips),
+    )
     listing = dest.with_suffix(".concat.txt")
     listing.write_text("".join(f"file '{path.resolve()}'\n" for path in clips), encoding="utf-8")
     run_ffmpeg(
@@ -707,12 +858,21 @@ def concat_clips(clips: list[Path], dest: Path) -> Path:
         ],
         timeout=180,
     )
+    logger.info("media.concat_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
 def mix_bgm(video: Path, bgm: Path, dest: Path, bgm_volume: float, duration_ms: int) -> Path:
     duration = max(duration_ms, 1) / 1000
     volume = min(max(bgm_volume, 0.0), 1.0)
+    logger.info(
+        "media.bgm_mix_started video=%s bgm=%s output=%s volume=%.3f duration_ms=%s",
+        video.name,
+        bgm.name,
+        dest.name,
+        volume,
+        duration_ms,
+    )
     run_ffmpeg(
         [
             ffmpeg_bin(),
@@ -743,6 +903,7 @@ def mix_bgm(video: Path, bgm: Path, dest: Path, bgm_volume: float, duration_ms: 
         ],
         timeout=120,
     )
+    logger.info("media.bgm_mix_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 
@@ -888,6 +1049,13 @@ def write_ass_from_srt(
 
 
 def burn_subtitles(video: Path, srt: Path, dest: Path, style: dict[str, Any] | None = None) -> Path:
+    logger.info(
+        "media.subtitle_burn_started video=%s srt=%s output=%s style=%s",
+        video.name,
+        srt.name,
+        dest.name,
+        (style or {}).get("method") or "-",
+    )
     font = default_font()
     fonts_dir = str(font.parent).replace("\\", "\\\\").replace(":", "\\:")
     info = probe(video)
@@ -913,6 +1081,7 @@ def burn_subtitles(video: Path, srt: Path, dest: Path, style: dict[str, Any] | N
         ],
         timeout=180,
     )
+    logger.info("media.subtitle_burn_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 
 

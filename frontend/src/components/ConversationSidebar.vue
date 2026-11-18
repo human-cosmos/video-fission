@@ -2,12 +2,15 @@
 import {
   Archive,
   ArchiveRestore,
+  ChevronRight,
+  Clapperboard,
   LoaderCircle,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Search,
+  Settings2,
   X,
 } from '@lucide/vue'
 import { computed, ref } from 'vue'
@@ -22,6 +25,9 @@ const props = defineProps({
   mobileOpen: { type: Boolean, default: false },
   collapsed: { type: Boolean, default: false },
   width: { type: Number, default: 278 },
+  productionBadges: { type: Object, default: () => ({}) },
+  unboundProductions: { type: Array, default: () => [] },
+  settingsActive: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -35,9 +41,12 @@ const emit = defineEmits([
   'resize-start',
   'resize-keydown',
   'resize-reset',
+  'bind-unbound',
+  'open-settings',
 ])
 
 const query = ref('')
+const unboundOpen = ref(true)
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()
   if (!needle) return props.conversations
@@ -111,6 +120,11 @@ const filtered = computed(() => {
             {{ formatRelativeTime(conversation.updated_at) }}
             <template v-if="conversation.last_error"> · 有错误</template>
           </small>
+          <em
+            v-if="productionBadges[conversation.id]"
+            class="conversation-production-badge"
+            data-testid="conversation-production-badge"
+          >{{ productionBadges[conversation.id] }}</em>
         </span>
         <span
           class="row-action"
@@ -135,10 +149,56 @@ const filtered = computed(() => {
       </div>
     </nav>
 
+    <section v-if="unboundProductions.length" class="unbound-productions" data-testid="unbound-productions">
+      <button
+        class="sidebar-section-label unbound-toggle"
+        type="button"
+        :aria-expanded="unboundOpen"
+        @click="unboundOpen = !unboundOpen"
+      >
+        <span>
+          <ChevronRight :size="14" :class="{ open: unboundOpen }" />
+          未归入对话的成片
+        </span>
+        <span>{{ unboundProductions.length }}</span>
+      </button>
+      <nav v-if="unboundOpen" class="conversation-list unbound-list" aria-label="未归入对话的成片">
+        <button
+          v-for="item in unboundProductions"
+          :key="item.id"
+          class="conversation-row"
+          type="button"
+          :data-testid="`unbound-production-${item.id}`"
+          @click="$emit('bind-unbound', item.id)"
+        >
+          <span class="conversation-icon">
+            <Clapperboard :size="15" />
+          </span>
+          <span class="conversation-copy">
+            <strong>{{ compactTitle(item.title || item.brief || item.id) }}</strong>
+            <small>{{ item.badge || item.id }}</small>
+          </span>
+        </button>
+      </nav>
+    </section>
+
     <footer class="sidebar-footer">
       <button class="archive-toggle" @click="$emit('toggle-archived')">
         <Archive :size="14" />
         {{ showArchived ? '返回最近对话' : '查看归档' }}
+      </button>
+      <button
+        class="sidebar-settings-button"
+        type="button"
+        data-testid="mode-settings"
+        :class="{ active: settingsActive }"
+        :aria-pressed="settingsActive"
+        aria-label="模型设置"
+        title="模型设置"
+        @click="$emit('open-settings')"
+      >
+        <Settings2 :size="15" />
+        <span>模型设置</span>
       </button>
     </footer>
 

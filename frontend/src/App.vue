@@ -4,6 +4,7 @@ import {
   Archive,
   ArrowUp,
   Check,
+  Clapperboard,
   GitBranch,
   Menu,
   MoreHorizontal,
@@ -25,10 +26,16 @@ import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
 import SkillEditorModal from './components/SkillEditorModal.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
-import VideoStudio from './components/VideoStudio.vue'
-import WorkspaceModeNav from './components/WorkspaceModeNav.vue'
 import { isRefreshEvent } from './utils/events'
-import { WORKSPACE_MODES } from './utils/format'
+import {
+  MAX_PRODUCTION_UPLOAD_BYTES,
+  POLICY_MODES,
+  VIDEO_ACCEPT,
+  WORKSPACE_MODES,
+  formatDuration,
+  isVideoFile,
+  toProductionVideoFile,
+} from './utils/format'
 
 const conversations = ref([])
 const currentConversation = ref(null)
@@ -43,6 +50,11 @@ const attachments = ref([])
 const skillMentions = ref([])
 const uploading = ref(false)
 const sending = ref(false)
+const policyMode = ref('brief')
+const productions = ref([])
+const rerunning = ref(false)
+const cancelling = ref(false)
+const videoInput = ref(null)
 const showArchived = ref(false)
 const mobileSidebar = ref(false)
 const mobileCapabilities = ref(false)
@@ -146,13 +158,41 @@ const visibleConversations = computed(() =>
 )
 const hasConversation = computed(() => Boolean(currentConversation.value?.id))
 const isArchived = computed(() => Boolean(currentConversation.value?.is_archived))
+const productionVideo = computed(() => attachments.value.find((file) => isVideoFile(file)))
+const otherAttachments = computed(() => attachments.value.filter((file) => !isVideoFile(file)))
+const needsBriefHint = computed(() => Boolean(productionVideo.value) && !composer.value.trim())
 const canSend = computed(
   () =>
     !sending.value &&
     !uploading.value &&
     !isArchived.value &&
-    (composer.value.trim() || attachments.value.length),
+    (productionVideo.value ? Boolean(composer.value.trim()) : Boolean(composer.value.trim() || attachments.value.length)),
 )
+const unboundProductions = computed(() =>
+  (productions.value || [])
+    .filter((item) => !item.conversation_id)
+    .map((item) => ({
+      ...item,
+      badge:
+        item.status === 'completed' && item.output?.duration_ms
+          ? formatDuration(item.output.duration_ms)
+          : item.status === 'completed'
+            ? '成片'
+            : item.title || item.brief || item.id,
+    })),
+)
+const productionBadges = computed(() => {
+  const badges = {}
+  for (const item of productions.value || []) {
+    if (!item.conversation_id) continue
+    if (badges[item.conversation_id] && item.status !== 'completed') continue
+    badges[item.conversation_id] =
+      item.status === 'completed' && (item.output?.duration_ms || item.duration_ms)
+        ? formatDuration(item.output?.duration_ms || item.duration_ms)
+        : '成片'
+  }
+  return badges
+})
 
 function notify(message) {
   toast.value = message
@@ -177,7 +217,7 @@ async function bootstrap() {
     skills.value = capabilityPayload.skills || []
     tools.value = capabilityPayload.tools || []
     models.value = modelPayload.items || []
-    await loadConversations()
+    await Promise.all([loadConversations(), loadProductions()])
     if (conversations.value.length && !currentConversation.value) {
       const savedId = window.localStorage.getItem('video-fission.activeConversation')
       const savedExists = conversations.value.some((item) => item.id === savedId)
@@ -210,6 +250,25 @@ async function loadConversations() {
   }
 }
 
+async function loadProductions() {
+  try {
+    const payload = await api.productions()
+    productions.value = payload.items || payload || []
+  } catch {
+    // History badges are additive; a failed list fetch should not break chat.
+  }
+}
+
+function revokePreview(file) {
+  if (file?.previewUrl) URL.revokeObjectURL(file.previewUrl)
+}
+
+function clearAttachments() {
+  for (const file of attachments.value) revokePreview(file)
+  attachments.value = []
+  policyMode.value = 'brief'
+}
+
 function closeStream() {
   if (eventSource) {
     eventSource.close()
@@ -230,7 +289,7 @@ function connectStream(conversationId, afterId = 0) {
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      if (!isRefreshEvent(data.kind)) return
+      if (!isRefreshEvent(data.kind) && !isRefreshEvent(data.type)) return
       scheduleRefresh(conversationId)
     } catch {
       // Ignore malformed stream payloads; EventSource will continue.
@@ -259,6 +318,7 @@ async function flushScheduledRefresh(conversationId) {
     const [detail, list] = await Promise.all([
       api.conversation(conversationId),
       api.conversations(true),
+      loadProductions(),
     ])
     if (currentConversation.value?.id !== conversationId) return
     currentConversation.value = detail
@@ -275,6 +335,7 @@ async function flushScheduledRefresh(conversationId) {
 
 async function selectConversation(id) {
   if (!id) return
+  workspaceMode.value = 'chat'
   const sequence = ++selectionSequence
   closeStream()
   try {
@@ -285,7 +346,7 @@ async function selectConversation(id) {
     titleBeforeEdit = currentConversation.value.title
     uploadGeneration += 1
     uploading.value = false
-    attachments.value = []
+    clearAttachments()
     skillMentions.value = []
     mobileSidebar.value = false
     connectStream(id, detail.latest_event_id || 0)
@@ -297,7 +358,13 @@ async function selectConversation(id) {
   }
 }
 
+function openSettings() {
+  workspaceMode.value = 'settings'
+  mobileSidebar.value = false
+}
+
 async function newConversation() {
+  workspaceMode.value = 'chat'
   try {
     const model = currentConversation.value?.model || models.value[0]?.id || null
     const effort =
@@ -427,6 +494,22 @@ async function updateEffort(effort) {
   }
 }
 
+async function attachProductionVideo(file, generation) {
+  if (file.size > MAX_PRODUCTION_UPLOAD_BYTES) {
+    throw new Error('视频超过 500MB 上限')
+  }
+  const previewUrl = URL.createObjectURL(file)
+  const uploaded = toProductionVideoFile(await api.uploadProductionVideo(file))
+  if (generation !== uploadGeneration) {
+    URL.revokeObjectURL(previewUrl)
+    return
+  }
+  const previous = attachments.value.filter((item) => isVideoFile(item))
+  for (const item of previous) revokePreview(item)
+  uploaded.previewUrl = previewUrl
+  attachments.value = [...attachments.value.filter((item) => !isVideoFile(item)), uploaded]
+}
+
 async function uploadFiles(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
@@ -434,12 +517,18 @@ async function uploadFiles(event) {
   const generation = ++uploadGeneration
   uploading.value = true
   try {
-    for (const file of files) {
+    const videos = files.filter((file) => isVideoFile(file))
+    const others = files.filter((file) => !isVideoFile(file))
+    if (videos.length) {
+      await attachProductionVideo(videos[0], generation)
+      if (generation !== uploadGeneration) return
+    }
+    for (const file of others) {
       const uploaded = await api.upload(file)
       if (generation !== uploadGeneration) return
       attachments.value.push(uploaded)
     }
-    notify(`已添加 ${files.length} 个文件`)
+    notify(videos.length ? '已添加参考视频' : `已添加 ${files.length} 个文件`)
   } catch (error) {
     notify(error.message)
   } finally {
@@ -447,7 +536,17 @@ async function uploadFiles(event) {
   }
 }
 
+async function uploadComposerVideo(event) {
+  await uploadFiles(event)
+}
+
 async function removeAttachment(id) {
+  const target = attachments.value.find((file) => file.id === id)
+  if (isVideoFile(target)) {
+    revokePreview(target)
+    attachments.value = attachments.value.filter((file) => file.id !== id)
+    return
+  }
   try {
     await api.deleteUpload(id)
     attachments.value = attachments.value.filter((file) => file.id !== id)
@@ -488,16 +587,27 @@ async function send() {
       conversation = currentConversation.value
     }
     if (!conversation?.id) return
-    const payload = { text, files, mentions }
+    const payload = {
+      text,
+      files: files.map((file) => {
+        const { previewUrl, ...rest } = file
+        return isVideoFile(file) ? toProductionVideoFile(rest) : rest
+      }),
+      mentions,
+    }
+    if (productionVideo.value) {
+      payload.replace_policy = { mode: policyMode.value || 'brief' }
+    }
     if (conversation.status === 'running') {
       await api.steer(conversation.id, payload)
     } else {
       await api.sendMessage(conversation.id, payload)
     }
     composer.value = ''
-    attachments.value = []
+    clearAttachments()
     skillMentions.value = []
     await refreshCurrent()
+    await loadProductions()
     timeline.value?.scrollToBottom()
   } catch (error) {
     notify(error.message)
@@ -531,6 +641,76 @@ async function answerClarification({ id, answers }) {
   try {
     await api.answerClarification(id, answers)
     await refreshCurrent()
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+async function cancelProduction(productionId) {
+  if (!productionId) return
+  cancelling.value = true
+  try {
+    await api.cancelProduction(productionId)
+    await refreshCurrent()
+    await loadProductions()
+    notify('已取消任务')
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    cancelling.value = false
+  }
+}
+
+async function rerunSelected({ productionId, segmentIds }) {
+  if (!productionId || !segmentIds?.length) return
+  rerunning.value = true
+  try {
+    await api.runProduction(productionId, {
+      replace_policy: { mode: 'selected', segment_ids: segmentIds },
+      resume_from: 'intent',
+    })
+    await refreshCurrent()
+    await loadProductions()
+    notify('已按选中片段重新生成并合成')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    rerunning.value = false
+  }
+}
+
+async function rerunBrief(productionId) {
+  if (!productionId) return
+  rerunning.value = true
+  try {
+    await api.runProduction(productionId, {
+      replace_policy: { mode: 'brief' },
+      resume_from: 'intent',
+    })
+    await refreshCurrent()
+    await loadProductions()
+    notify('已按最新说明重跑')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    rerunning.value = false
+  }
+}
+
+async function bindUnboundProduction(productionId) {
+  try {
+    let conversation = currentConversation.value
+    if (!conversation?.id) {
+      await newConversation()
+      conversation = currentConversation.value
+    }
+    if (!conversation?.id) return
+    await api.patchProduction(productionId, { conversation_id: conversation.id })
+    await refreshCurrent()
+    await loadProductions()
+    notify('已将成片归入当前对话')
   } catch (error) {
     notify(error.message)
   }
@@ -723,13 +903,11 @@ onBeforeUnmount(() => {
     :class="{
       'sidebar-collapsed': sidebarCollapsed,
       'mode-chat': isChatMode,
-      'mode-studio': workspaceMode === 'studio',
       'mode-settings': workspaceMode === 'settings',
     }"
-    :style="{ '--sidebar-width': isChatMode ? `${sidebarGridWidth}px` : '300px' }"
+    :style="{ '--sidebar-width': `${sidebarGridWidth}px` }"
   >
     <ConversationSidebar
-      v-if="isChatMode"
       :conversations="visibleConversations"
       :current-id="currentConversation?.id || ''"
       :show-archived="showArchived"
@@ -737,6 +915,9 @@ onBeforeUnmount(() => {
       :mobile-open="mobileSidebar"
       :collapsed="sidebarCollapsed"
       :width="sidebarWidth"
+      :production-badges="productionBadges"
+      :unbound-productions="unboundProductions"
+      :settings-active="workspaceMode === 'settings'"
       @new="newConversation"
       @select="selectConversation"
       @archive="archiveConversation"
@@ -747,23 +928,13 @@ onBeforeUnmount(() => {
       @resize-start="startSidebarResize"
       @resize-keydown="handleSidebarResizeKey"
       @resize-reset="resetSidebarWidth"
+      @bind-unbound="bindUnboundProduction"
+      @open-settings="openSettings"
     />
-
-    <aside
-      v-else
-      class="sidebar workspace-rail"
-      :class="{ 'is-settings-rail': workspaceMode === 'settings' }"
-    >
-      <header class="brand-row">
-        <BrandLockup />
-      </header>
-      <div v-if="workspaceMode === 'studio'" id="studio-history-rail" class="rail-slot"></div>
-    </aside>
 
     <main class="workspace" :class="{ 'page-mode': !isChatMode }">
       <header class="topbar">
         <button
-          v-if="isChatMode"
           class="icon-button mobile-only sidebar-toggle"
           aria-label="打开会话列表"
           @click="mobileSidebar = true"
@@ -792,15 +963,14 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <template v-else>
-            <h1>{{ workspaceMode === 'studio' ? '视频创作' : '模型设置' }}</h1>
+            <h1>模型设置</h1>
             <div class="conversation-meta">
-              <span class="page-subtitle">{{ workspaceMode === 'studio' ? '本地管线可零配置出片' : '密钥只写不回显' }}</span>
+              <span class="page-subtitle">密钥只写不回显</span>
             </div>
           </template>
         </div>
 
         <div class="topbar-controls">
-          <WorkspaceModeNav v-model="workspaceMode" />
           <TopbarSelect
             v-if="isChatMode && currentConversation"
             v-model="currentConversation.model"
@@ -870,9 +1040,14 @@ onBeforeUnmount(() => {
         v-else
         ref="timeline"
         :conversation="currentConversation"
+        :rerunning="rerunning"
+        :cancelling="cancelling"
         @decide-approval="decideApproval"
         @answer-clarification="answerClarification"
         @copy="copyReply"
+        @cancel-production="cancelProduction"
+        @rerun-selected="rerunSelected"
+        @rerun-brief="rerunBrief"
       />
 
       <section class="composer-dock">
@@ -894,7 +1069,39 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="composer">
-          <div v-if="skillMentions.length || attachments.length" class="composer-context">
+          <div v-if="productionVideo" class="composer-video" data-testid="composer-video-preview">
+            <video
+              :src="productionVideo.previewUrl || productionVideo.url"
+              controls
+              preload="metadata"
+            ></video>
+            <div class="composer-video-meta">
+              <strong>{{ productionVideo.name }}</strong>
+              <button type="button" class="icon-button compact" :aria-label="`移除 ${productionVideo.name}`" @click="removeAttachment(productionVideo.id)">
+                <X :size="14" />
+              </button>
+            </div>
+          </div>
+          <fieldset v-if="productionVideo" class="composer-policy studio-policy" data-testid="composer-policy">
+            <legend>创作策略</legend>
+            <div class="studio-policy-options">
+              <label
+                v-for="option in POLICY_MODES"
+                :key="option.id"
+                :class="{ active: policyMode === option.id }"
+              >
+                <input
+                  v-model="policyMode"
+                  type="radio"
+                  name="composer-policy"
+                  :value="option.id"
+                  :data-testid="`composer-policy-${option.id}`"
+                />
+                <span>{{ option.label }}</span>
+              </label>
+            </div>
+          </fieldset>
+          <div v-if="skillMentions.length || otherAttachments.length" class="composer-context">
             <span
               v-for="mention in skillMentions"
               :key="mention.path"
@@ -905,7 +1112,7 @@ onBeforeUnmount(() => {
                 <X :size="11" />
               </button>
             </span>
-            <span v-for="file in attachments" :key="file.id" class="context-chip">
+            <span v-for="file in otherAttachments" :key="file.id" class="context-chip">
               {{ file.name }}
               <button :aria-label="`移除 ${file.name}`" @click="removeAttachment(file.id)">
                 <X :size="11" />
@@ -940,6 +1147,18 @@ onBeforeUnmount(() => {
                   @change="uploadFiles"
                 />
               </label>
+              <label class="icon-button file-button" title="上传参考视频">
+                <Clapperboard :size="18" />
+                <input
+                  ref="videoInput"
+                  type="file"
+                  hidden
+                  :accept="VIDEO_ACCEPT"
+                  data-testid="composer-video-upload"
+                  :disabled="uploading || isArchived"
+                  @change="uploadComposerVideo"
+                />
+              </label>
               <button
                 class="capability-trigger"
                 type="button"
@@ -972,14 +1191,16 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-        <p class="composer-hint">
+        <p v-if="needsBriefHint" class="composer-hint composer-hint-need-brief" data-testid="composer-hint-need-brief">
+          补充创作说明后再发送
+        </p>
+        <p v-else class="composer-hint">
           <span>ENTER 发送 · SHIFT + ENTER 换行</span>
           <span>受控执行 · 工具输出进入会话记录</span>
         </p>
       </section>
       </template>
 
-      <VideoStudio v-else-if="workspaceMode === 'studio'" @notify="notify" />
       <ModelSettings v-else-if="workspaceMode === 'settings'" @notify="notify" />
     </main>
 

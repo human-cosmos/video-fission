@@ -15,6 +15,11 @@ const TYPE_LABELS = {
   tokenUsage: 'Token',
   collabAgentToolCall: '协作 Agent',
   subAgentActivity: '子 Agent',
+  video_progress: '出片进度',
+  video_understanding: '视频理解',
+  video_plan: '任务规划',
+  video_segments: '片段',
+  video_output: '成片',
 }
 
 export function itemLabel(itemType) {
@@ -49,7 +54,7 @@ export function eventTouchesConversation(data) {
 }
 
 export function isRefreshEvent(kind) {
-  return /^(item\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
+  return /^(item\.|item_upserted|production_updated|production\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
     String(kind || ''),
   )
 }

@@ -1,15 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import {
+  WORKSPACE_MODES,
+  aspectClass,
+  cleanDisplayText,
   formatBytes,
   formatDuration,
   formatTimecode,
   historyStatusText,
   humanizeMsText,
   isTechnicalVisual,
+  isVideoFile,
   needsRemoteFields,
   pickPositiveBytes,
   referenceLabel,
+  segmentAction,
   segmentFrameNames,
+  toProductionVideoFile,
+  withRevision,
 } from './format'
 
 describe('format helpers', () => {
@@ -64,5 +71,68 @@ describe('format helpers', () => {
     expect(needsRemoteFields('none')).toBe(false)
     expect(needsRemoteFields('openai_compatible')).toBe(true)
     expect(needsRemoteFields('generic_http')).toBe(true)
+  })
+})
+
+describe('chat-native production helpers', () => {
+  it('keeps only chat and settings workspace modes', () => {
+    expect(WORKSPACE_MODES.map((item) => item.id)).toEqual(['chat', 'settings'])
+    expect(WORKSPACE_MODES.some((item) => item.id === 'studio')).toBe(false)
+  })
+
+  it('detects production and filename videos', () => {
+    expect(isVideoFile({ kind: 'production_video', name: 'ref.bin' })).toBe(true)
+    expect(isVideoFile({ name: 'hook.mp4' })).toBe(true)
+    expect(isVideoFile({ content_type: 'video/webm', name: 'clip' })).toBe(true)
+    expect(isVideoFile({ name: 'notes.md' })).toBe(false)
+  })
+
+  it('classifies player aspect and revises artifact urls', () => {
+    expect(aspectClass({ width: 1280, height: 720 })).toBe('player-frame is-landscape')
+    expect(aspectClass({ width: 1080, height: 1920 })).toBe('player-frame is-portrait')
+    expect(withRevision('/api/productions/prd_1/artifacts/final.mp4', '2026-11-18')).toBe(
+      '/api/productions/prd_1/artifacts/final.mp4?t=2026-11-18',
+    )
+  })
+
+  it('resolves segment actions from replace_plan first', () => {
+    expect(
+      segmentAction({ id: 'seg_02' }, { resolved_segment_ids: ['seg_02', 'seg_03'] }),
+    ).toBe('generate')
+    expect(segmentAction({ id: 'seg_01' }, { resolved_segment_ids: ['seg_02'] })).toBe('reuse')
+    expect(
+      segmentAction({ id: 'seg_02' }, null, [{ source_segment_id: 'seg_02', action: 'generate' }]),
+    ).toBe('generate')
+  })
+
+  it('cleans technical crumbs and leaves creative copy', () => {
+    expect(cleanDisplayText('时长 2700ms。场景切点划分。展示核心卖点')).toBe('展示核心卖点')
+    expect(cleanDisplayText('1080x1920 @30.00fps，抽取 3 帧')).toBe('')
+    expect(cleanDisplayText('开场抓住注意')).toBe('开场抓住注意')
+  })
+
+  it('serializes a production video attachment without a filesystem path', () => {
+    expect(
+      toProductionVideoFile({
+        id: 'upl_1',
+        name: 'sample-reference.mp4',
+        path: '/secret/uploads/productions/upl_1.mp4',
+        size: 12,
+        width: 1280,
+        height: 720,
+        duration_ms: 8100,
+        content_type: 'video/mp4',
+      }),
+    ).toEqual({
+      kind: 'production_video',
+      id: 'upl_1',
+      name: 'sample-reference.mp4',
+      path: '',
+      size: 12,
+      content_type: 'video/mp4',
+      duration_ms: 8100,
+      width: 1280,
+      height: 720,
+    })
   })
 })

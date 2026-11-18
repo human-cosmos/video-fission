@@ -535,6 +535,12 @@ class PipelineEngine:
 
     def _emit(self, production_id: str, kind: str, payload: dict[str, Any]) -> None:
         self.db.append_production_event(production_id, kind, payload)
+        callback = getattr(self, "on_after_emit", None)
+        if callback:
+            try:
+                callback(production_id, kind, payload)
+            except Exception:
+                logger.exception("conversation card sync failed for %s", production_id)
 
     def _raise_if_cancelled(self, cancel: threading.Event) -> None:
         if cancel.is_set():

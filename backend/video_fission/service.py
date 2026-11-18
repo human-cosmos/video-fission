@@ -53,11 +53,13 @@ class CodexHub:
         db: Database,
         skills: SkillManager,
         tools: ToolRegistry,
+        productions=None,
     ):
         self.settings = settings
         self.db = db
         self.skills = skills
         self.tools = tools
+        self.productions = productions
         self._runtimes: dict[str, CodexAppServer] = {}
         self._runtime_creation_locks: dict[str, threading.Lock] = {}
         self._turn_locks: dict[str, threading.Lock] = {}
@@ -235,6 +237,84 @@ class CodexHub:
         with self._lock:
             return self._turn_locks.setdefault(conversation_id, threading.Lock())
 
+    def _codex_available(self) -> bool:
+        return bool(self.settings.codex_bin)
+
+    def _latest_production(self, conversation_id: str) -> dict[str, Any] | None:
+        if not self.productions:
+            return None
+        items = self.db.list_productions(conversation_id=conversation_id)
+        return items[0] if items else None
+
+    def _append_user_message(
+        self,
+        conversation_id: str,
+        text: str,
+        files: list[dict[str, Any]],
+        mentions: list[Any],
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {"text": text, "mentions": mentions, "files": files}
+        if extra:
+            payload.update(extra)
+        item = self.db.add_item(
+            conversation_id,
+            {
+                "item_type": "userMessage",
+                "role": "user",
+                "status": "completed",
+                "payload": payload,
+            },
+        )
+        self.db.append_event(conversation_id, "item.local", item)
+        return item
+
+    def _maybe_retitle(self, row: dict[str, Any], conversation_id: str, text: str, files: list[dict[str, Any]]) -> None:
+        if row.get("title") not in {None, "", "新对话"}:
+            return
+        title = (text or Path(str((files[0] if files else {}).get("name", "附件"))).stem)[:36]
+        self.db.update_conversation(conversation_id, {"title": title})
+
+    def _start_production_from_message(
+        self,
+        conversation_id: str,
+        item: dict[str, Any],
+        text: str,
+        files: list[dict[str, Any]],
+        replace_policy: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not self.productions:
+            raise RuntimeUnavailable("视频创作管线尚未就绪")
+        existing = self.db.find_production_by_source_item(item["id"])
+        if existing:
+            return self.productions.public(existing["id"])
+        video = next((file for file in files if file.get("kind") == "production_video"), None)
+        if not video:
+            raise ValueError("缺少创作参考视频")
+        policy = replace_policy if isinstance(replace_policy, dict) else {"mode": "brief"}
+        return self.productions.start_from_tool(
+            text,
+            video_upload_id=str(video.get("id") or ""),
+            replace_policy=policy,
+            conversation_id=conversation_id,
+            source_item_id=item["id"],
+        )
+
+    def _rerun_latest_from_brief(
+        self,
+        conversation_id: str,
+        text: str,
+        replace_policy: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not self.productions:
+            raise RuntimeUnavailable("视频创作管线尚未就绪")
+        latest = self._latest_production(conversation_id)
+        if not latest:
+            raise ValueError("当前对话还没有创作任务")
+        policy = replace_policy if isinstance(replace_policy, dict) else {"mode": "brief"}
+        self.productions.patch(latest["id"], brief=text, replace_policy=policy)
+        return self.productions.run(latest["id"])
+
     def send_message(self, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         row = self._conversation(conversation_id)
         if row.get("archived_at"):
@@ -245,7 +325,49 @@ class CodexHub:
             raise ValueError("消息不能为空")
         if row.get("status") == "running":
             raise ConversationBusy("当前对话已有进行中的一轮")
-        if not self.settings.codex_bin:
+        files = self._validated_files(files)
+        production_videos = [file for file in files if file.get("kind") == "production_video"]
+        replace_policy = payload.get("replace_policy")
+        mentions = payload.get("mentions") or []
+        latest_production = self._latest_production(conversation_id)
+
+        # 视频 + 说明：同一请求内自动创建并启动 production，不依赖 Codex。
+        if production_videos and text:
+            item = self._append_user_message(conversation_id, text, files, mentions)
+            self._maybe_retitle(row, conversation_id, text, files)
+            production = self._start_production_from_message(
+                conversation_id, item, text, files, replace_policy
+            )
+            return {
+                "conversation_id": conversation_id,
+                "status": row.get("status") or "idle",
+                "turn_generation": int(row.get("turn_generation") or 0),
+                "production_id": production["id"],
+            }
+
+        # 只发视频：留下用户消息，不启动管线，也不要求 Codex。
+        if production_videos and not text:
+            self._append_user_message(conversation_id, text, files, mentions)
+            self._maybe_retitle(row, conversation_id, text, files)
+            return {
+                "conversation_id": conversation_id,
+                "status": row.get("status") or "idle",
+                "turn_generation": int(row.get("turn_generation") or 0),
+            }
+
+        # 只发文字，且对话已有 production、Codex 不可用：按 brief 重跑最新任务。
+        if text and not production_videos and latest_production and not self._codex_available():
+            self._append_user_message(conversation_id, text, files, mentions)
+            self._maybe_retitle(row, conversation_id, text, files)
+            production = self._rerun_latest_from_brief(conversation_id, text, replace_policy)
+            return {
+                "conversation_id": conversation_id,
+                "status": row.get("status") or "idle",
+                "turn_generation": int(row.get("turn_generation") or 0),
+                "production_id": production["id"],
+            }
+
+        if not self._codex_available():
             raise RuntimeUnavailable("智能中枢运行时不可用")
         lock = self._conversation_lock(conversation_id)
         if not lock.acquire(blocking=False):
@@ -256,24 +378,20 @@ class CodexHub:
                 raise ConversationBusy("已归档会话不能继续发送消息")
             if row.get("status") == "running":
                 raise ConversationBusy("当前对话已有进行中的一轮")
-            files = self._validated_files(files)
             generation = int(row.get("turn_generation") or 0) + 1
             model_text = self._text_with_files(text, files)
-            mentions = payload.get("mentions") or []
-            item = self.db.add_item(
-                conversation_id,
-                {
-                    "item_type": "userMessage",
-                    "role": "user",
-                    "status": "completed",
-                    "payload": {
-                        "text": text,
-                        "mentions": mentions,
-                        "files": files,
-                    },
-                },
-            )
-            self.db.append_event(conversation_id, "item.local", item)
+            if latest_production:
+                production_id = latest_production["id"]
+                model_text = (
+                    model_text
+                    + "\n\n"
+                    + (
+                        f"[当前对话已绑定创作任务 production_id={production_id}。"
+                        "禁止再调用 start_video_production 创建重复任务；"
+                        "请查询 get_video_production，或按用户说明调用 run_video_production 重跑。]"
+                    )
+                )
+            item = self._append_user_message(conversation_id, text, files, mentions)
             updates: dict[str, Any] = {
                 "status": "running",
                 "turn_generation": generation,
@@ -289,11 +407,14 @@ class CodexHub:
                 name=f"video-fission-turn-{conversation_id[:8]}",
             )
             thread.start()
-            return {
+            result = {
                 "conversation_id": conversation_id,
                 "status": "running",
                 "turn_generation": generation,
             }
+            if latest_production:
+                result["production_id"] = latest_production["id"]
+            return result
         except Exception:
             if lock.locked():
                 lock.release()
@@ -616,10 +737,38 @@ class CodexHub:
 
     def _validated_files(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         root = self.settings.uploads_dir.resolve()
+        production_root = (self.settings.uploads_dir / "productions").resolve()
         validated: list[dict[str, Any]] = []
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("附件格式无效")
+            if str(item.get("kind") or "") == "production_video":
+                upload_id = str(item.get("id") or "").strip()
+                if not upload_id:
+                    raise ValueError("创作视频缺少上传标识")
+                upload = self.db.get_video_upload(upload_id)
+                if not upload:
+                    raise ValueError("参考视频不存在")
+                path = Path(str(upload.get("path") or "")).expanduser().resolve()
+                if production_root not in path.parents and path.parent != production_root:
+                    raise ValueError("附件不存在或不属于当前应用")
+                if not path.is_file():
+                    raise ValueError("参考视频不存在")
+                validated.append(
+                    {
+                        "kind": "production_video",
+                        "id": upload["id"],
+                        "name": Path(str(item.get("name") or upload.get("name") or path.name)).name,
+                        "path": "",
+                        "size": int(upload.get("size") or 0),
+                        "content_type": str(upload.get("content_type") or "video/mp4"),
+                        "duration_ms": int(upload.get("duration_ms") or 0),
+                        "width": int(upload.get("width") or 0),
+                        "height": int(upload.get("height") or 0),
+                        "url": f"/api/productions/uploads/{upload['id']}",
+                    }
+                )
+                continue
             raw_path = str(item.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("附件路径不能为空")
@@ -645,6 +794,7 @@ class CodexHub:
 - 默认在只读隔离工作区中工作，不声称执行了没有真实发生的操作。
 - 先理解用户目标，再给出具体、可执行的结论；需要澄清时只问真正影响结果的问题。
 - 你拥有动态工具：{tool_names}。当用户要求统计、查看工作区、读取文件或生成并保存视频简报时，应调用对应工具。
+- 对话里上传的参考视频使用 video_upload_id。若当前对话已有创作任务，先 get_video_production 查询或 run_video_production 按说明重跑，禁止再 start_video_production 开一条重复任务。
 - 项目 Skill 位于已注册的技能根目录，可通过 skill:// 提及或在任务匹配时使用。
 - 当任务涉及参考视频复刻、片段重组或生成 UGC 脚本时，骨架尚未明确时先用 creative-intent-script-skeleton 收敛意图和骨架；用户已确认骨架时直接使用 universal-ugc-video-script-generation 生成完整分镜。两个阶段都按需使用 video-references，不得声称检索过实际未读取的参考脚本。
 - 文件附件可能是绝对路径；读取前先判断是否真的需要。

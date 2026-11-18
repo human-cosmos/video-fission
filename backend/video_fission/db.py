@@ -229,6 +229,16 @@ class Database:
             )
             self._ensure_column(connection, "productions", "replace_policy", "TEXT")
             self._ensure_column(connection, "productions", "replace_plan", "TEXT")
+            self._ensure_column(
+                connection,
+                "productions",
+                "conversation_id",
+                "TEXT REFERENCES conversations(id) ON DELETE SET NULL",
+            )
+            self._ensure_column(connection, "productions", "source_item_id", "TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_productions_conversation ON productions(conversation_id)"
+            )
 
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, name: str, decl: str) -> None:
@@ -420,6 +430,61 @@ class Database:
         value = dict(row)
         value["payload"] = _load(value["payload"], {})
         return value
+
+    def upsert_item(self, conversation_id: str, item_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_item(item_id)
+        now = utc_now()
+        if existing:
+            with self.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE items
+                    SET item_type = ?, role = ?, status = ?, payload = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        fields.get("item_type") or existing["item_type"],
+                        fields.get("role", existing.get("role")),
+                        fields.get("status") or existing["status"],
+                        _json(fields.get("payload") if "payload" in fields else existing.get("payload") or {}),
+                        now,
+                        existing["id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (now, conversation_id),
+                )
+            return self.get_item(existing["id"]) or {}
+        values = {
+            "id": item_id,
+            "conversation_id": conversation_id,
+            "codex_item_id": fields.get("codex_item_id"),
+            "item_type": fields.get("item_type") or "raw",
+            "role": fields.get("role"),
+            "status": fields.get("status") or "completed",
+            "payload": _json(fields.get("payload") or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO items (
+                    id, conversation_id, codex_item_id, item_type, role, status,
+                    payload, created_at, updated_at
+                ) VALUES (
+                    :id, :conversation_id, :codex_item_id, :item_type, :role, :status,
+                    :payload, :created_at, :updated_at
+                )
+                """,
+                values,
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+        return self.get_item(item_id) or {}
 
     def get_codex_item(self, conversation_id: str, codex_item_id: str) -> dict[str, Any] | None:
         row = self.query_one(
@@ -706,7 +771,6 @@ class Database:
             "secrets": _load(row["secrets_json"], {}),
             "updated_at": row["updated_at"],
         }
-
     def upsert_app_settings(self, public: dict[str, Any], secrets: dict[str, Any]) -> None:
         now = utc_now()
         with self.transaction() as connection:
@@ -783,6 +847,8 @@ class Database:
             "replace_policy": json.dumps(payload.get("replace_policy") or {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []}, ensure_ascii=False, separators=(",", ":")),
             "replace_plan": json.dumps(payload.get("replace_plan"), ensure_ascii=False, separators=(",", ":")),
             "video_upload_id": payload["video_upload_id"],
+            "conversation_id": payload.get("conversation_id"),
+            "source_item_id": payload.get("source_item_id"),
             "created_at": now,
             "updated_at": now,
         }
@@ -792,11 +858,11 @@ class Database:
                 INSERT INTO productions (
                     id, title, brief, status, current_stage, error, warnings, source_video,
                     decomposition, intent, skeleton, script, clips, output, replace_policy,
-                    replace_plan, video_upload_id, created_at, updated_at
+                    replace_plan, video_upload_id, conversation_id, source_item_id, created_at, updated_at
                 ) VALUES (
                     :id, :title, :brief, :status, :current_stage, :error, :warnings, :source_video,
                     :decomposition, :intent, :skeleton, :script, :clips, :output, :replace_policy,
-                    :replace_plan, :video_upload_id, :created_at, :updated_at
+                    :replace_plan, :video_upload_id, :conversation_id, :source_item_id, :created_at, :updated_at
                 )
                 """,
                 values,
@@ -807,9 +873,42 @@ class Database:
         row = self.query_one("SELECT * FROM productions WHERE id = ?", (production_id,))
         return self._production_from_row(row) if row else None
 
-    def list_productions(self) -> list[dict[str, Any]]:
-        rows = self.query("SELECT * FROM productions ORDER BY created_at DESC, id DESC")
+    def list_productions(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+        if conversation_id:
+            rows = self.query(
+                "SELECT * FROM productions WHERE conversation_id = ? ORDER BY created_at DESC, id DESC",
+                (conversation_id,),
+            )
+        else:
+            rows = self.query("SELECT * FROM productions ORDER BY created_at DESC, id DESC")
         return [self._production_from_row(row) for row in rows]
+
+    def find_production_by_source_item(self, source_item_id: str) -> dict[str, Any] | None:
+        if not source_item_id:
+            return None
+        row = self.query_one(
+            "SELECT * FROM productions WHERE source_item_id = ? ORDER BY created_at DESC, id DESC",
+            (source_item_id,),
+        )
+        return self._production_from_row(row) if row else None
+
+    def find_duplicate_production(
+        self,
+        conversation_id: str,
+        video_upload_id: str,
+        brief: str,
+    ) -> dict[str, Any] | None:
+        if not conversation_id or not video_upload_id:
+            return None
+        row = self.query_one(
+            """
+            SELECT * FROM productions
+            WHERE conversation_id = ? AND video_upload_id = ? AND brief = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (conversation_id, video_upload_id, brief),
+        )
+        return self._production_from_row(row) if row else None
 
     def update_production(self, production_id: str, fields: dict[str, Any]) -> None:
         allowed = {
@@ -828,6 +927,8 @@ class Database:
             "output",
             "replace_policy",
             "replace_plan",
+            "conversation_id",
+            "source_item_id",
         }
         json_fields = {
             "warnings",
@@ -917,6 +1018,8 @@ class Database:
             "replace_policy": _load(_row_get(row, "replace_policy"), {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []}),
             "replace_plan": _load(_row_get(row, "replace_plan"), None),
             "video_upload_id": row["video_upload_id"],
+            "conversation_id": _row_get(row, "conversation_id"),
+            "source_item_id": _row_get(row, "source_item_id"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

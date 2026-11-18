@@ -23,9 +23,25 @@ export function formatBytes(bytes) {
 
 export const WORKSPACE_MODES = [
   { id: 'chat', label: '对话' },
-  { id: 'studio', label: '视频创作' },
   { id: 'settings', label: '模型设置' },
 ]
+
+export const POLICY_MODES = [
+  { id: 'default', label: '默认 Hook+CTA', hint: '只新生成开场和结尾，中间尽量复用' },
+  { id: 'brief', label: '按说明判断', hint: '从创作说明里解析要重做的片段' },
+  { id: 'all', label: '全部重做', hint: '每一段都重新生成' },
+]
+
+export const VIDEO_ITEM_TYPES = [
+  'video_progress',
+  'video_understanding',
+  'video_plan',
+  'video_segments',
+  'video_output',
+]
+
+export const VIDEO_ACCEPT = '.mp4,.mov,.webm,.m4v,video/mp4,video/quicktime,video/webm,video/x-m4v'
+export const MAX_PRODUCTION_UPLOAD_BYTES = 500 * 1024 * 1024
 
 export const STAGE_ORDER = [
   'ingest',
@@ -107,4 +123,76 @@ export function isTechnicalVisual(text) {
 
 export function needsRemoteFields(provider) {
   return provider === 'openai_compatible' || provider === 'generic_http'
+}
+
+export function isVideoFile(file) {
+  if (!file) return false
+  if (file.kind === 'production_video') return true
+  const type = String(file.content_type || file.type || '')
+  if (type.startsWith('video/')) return true
+  return /\.(mp4|mov|webm|m4v)$/i.test(String(file.name || file.filename || ''))
+}
+
+export function aspectStyle(dims) {
+  const width = Number(dims?.width) || 0
+  const height = Number(dims?.height) || 0
+  if (!width || !height) return {}
+  return { '--player-aspect': `${width} / ${height}` }
+}
+
+export function aspectClass(dims, { framed = true } = {}) {
+  const width = Number(dims?.width) || 0
+  const height = Number(dims?.height) || 0
+  const base = framed ? 'player-frame' : ''
+  if (!width || !height) return base || 'player-frame'
+  return `${base} ${height > width ? 'is-portrait' : 'is-landscape'}`.trim()
+}
+
+export function segmentAction(segment, replacePlan, shots = []) {
+  const id = segment?.id
+  if (!id) return ''
+  const resolved = replacePlan?.resolved_segment_ids
+  if (Array.isArray(resolved)) {
+    return resolved.includes(id) ? 'generate' : 'reuse'
+  }
+  const shot = (shots || []).find(
+    (item) => item.source_segment_id === id || item.segment_id === id,
+  )
+  return shot?.action || segment?.action || ''
+}
+
+export function cleanDisplayText(text) {
+  let value = String(text || '').trim()
+  if (!value) return ''
+  if (isTechnicalVisual(value)) return ''
+  value = value
+    .replace(/时长\s*\d+\s*ms[。.\s]*/gi, '')
+    .replace(/按时间窗口划分[。.]?/g, '')
+    .replace(/场景切点划分[。.]?/g, '')
+  value = humanizeMsText(value)
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return value
+}
+
+export function withRevision(url, rev) {
+  if (!url) return ''
+  if (!rev) return url
+  return `${url}${url.includes('?') ? '&' : '?'}t=${encodeURIComponent(rev)}`
+}
+
+export function toProductionVideoFile(upload) {
+  if (!upload) return null
+  return {
+    kind: 'production_video',
+    id: upload.id,
+    name: upload.name || upload.filename || 'reference.mp4',
+    path: '',
+    size: upload.size || upload.file_size || 0,
+    content_type: upload.content_type || 'video/mp4',
+    duration_ms: upload.duration_ms,
+    width: upload.width,
+    height: upload.height,
+  }
 }

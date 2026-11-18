@@ -12,6 +12,9 @@ FONT_CANDIDATES = [
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+    Path("/System/Library/Fonts/STHeiti Medium.ttc"),
+    Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+    Path("/System/Library/Fonts/HelveticaNeue.ttc"),
 ]
 
 
@@ -650,11 +653,114 @@ def mix_bgm(video: Path, bgm: Path, dest: Path, bgm_volume: float, duration_ms: 
     return dest
 
 
+def subtitle_burn_style(width: int, height: int) -> tuple[str, str]:
+    """ASS force_style and original_size so captions sit above player chrome.
+
+    MarginV is 20% of the frame height so text clears a typical native
+    control bar even when a tall 9:16 video is shown in a short player.
+    PlayRes is the real frame size, so MarginV is in video pixels.
+    """
+    layout = subtitle_burn_layout(width, height)
+    return layout["style"], layout["original_size"]
+
+
+def subtitle_burn_layout(width: int, height: int) -> dict[str, Any]:
+    width = max(int(width), 2)
+    height = max(int(height), 2)
+    font_size = max(28, round(height * 0.045))
+    margin_v = max(96, round(height * 0.20))
+    margin_x = max(24, round(width * 0.05))
+    style = (
+        "FontName=Droid Sans Fallback,"
+        f"FontSize={font_size},"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00111111,"
+        "BorderStyle=1,"
+        "Outline=2,"
+        "Shadow=1,"
+        "Alignment=2,"
+        f"MarginV={margin_v}"
+    )
+    return {
+        "width": width,
+        "height": height,
+        "font_size": font_size,
+        "margin_v": margin_v,
+        "margin_x": margin_x,
+        "style": style,
+        "original_size": f"{width}x{height}",
+    }
+
+
+def _ass_timestamp(srt_ts: str) -> str:
+    stamp = srt_ts.strip().replace(",", ".")
+    parts = stamp.split(":")
+    if len(parts) != 3:
+        raise MediaError(f"无法解析字幕时间戳：{srt_ts}")
+    hours, minutes, rest = parts
+    seconds, _, frac = rest.partition(".")
+    millis = int((frac + "000")[:3]) if frac else 0
+    centis = min(99, int(round(millis / 10)))
+    return f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}.{centis:02d}"
+
+
+def _parse_srt_cues(path: Path) -> list[tuple[str, str, str]]:
+    blocks = re.split(r"\n\s*\n", path.read_text(encoding="utf-8").strip())
+    cues: list[tuple[str, str, str]] = []
+    for block in blocks:
+        lines = [line.rstrip() for line in block.splitlines()]
+        time_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if time_index is None:
+            continue
+        start_raw, end_raw = [part.strip() for part in lines[time_index].split("-->")]
+        text = "\\N".join(line.strip() for line in lines[time_index + 1:] if line.strip())
+        text = text.replace("{", "\\{").replace("}", "\\}")
+        if text:
+            cues.append((_ass_timestamp(start_raw), _ass_timestamp(end_raw), text))
+    return cues
+
+
+def write_ass_from_srt(srt: Path, dest: Path, width: int, height: int) -> Path:
+    layout = subtitle_burn_layout(width, height)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    events = []
+    for start, end, text in _parse_srt_cues(srt):
+        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+    body = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {layout['width']}\n"
+        f"PlayResY: {layout['height']}\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "YCbCr Matrix: TV.709\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Droid Sans Fallback,"
+        f"{layout['font_size']},&H00FFFFFF,&H000000FF,&H00111111,&H80000000,"
+        f"0,0,0,0,100,100,0,0,1,2,1,2,{layout['margin_x']},{layout['margin_x']},"
+        f"{layout['margin_v']},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(events)
+        + ("\n" if events else "")
+    )
+    dest.write_text(body, encoding="utf-8")
+    return dest
+
+
 def burn_subtitles(video: Path, srt: Path, dest: Path) -> Path:
     font = default_font()
     fonts_dir = str(font.parent).replace("\\", "\\\\").replace(":", "\\:")
-    srt_path = str(srt.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-    style = "FontName=Droid Sans Fallback,FontSize=18,PrimaryColour=&H00FFFFFF,Outline=1"
+    info = probe(video)
+    ass_path = dest.parent / f"{dest.stem}.ass"
+    write_ass_from_srt(srt, ass_path, info["width"], info["height"])
+    ass_arg = str(ass_path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     run_ffmpeg(
         [
             ffmpeg_bin(),
@@ -663,7 +769,7 @@ def burn_subtitles(video: Path, srt: Path, dest: Path) -> Path:
             str(video),
             "-vf",
             limited_range_vf(
-                f"subtitles='{srt_path}':fontsdir='{fonts_dir}':force_style='{style}'"
+                f"subtitles='{ass_arg}':fontsdir='{fonts_dir}'"
             ),
             *limited_x264_args(),
             "-c:a",

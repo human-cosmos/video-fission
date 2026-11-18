@@ -10,6 +10,7 @@ from typing import Any
 from . import media
 from .config import Settings
 from .db import Database
+from .conversation_cards import cards_for, stable_item_id, upload_media_url
 from .pipeline import PipelineEngine
 from .replace import normalize_replace_policy, resolve_replace_plan
 from .settings_store import SettingsStore
@@ -40,6 +41,7 @@ class ProductionService:
         self.db = db
         self.store = store
         self.engine = PipelineEngine(settings, db, store)
+        self.engine.on_after_emit = self.sync_conversation_cards
         self._lock = threading.Lock()
         self._cancels: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -87,6 +89,7 @@ class ProductionService:
             "width": record["width"],
             "height": record["height"],
             "fps": record["fps"],
+            "url": upload_media_url(record["id"]),
         }
 
     def create(
@@ -95,6 +98,8 @@ class ProductionService:
         brief: str,
         video_upload_id: str,
         replace_policy: dict[str, Any] | None = None,
+        conversation_id: str | None = None,
+        source_item_id: str | None = None,
     ) -> dict[str, Any]:
         brief = (brief or "").strip()
         if not brief:
@@ -115,6 +120,9 @@ class ProductionService:
             "height": upload["height"],
             "fps": upload["fps"],
         }
+        bound_conversation = (conversation_id or "").strip() or None
+        if bound_conversation and not self.db.get_conversation(bound_conversation):
+            raise ValueError("对话不存在")
         self.db.create_production(
             {
                 "id": production_id,
@@ -134,9 +142,13 @@ class ProductionService:
                 "replace_policy": normalize_replace_policy(replace_policy),
                 "replace_plan": None,
                 "video_upload_id": upload["id"],
+                "conversation_id": bound_conversation,
+                "source_item_id": (source_item_id or "").strip() or None,
             }
         )
-        return self.public(production_id)
+        public = self.public(production_id)
+        self.sync_conversation_cards(production_id)
+        return public
 
     def patch(
         self,
@@ -144,6 +156,7 @@ class ProductionService:
         title: str | None = None,
         brief: str | None = None,
         replace_policy: dict[str, Any] | None = None,
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         production = self.db.get_production(production_id)
         if not production:
@@ -167,9 +180,21 @@ class ProductionService:
             updates["brief"] = brief_text
         if replace_policy is not None:
             updates["replace_policy"] = normalize_replace_policy(replace_policy)
+        if conversation_id is not None:
+            current = (production.get("conversation_id") or "").strip() or None
+            desired = conversation_id.strip() or None
+            if current and current != desired:
+                raise ProductionConflict("已绑定的创作任务不能改到另一个对话")
+            if desired:
+                if not self.db.get_conversation(desired):
+                    raise ValueError("对话不存在")
+                updates["conversation_id"] = desired
         if updates:
             self.db.update_production(production_id, updates)
-        return self.public(production_id)
+        public = self.public(production_id)
+        if "conversation_id" in updates:
+            self.sync_conversation_cards(production_id)
+        return public
 
     def get(self, production_id: str) -> dict[str, Any]:
         production = self.db.get_production(production_id)
@@ -177,9 +202,9 @@ class ProductionService:
             raise ProductionNotFound("创作任务不存在")
         return self._to_public(production)
 
-    def list_items(self) -> list[dict[str, Any]]:
+    def list_items(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
         items = []
-        for production in self.db.list_productions():
+        for production in self.db.list_productions(conversation_id=conversation_id):
             public = self._to_public(production)
             items.append(
                 {
@@ -190,6 +215,7 @@ class ProductionService:
                     "current_stage": public["current_stage"],
                     "error": public["error"],
                     "output": public.get("output"),
+                    "conversation_id": public.get("conversation_id"),
                     "created_at": public["created_at"],
                     "updated_at": public["updated_at"],
                 }
@@ -228,6 +254,7 @@ class ProductionService:
             updates["replace_plan"] = plan
         updates.update({"status": "running", "current_stage": resume or "ingest", "error": None})
         self.db.update_production(production_id, updates)
+        self.sync_conversation_cards(production_id)
         cancel = threading.Event()
         with self._lock:
             self._cancels[production_id] = cancel
@@ -279,7 +306,9 @@ class ProductionService:
             event.set()
         if production["status"] != "running":
             self.db.update_production(production_id, {"status": "cancelled"})
-        return self.public(production_id)
+        public = self.public(production_id)
+        self.sync_conversation_cards(production_id)
+        return public
 
     def delete(self, production_id: str) -> None:
         production = self.db.get_production(production_id)
@@ -321,13 +350,90 @@ class ProductionService:
         video_upload_id: str | None = None,
         source_path: str | None = None,
         replace_policy: dict[str, Any] | None = None,
+        conversation_id: str | None = None,
+        source_item_id: str | None = None,
     ) -> dict[str, Any]:
         if not video_upload_id and source_path:
             video_upload_id = self._register_existing_path(source_path)
         if not video_upload_id:
             raise ValueError("需要 video_upload_id 或已上传文件路径")
-        production = self.create(None, brief, video_upload_id, replace_policy=replace_policy)
+        brief_text = (brief or "").strip()
+        conversation = (conversation_id or "").strip() or None
+        if source_item_id:
+            existing = self.db.find_production_by_source_item(source_item_id)
+            if existing:
+                return self._to_public(existing)
+        if conversation:
+            existing = self.db.find_duplicate_production(conversation, video_upload_id, brief_text)
+            if existing:
+                return self._to_public(existing)
+        production = self.create(
+            None,
+            brief_text,
+            video_upload_id,
+            replace_policy=replace_policy,
+            conversation_id=conversation,
+            source_item_id=source_item_id,
+        )
         return self.run(production["id"])
+
+    def upload_media_path(self, upload_id: str) -> tuple[Path, dict[str, Any]]:
+        if not UPLOAD_ID_RE.match(upload_id or ""):
+            raise ValueError("非法上传标识")
+        record = self.db.get_video_upload(upload_id)
+        if not record:
+            raise ProductionNotFound("参考视频不存在")
+        path = Path(record["path"]).expanduser().resolve()
+        root = (self.settings.uploads_dir / "productions").resolve()
+        if root not in path.parents and path.parent != root:
+            raise ValueError("非法文件路径")
+        if not path.is_file():
+            raise FileNotFoundError("参考视频不存在")
+        return path, record
+
+    def sync_conversation_cards(self, production_id: str, kind: str | None = None, payload: dict[str, Any] | None = None) -> None:
+        production = self.db.get_production(production_id)
+        if not production:
+            return
+        conversation_id = (production.get("conversation_id") or "").strip()
+        if not conversation_id or not self.db.get_conversation(conversation_id):
+            return
+        public = self._to_public(production)
+        artifact_dir = self.settings.artifacts_dir / "productions" / production_id
+        last_item = None
+        for item_type, card_payload in cards_for(public, artifact_dir if artifact_dir.is_dir() else None):
+            last_item = self.db.upsert_item(
+                conversation_id,
+                stable_item_id(production_id, item_type),
+                {
+                    "item_type": item_type,
+                    "role": "assistant",
+                    "status": "completed",
+                    "codex_item_id": None,
+                    "payload": card_payload,
+                },
+            )
+            self.db.append_event(
+                conversation_id,
+                "item_upserted",
+                {
+                    "item_id": last_item.get("id"),
+                    "item_type": item_type,
+                    "production_id": production_id,
+                    "item": last_item,
+                },
+            )
+        self.db.append_event(
+            conversation_id,
+            "production_updated",
+            {
+                "production_id": production_id,
+                "status": public.get("status"),
+                "current_stage": public.get("current_stage"),
+                "kind": kind,
+                "payload": payload or {},
+            },
+        )
 
     def _register_existing_path(self, source_path: str) -> str:
         path = Path(source_path).expanduser().resolve()
@@ -403,6 +509,7 @@ class ProductionService:
                 "time_ranges": [],
             },
             "replace_plan": production.get("replace_plan"),
+            "conversation_id": production.get("conversation_id"),
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],
         }

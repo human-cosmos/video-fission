@@ -312,11 +312,13 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         upload_id = str(arguments.get("video_upload_id") or "").strip() or None
         source_path = str(arguments.get("source_path") or arguments.get("path") or "").strip() or None
         policy = arguments.get("replace_policy")
+        conversation_id = str(arguments.get("conversation_id") or context.get("conversation_id") or "").strip() or None
         result = productions.start_from_tool(
             brief,
             video_upload_id=upload_id,
             source_path=source_path,
             replace_policy=policy if isinstance(policy, dict) else None,
+            conversation_id=conversation_id,
         )
         return {
             "production": result,
@@ -330,13 +332,31 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         result = productions.get(production_id)
         return {"production": result}
 
+    def run_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if productions is None:
+            raise ValueError("视频创作管线尚未就绪")
+        production_id = str(arguments.get("production_id") or arguments.get("id") or "").strip()
+        policy = arguments.get("replace_policy")
+        resume_from = arguments.get("resume_from")
+        result = productions.run(
+            production_id,
+            replace_policy=policy if isinstance(policy, dict) else None,
+            resume_from=str(resume_from).strip() if resume_from else None,
+        )
+        return {
+            "production": result,
+            "message": f"已重跑创作任务 {result['id']}，状态 {result['status']}",
+        }
+
     registry.register(
         ToolDefinition(
             name="start_video_production",
             title="开始视频创作",
             description=(
-                "Create and start a video production from a creative brief and an uploaded reference video. "
-                "Use video_upload_id from the video studio upload, or a allowed local source_path."
+                "Create and start a video production from a creative brief and a video_upload_id "
+                "from a video uploaded in the conversation. An allowed local source_path also works. "
+                "If this conversation already started a matching task, return that existing production "
+                "instead of creating a duplicate."
             ),
             input_schema={
                 "type": "object",
@@ -344,6 +364,7 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                     "brief": {"type": "string", "maxLength": 20000},
                     "video_upload_id": {"type": "string", "maxLength": 80},
                     "source_path": {"type": "string", "maxLength": 500},
+                    "conversation_id": {"type": "string", "maxLength": 80},
                     "replace_policy": {
                         "type": "object",
                         "properties": {
@@ -374,6 +395,36 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 "additionalProperties": False,
             },
             handler=get_video_production,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_video_production",
+            title="重跑视频创作",
+            description=(
+                "Re-run an existing video production with the same POST /run body: "
+                "optional resume_from (ingest|decompose|intent) and replace_policy. "
+                "Use this when the conversation already has a production_id and the user wants a follow-up."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "production_id": {"type": "string", "maxLength": 80},
+                    "resume_from": {"type": "string", "maxLength": 20},
+                    "replace_policy": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"type": "string"},
+                            "roles": {"type": "array", "items": {"type": "string"}},
+                            "segment_ids": {"type": "array", "items": {"type": "string"}},
+                            "time_ranges": {"type": "array"},
+                        },
+                    },
+                },
+                "required": ["production_id"],
+                "additionalProperties": False,
+            },
+            handler=run_video_production,
         )
     )
     return registry

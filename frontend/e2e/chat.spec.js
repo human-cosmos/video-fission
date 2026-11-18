@@ -35,7 +35,6 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   cleanup.skillSlug = `e2e-hook-${marker.slice(-6).toLowerCase()}`
   await page.goto('/')
   await expect(page.locator('.app-shell')).toBeVisible()
-  await page.getByTestId('mode-chat').click()
 
   await page.getByTestId('new-conversation').click()
   await expect(page.getByTestId('message-input')).toBeVisible()
@@ -109,7 +108,6 @@ test('keeps the conversation and capability controls reachable on mobile', async
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
   await expect(page.locator('.app-shell')).toBeVisible()
-  await page.getByTestId('mode-chat').click()
 
   await page.getByRole('button', { name: '打开会话列表' }).click()
   await expect(page.getByTestId('new-conversation')).toBeInViewport()
@@ -133,11 +131,10 @@ test('preserves an attachment uploaded before the first conversation exists', as
 
   await page.goto('/')
   await expect(page.locator('.app-shell')).toBeVisible()
-  await page.getByTestId('mode-chat').click()
   const uploadResponse = page.waitForResponse(
     (response) => response.url().endsWith('/api/uploads') && response.request().method() === 'POST',
   )
-  await page.locator('input[type=file]').setInputFiles(attachmentPath)
+  await page.getByTitle('添加文件').locator('input[type=file]').setInputFiles(attachmentPath)
   cleanup.uploadId = (await (await uploadResponse).json()).id
   await expect(page.getByText('attachment-note.txt', { exact: true })).toBeVisible()
   await page

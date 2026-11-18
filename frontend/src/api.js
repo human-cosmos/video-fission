@@ -83,7 +83,12 @@ export const api = {
     body.append('file', file)
     return request('/productions/uploads', { method: 'POST', body })
   },
-  productions: () => request('/productions'),
+  productions: (conversationId) =>
+    request(
+      conversationId
+        ? `/productions?conversation_id=${encodeURIComponent(conversationId)}`
+        : '/productions',
+    ),
   production: (id) => request(`/productions/${encodeURIComponent(id)}`),
   createProduction: (payload) => request('/productions', json('POST', payload)),
   patchProduction: (id, payload) =>
@@ -111,3 +116,7 @@ export function productionArtifactUrl(productionId, name) {
   return `${BASE}/productions/${encodeURIComponent(productionId)}/artifacts/${encodeURIComponent(name)}`
 }
 
+
+export function productionUploadUrl(uploadId) {
+  return `${BASE}/productions/uploads/${encodeURIComponent(uploadId)}`
+}

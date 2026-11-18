@@ -20,6 +20,7 @@ describe('conversation event helpers', () => {
 
   it('labels tools and localizes item types', () => {
     expect(itemLabel('commandExecution')).toBe('命令')
+    expect(itemLabel('video_output')).toBe('成片')
     expect(toolCallName({ payload: { tool: 'create_video_brief' } })).toBe(
       'create_video_brief',
     )
@@ -28,6 +29,8 @@ describe('conversation event helpers', () => {
   it('selects refresh events without waking on heartbeats', () => {
     expect(isRefreshEvent('agent.message.delta')).toBe(true)
     expect(isRefreshEvent('approval.requested')).toBe(true)
+    expect(isRefreshEvent('item_upserted')).toBe(true)
+    expect(isRefreshEvent('production_updated')).toBe(true)
     expect(isRefreshEvent('stream.heartbeat')).toBe(false)
   })
 })

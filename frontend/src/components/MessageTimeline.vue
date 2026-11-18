@@ -2,13 +2,30 @@
 import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from '@lucide/vue'
 import { nextTick, reactive, ref, watch } from 'vue'
 import { itemLabel, payloadText, toolCallName } from '../utils/events'
+import { isVideoFile } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
+import { mediaUrl } from '../utils/productionMedia'
+import AspectVideo from './AspectVideo.vue'
+import VideoOutputCard from './VideoOutputCard.vue'
+import VideoPlanCard from './VideoPlanCard.vue'
+import VideoProgressCard from './VideoProgressCard.vue'
+import VideoSegmentsCard from './VideoSegmentsCard.vue'
+import VideoUnderstandingCard from './VideoUnderstandingCard.vue'
 
 const props = defineProps({
   conversation: { type: Object, default: null },
+  rerunning: { type: Boolean, default: false },
+  cancelling: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['decide-approval', 'answer-clarification', 'copy'])
+const emit = defineEmits([
+  'decide-approval',
+  'answer-clarification',
+  'copy',
+  'cancel-production',
+  'rerun-selected',
+  'rerun-brief',
+])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
 
@@ -53,6 +70,20 @@ function submitClarification(clarification) {
 
 function copyText(text) {
   emit('copy', text)
+}
+
+function cardPayload(item) {
+  const payload = item?.payload || {}
+  if (payload.status) return payload
+  const productionId = payload.production_id
+  if (!productionId) return payload
+  const progress = (props.conversation?.items || []).find(
+    (other) =>
+      other.item_type === 'video_progress' && other.payload?.production_id === productionId,
+  )
+  return progress?.payload?.status
+    ? { ...payload, status: progress.payload.status, updated_at: progress.payload.updated_at }
+    : payload
 }
 
 function structuredText(item) {
@@ -116,9 +147,20 @@ defineExpose({ scrollToBottom })
               </span>
             </div>
             <div v-if="item.payload?.files?.length" class="attachment-row">
-              <span v-for="file in item.payload.files" :key="file.path">
-                <FileText :size="13" /> {{ file.name }}
-              </span>
+              <template v-for="file in item.payload.files" :key="file.id || file.path || file.name">
+                <AspectVideo
+                  v-if="isVideoFile(file) && mediaUrl(file)"
+                  class="user-video"
+                  :src="mediaUrl(file)"
+                  :width="Number(file.width) || 0"
+                  :height="Number(file.height) || 0"
+                  testid="user-message-video"
+                  compact
+                />
+                <span v-else>
+                  <FileText :size="13" /> {{ file.name }}
+                </span>
+              </template>
             </div>
           </div>
         </template>
@@ -161,6 +203,35 @@ defineExpose({ scrollToBottom })
             <div class="trace-label">PLAN / 计划</div>
             <div class="markdown-body" v-html="renderMarkdown(payloadText(item))"></div>
           </div>
+        </template>
+
+        <template v-else-if="item.item_type === 'video_progress'">
+          <VideoProgressCard
+            :payload="item.payload"
+            :cancelling="cancelling"
+            @cancel="$emit('cancel-production', $event)"
+          />
+        </template>
+
+        <template v-else-if="item.item_type === 'video_understanding'">
+          <VideoUnderstandingCard :payload="cardPayload(item)" />
+        </template>
+
+        <template v-else-if="item.item_type === 'video_plan'">
+          <VideoPlanCard :payload="cardPayload(item)" />
+        </template>
+
+        <template v-else-if="item.item_type === 'video_segments'">
+          <VideoSegmentsCard
+            :payload="cardPayload(item)"
+            :rerunning="rerunning"
+            @rerun-selected="$emit('rerun-selected', $event)"
+            @rerun-brief="$emit('rerun-brief', $event)"
+          />
+        </template>
+
+        <template v-else-if="item.item_type === 'video_output'">
+          <VideoOutputCard :payload="cardPayload(item)" />
         </template>
 
         <template

@@ -49,9 +49,11 @@ class Mention(BaseModel):
 
 
 class MessageRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     text: str = Field(default="", max_length=30_000)
     mentions: list[Mention] = Field(default_factory=list, max_length=20)
     files: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    replace_policy: dict[str, Any] | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -410,6 +412,7 @@ class ProductionCreate(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     brief: str = Field(min_length=1, max_length=20_000)
     video_upload_id: str = Field(min_length=1, max_length=80)
+    conversation_id: str | None = Field(default=None, max_length=80)
     replace_policy: ReplacePolicyBody | None = None
 
 
@@ -417,6 +420,7 @@ class ProductionPatch(BaseModel):
     model_config = ConfigDict(extra="ignore")
     title: str | None = Field(default=None, max_length=120)
     brief: str | None = Field(default=None, min_length=1, max_length=20_000)
+    conversation_id: str | None = Field(default=None, max_length=80)
     replace_policy: ReplacePolicyBody | None = None
 
 
@@ -492,18 +496,39 @@ async def upload_production_video(file: UploadFile = File(...)) -> dict[str, Any
         _production_error(exc)
 
 
+@router.get("/productions/uploads/{upload_id}")
+def get_production_upload(upload_id: str):
+    try:
+        path, record = container.productions.upload_media_path(upload_id)
+    except Exception as exc:
+        _production_error(exc)
+    return FileResponse(
+        path,
+        media_type=str(record.get("content_type") or "video/mp4"),
+        filename=record.get("name") or path.name,
+        content_disposition_type="inline",
+    )
+
+
 @router.post("/productions", status_code=201)
 def create_production(body: ProductionCreate) -> dict[str, Any]:
     try:
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
-        return container.productions.create(body.title, body.brief, body.video_upload_id, replace_policy=policy)
+        return container.productions.create(
+            body.title,
+            body.brief,
+            body.video_upload_id,
+            replace_policy=policy,
+            conversation_id=body.conversation_id,
+        )
     except Exception as exc:
         _production_error(exc)
 
 
 @router.get("/productions")
-def list_productions() -> dict[str, Any]:
-    return {"items": container.productions.list_items()}
+def list_productions(conversation_id: str | None = Query(default=None)) -> dict[str, Any]:
+    filtered = conversation_id.strip() if conversation_id else None
+    return {"items": container.productions.list_items(conversation_id=filtered)}
 
 
 @router.get("/productions/{production_id}")
@@ -523,6 +548,7 @@ def patch_production(production_id: str, body: ProductionPatch) -> dict[str, Any
             title=body.title,
             brief=body.brief,
             replace_policy=policy,
+            conversation_id=body.conversation_id,
         )
     except Exception as exc:
         _production_error(exc)

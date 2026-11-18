@@ -31,7 +31,7 @@ def configure(runtime_settings: Settings | None = None) -> None:
     settings_store = SettingsStore(db)
     productions = ProductionService(settings, db, settings_store)
     tools = build_registry(db, settings.workspace, settings.artifacts_dir, productions)
-    hub = CodexHub(settings, db, skills, tools)
+    hub = CodexHub(settings, db, skills, tools, productions=productions)
 
 
 configure()

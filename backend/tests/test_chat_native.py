@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.helpers import finish_production
 from video_fission.container import configure
 from video_fission.main import app
 from video_fission.tools import build_registry
@@ -68,6 +69,8 @@ def _wait_production(client: TestClient, production_id: str, timeout: float = 18
         body = client.get(f"/api/productions/{production_id}")
         assert body.status_code == 200, body.text
         production = body.json()
+        if production["status"] == "awaiting_script_choice":
+            production = finish_production(production_id, production)
         if production["status"] in {"completed", "failed", "cancelled"}:
             return production
         time.sleep(0.25)
@@ -221,7 +224,7 @@ def test_text_followup_without_codex_reruns_brief(client_no_codex: TestClient):
 
     from video_fission import container
 
-    first = container.productions.engine.run(production_id)
+    first = finish_production(production_id, container.productions.engine.run(production_id))
     assert first["status"] == "completed"
 
     follow = "把第二段和结尾重新生成"

@@ -14,6 +14,7 @@ from .db import Database
 from .paths import production_artifact_dir, user_artifact_root, user_upload_root, user_workspace
 from .pipeline import PipelineEngine
 from .replace import normalize_replace_policy, resolve_replace_plan
+from .script_flow import candidate_by_id, classify_followup
 from .settings_store import SettingsStore
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v", ".qt"}
@@ -265,7 +266,12 @@ class ProductionService:
             raise ValueError("没有命中任何片段")
         if segments:
             # Validate selected/brief hits before starting, so HTTP can return 400.
-            plan = resolve_replace_plan(policy, segments, brief)
+            plan = resolve_replace_plan(
+                policy,
+                segments,
+                brief,
+                opening=(production.get("decomposition") or {}).get("opening"),
+            )
             updates["replace_plan"] = plan
         updates.update({"status": "running", "current_stage": resume or "ingest", "error": None})
         self.db.update_production(production_id, updates)
@@ -297,17 +303,53 @@ class ProductionService:
         resume_from: str | None,
         segments: list[dict[str, Any]],
     ) -> str | None:
-        allowed = {"ingest", "decompose", "intent"}
+        allowed = {"ingest", "decompose", "intent", "script", "generate"}
         if resume_from:
             value = str(resume_from).strip()
             if value not in allowed:
-                raise ValueError("resume_from 只能是 ingest|decompose|intent")
-            if value == "intent" and not segments:
-                raise ValueError("还没有拆解结果，无法从 intent 恢复")
+                raise ValueError("resume_from 只能是 ingest|decompose|intent|script|generate")
+            if value in {"intent", "script", "generate"} and not segments:
+                raise ValueError(f"还没有拆解结果，无法从 {value} 恢复")
+            if value == "generate":
+                selected = bool(production.get("selected_script_id"))
+                awaiting = production.get("status") == "awaiting_script_choice" or (
+                    production.get("script_candidates") and not production.get("selected_script_id")
+                )
+                if not selected and (awaiting or not (production.get("script") or {}).get("shots")):
+                    raise ValueError("还没有选定脚本，无法从 generate 恢复")
             return value
-        if segments:
-            return "intent"
-        return None
+        if not segments:
+            return None
+        _action, stage = classify_followup(production, production.get("brief") or "")
+        if _action == "select":
+            return "generate"
+        return stage
+
+    def select_script(
+        self,
+        production_id: str,
+        script_id: str,
+        wait: bool = False,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production["status"] == "running":
+            raise ProductionConflict("任务正在运行")
+        chosen = candidate_by_id(production.get("script_candidates") or [], script_id)
+        if not chosen:
+            raise ValueError("脚本候选不存在")
+        self.db.update_production(
+            production_id,
+            {
+                "script": chosen.get("script") or production.get("script"),
+                "selected_script_id": chosen["id"],
+                "error": None,
+            },
+        )
+        self.sync_conversation_cards(production_id)
+        return self.run(production_id, wait=wait, resume_from="generate", user_id=user_id)
 
     def cancel(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
         production = self.db.get_production(production_id, user_id)
@@ -605,6 +647,11 @@ class ProductionService:
             },
             "replace_plan": production.get("replace_plan"),
             "conversation_id": production.get("conversation_id"),
+            "landing_page": production.get("landing_page"),
+            "script_candidates": production.get("script_candidates") or [],
+            "selected_script_id": production.get("selected_script_id"),
+            "audio_separation": production.get("audio_separation"),
+            "subtitle_style": production.get("subtitle_style"),
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],
         }

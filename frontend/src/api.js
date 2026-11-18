@@ -126,6 +126,11 @@ export const api = {
     ),
   cancelProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  selectScript: (id, scriptId) =>
+    request(
+      `/productions/${encodeURIComponent(id)}/select-script`,
+      json('POST', { script_id: scriptId }),
+    ),
   deleteProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

@@ -63,7 +63,13 @@ test("runs a production inside a conversation, then regenerates a selected segme
   await expect(page.getByTestId("video-progress-card")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-understanding-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-plan-card")).toBeVisible({ timeout: 180_000 })
-  await expect(page.getByTestId("video-segments-card")).toBeVisible({ timeout: 180_000 })
+  const chooseScript = page.getByTestId("video-script-choose").first()
+  const segmentsCard = page.getByTestId("video-segments-card")
+  await expect(chooseScript.or(segmentsCard)).toBeVisible({ timeout: 180_000 })
+  if (await chooseScript.isVisible()) {
+    await chooseScript.click()
+  }
+  await expect(segmentsCard).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-player")).toBeVisible()
   await expect(page.getByTestId("video-download-mp4")).toBeVisible()

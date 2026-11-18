@@ -89,18 +89,26 @@ def _media_duration_ms(public: dict[str, Any]) -> int:
 
 
 def plan_payload(public: dict[str, Any]) -> dict[str, Any] | None:
-    if not any(public.get(key) for key in ("intent", "skeleton", "script", "replace_plan")):
+    if not any(
+        public.get(key)
+        for key in ("intent", "skeleton", "script", "replace_plan", "script_candidates", "landing_page")
+    ):
         return None
     decomposition = public.get("decomposition") or {}
     duration_ms = _media_duration_ms(public)
     payload = {
         "production_id": public["id"],
+        "status": public.get("status"),
+        "current_stage": public.get("current_stage"),
         "intent": public.get("intent"),
         "skeleton": public.get("skeleton"),
         "script": public.get("script"),
         "replace_policy": public.get("replace_policy"),
         "replace_plan": public.get("replace_plan"),
         "opening": decomposition.get("opening") if isinstance(decomposition, dict) else None,
+        "landing_page": public.get("landing_page"),
+        "script_candidates": public.get("script_candidates") or [],
+        "selected_script_id": public.get("selected_script_id"),
     }
     if duration_ms > 0:
         payload["duration_ms"] = duration_ms

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.helpers import finish_production
 from video_fission.container import configure
 from video_fission.conversation_cards import cards_for, observe_payload, stable_item_id, understanding_payload
 from video_fission.main import app
@@ -299,7 +300,7 @@ def test_remote_failure_falls_back_and_pipeline_still_completes(client: TestClie
     production_id = created.json()["id"]
     from video_fission import container
 
-    finished = container.productions.engine.run(production_id)
+    finished = finish_production(production_id, container.productions.engine.run(production_id))
     public = container.productions.get(production_id)
     client.put("/api/settings", json={"multimodal": {"provider": "local_ffmpeg", "base_url": "", "api_key": None}})
     assert finished["status"] == "completed"

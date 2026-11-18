@@ -1,8 +1,151 @@
 # Video Fission 开发状态
 
-更新：2026-11-18 12:56 Asia/Shanghai
-当前任务书：`docs/TASKS-SLOT-UNDERSTANDING.md`（已锁定，2026-11-18 09:55 Asia/Shanghai）；前序 `docs/TASKS-VIDEO-PIPELINE.md`、`docs/TASKS-CHAT-NATIVE-PRODUCTION.md` 仍锁定有效
-状态：认证多用户提交 `0bbd20f`（`feat: add authenticated multi-user workspaces`）已合入槽位理解迁移。默认无 Key 路径与用户/工作区隔离保持可用；审查发现已修复。未 git 提交，未写回远端，未动 5173 / 5174 / 8000。
+更新：2026-11-18 17:27 Asia/Shanghai
+当前任务书：`docs/TASKS-LANDING-CREATIVE-AUDIO.md`（已锁定，2026-11-18 16:30 Asia/Shanghai）；前序 `docs/TASKS-VIDEO-PIPELINE.md`、`docs/TASKS-CHAT-NATIVE-PRODUCTION.md`、`docs/TASKS-SLOT-UNDERSTANDING.md`、`docs/TASKS-OPENING-SPAN.md` 仍锁定有效。
+状态：落地页/三脚本/音频/字幕这轮开发已收口（按用户要求，不做完整链路验证，也不走视频生成模型）。全量 pytest 于 17:26 转绿：**104 passed / 2 skipped**（145.44s）。Grok 于 17:27 重启 8000（新 pid **978680**），`POST /api/productions/{id}/select-script` 已加载（未登录返回 401，不再是 405）。5174 pid 881829、5173 pid 3699806 未动。非正式 5174 功能验收，也不是 Seedance 出片验收。未 git 提交，未写回本机，未配 Key。
+
+## 8000 已加载新后端（Grok，2026-11-18 17:27 Asia/Shanghai）
+
+接 Codex 17:26 pytest 转绿记录：已结束 16:10 的旧 8000（pid 861869），于 17:27:03 Asia/Shanghai 启动新进程 pid **978680**（`/workspace/video-fission/backend`，`../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8000`）。
+
+- `GET /api/health` 正常，`default_provider=local_ffmpeg`。
+- OpenAPI 现含 `POST /api/productions/{production_id}/select-script`；未登录探测返回 **401**，不再是 405。
+- 5174 pid **881829**、5173 pid **3699806** 均未动。
+- 按用户约定，这轮以开发收口为准，不做 5174 完整链路验证，也不走视频生成模型。未 git 提交，未写回本机，未配 Key。
+
+## 后端全量 pytest 转绿（Codex，2026-11-18 17:26 Asia/Shanghai）
+
+17:19 全量 **5 failed, 99 passed, 2 skipped** 已修复。随后单独复跑这 5 条：5 passed（29.85s）。再跑全量：
+
+```
+cd /workspace/video-fission/backend && uv run pytest -q
+104 passed, 2 skipped, 2 warnings in 145.44s (0:02:25)
+```
+
+日志：`/tmp/pytest-landing-full-1723.log`。时间 17:23–17:26 Asia/Shanghai。
+
+针对 17:20 盯盘列出的失败：
+
+- 未选脚本也可 `resume_from=generate`：`pipeline.py` / `productions.py` 在 `awaiting_script_choice`，或已有 `script_candidates` 但无 `selected_script_id` 时拒绝，不再把展示用 `script.shots` 当成已选定。
+- 纯改写说明漏进口播：`build_local_candidates` 先 `strip_rewrite_instructions`，空则用默认痛点文案，不再写入「把第二段和结尾重新生成」「只重做开场」。
+- 占位茎单测误用 `mean_volume`：改为 `mean_db` / `max_db`；产品侧占位茎仍为 `usable=False`，不会当口播。
+- 对话自动开片测试未处理暂停：`_wait_production` 在 `awaiting_script_choice` 时经 `finish_production` 选用后再等完成。产品路径不会自动代选。
+
+§6 新单测与 §7 文档更新见下方 17:20 节，此处不重复。8000 仍为 pid **861869**，5174 pid **881829**，5173 pid **3699806**，均未动。可以按约定重启 8000 加载新后端，不要动 5173。未 git 提交，未写回本机，未配 Key。
+
+
+## 落地页与创意脚本盯盘（Grok，2026-11-18 17:20 Asia/Shanghai）
+
+相对 16:57 盯盘 / 17:00 文首有实质进展，但全量 pytest 未绿，不能开始 5174 正式功能验收。非正式验收，也不是 Seedance 出片验收。工作区 HEAD 仍为 `7713b2a`。
+
+### 本窗口进展（约 17:02–17:11）
+
+- Codex（17:02–17:05）：`audio_separate.py` / `pipeline.py` 补上 `_vocals_stem_usable`，占位茎不再当口播；无 TTS 时警告「没有可用口播，未写入静音轨」。新增 `backend/tests/test_landing_creative_audio.py`，覆盖落地页 URL/SSRF/静态 HTML、三候选暂停与选择后出片、跟进分类与 `resume_from`、音轨分离、Seedance mock 请求体、占位茎、字幕 `default_safe`。选择后用例会断言存在 `reference-vocals.m4a` / `reference-bgm.m4a` / `with-bgm.mp4`，且不出现整段 `reference-audio.m4a`。`docs/ARCHITECTURE.md`、README、`docs/API-SEEDANCE-VIDEO.md` 已按 §7 更新。
+- Claude（17:08–17:11，已写入下方 17:11 节）：新增隔离 e2e `frontend/e2e/script-choice.spec.js`。首次失败是新建对话清空附件的竞态，修好后 `npx playwright test e2e/script-choice.spec.js` **1 passed（约 13.2s，官方报告 duration 11.3s + 套件 13.2s）**，端口为 5175+8001，未指向 5174。任务 `prd_b41fc643f259444eb991bc59` 选用 `script_b` 后 `local_ffmpeg` 跑完。Claude 自称未独立复跑全量 pytest。
+
+源码核对与 16:57 节及 Claude 17:11 交叉核对一致的部分不再重复：卖点进提示词、固定 3 候选并锁定时间轴/开头连续块、选择 API 为 `script_id`、Seedance 请求带参考视频和两路参考音频、合成只混分离 BGM、读不到样式时不声称已对齐。
+
+### 全量 pytest（Grok 复跑，17:13–17:19 Asia/Shanghai）
+
+命令：`cd /workspace/video-fission/backend && uv run pytest -q --tb=line`。日志：`/tmp/vf-pytest-landing-watch-1710.log`。
+
+结果：**5 failed, 99 passed, 2 skipped**（323.06s）。不是 5174 实操验收。
+
+1. `test_landing_creative_audio.py::test_followup_classification_and_resume_from`：在 `awaiting_script_choice` 时 `resume_from=generate` **应当**抛出「还没有选定脚本」，实际 DID NOT RAISE。原因：脚本阶段会把 `candidates[0]` 预先写入 `production.script`（`selected_script_id` 仍为空），而 `productions._resolve_resume_from` 与 `pipeline.engine.run` 把 `script.shots` 存在也当成已选定。这是任务书「选择后才进入 generate」的漏洞，跟进「再生成」也可能绕过挑选。
+2. `test_landing_creative_audio.py::test_placeholder_stems_are_not_used_as_voiceover`：TTS 路径实际音量为 `mean_db=-26.4` / `max_db=-21.2`，并非静音；断言误用 `mean_volume`/`max_volume`（`audio_levels` 返回的是 `mean_db`/`max_db`）。这是测试笔误，不像产品回归。
+3. `test_chat_native.py::test_send_message_auto_starts_upserts_cards_and_dedups_tool`：`_wait_production` 只等到 `completed|failed|cancelled`，对话自动开任务后会停在 `awaiting_script_choice`，180s 超时。`finish_production` 辅助函数未接到这条路径。
+4. `test_pipeline.py::test_brief_regenerate_second_segment_and_ending` 与 `test_brief_redo_hook_only`：重做说明漏进口播，出现「还在为「把第二段和结尾重新生成」发愁吗？」/「还在为「只重做开场」发愁吗？」。`brief_one_liner` / `local_intent` 未走 `strip_rewrite_instructions`。
+
+新单测里暂停/选择出片、分离、Seedance mock、字幕 `default_safe` 等其余用例在本轮复跑中通过。本窗口未见新的前端 `npm test` 记录；上次仍是 Claude 16:35 自称 35 passed。
+
+### 运行时（本轮只读，未重启）
+
+- 8000：pid **861869**，启动于 16:10:33 Asia/Shanghai，`/api/health` 正常，`default_provider=local_ffmpeg`。OpenAPI 仍无 `select-script`，live `POST /api/productions/dummy/select-script` 仍返回 **HTTP 405**。
+- 5174：pid **881829**，启动于 16:39:14 Asia/Shanghai，页面 200。因后端未加载新状态机，不能做正式功能验收。
+- 5173：pid **3699806**，未动。
+
+未 git 提交，未写回本机，未配置或调用真实 Seedance / 多模态 Key，未改契约字段名。
+
+### 结论与跟进
+
+还不能做 5174 正式功能验收。需要 Codex 先修：generate 必须要求 `selected_script_id`（不要用预写的 `script.shots` 放行）；口播不要把「重做/再生成」类 brief 原句写进钩子文案；顺手把音量断言字段改对，并让对话自动开任务的测试能走过脚本选择。修完并复跑 pytest 转绿后，再约定重启 8000，由 Grok 在 `http://127.0.0.1:5174/` 做无 Key 功能验收。不要把隔离 e2e 通过或未重启的 live 服务写成已验收。
+
+本盯盘 routine 继续保留。
+
+
+## 落地页与创意脚本盯盘（Grok，2026-11-18 16:57 Asia/Shanghai）
+
+相对 16:35 STATUS / 16:41 上次盯盘有实质进展：后端已从「未接入管线的新模块」变为已接线。非正式验收，也不是 Seedance 出片验收。
+
+### 源码接线（Codex，16:36–16:44 Asia/Shanghai）
+
+工作区 HEAD 仍为 `7713b2a`。新模块仍为未跟踪文件：`landing.py`、`audio_separate.py`、`script_flow.py`、`subtitle_style.py`。已改并纳入工作树：`pipeline.py`（约 +272）、`providers.py`、`productions.py`、`api/routes.py`、`conversation_cards.py`、`db.py`、`media.py`、`service.py`、`tools.py`、`settings_store.py`（新增 `video_generator.media_public_base_url`）。
+
+只读核对（对照任务书 §4–§6，不是 5174 实操验收）：
+
+1. 落地页：intent 阶段分析 URL；卖点块进入 intent / script / generate 提示词；`parse_status=failed|partial` 会写警告，不伪装成已完整解析。本机对 `assert_public_url("http://127.0.0.1/x")` 会拒绝（「落地页地址被 SSRF 防护拒绝」）。
+2. 脚本：本地与模型路径都按 `CANDIDATE_SPECS` 固定 3 个（`script_a/b/c`），`lock_script_to_timeline` 以参考时间轴和开头连续块为准；阶段结束写入 `status=awaiting_script_choice` 并返回，不进入 generate。
+3. 选择与跟进：`POST /api/productions/{id}/select-script`，body 为 `{ "script_id": "..." }`，与前端 16:35 契约一致；选中后 `run(resume_from=generate)`。`resume_from` 现为 `ingest|decompose|intent|script|generate`。`service` 用 `classify_followup` 区分选脚本 / 再出脚本（`script`，改卖点则从 `intent`）/ 已选后的再生成（`generate`）。
+4. 参考音频：分离产物为 `reference-vocals.m4a` 与 `reference-bgm.m4a`。Seedance 请求体经 `build_reference_input_contents` 带 `reference_video` 和两路 `reference_audio`，且 `generate_audio=true`。生成提示词要求「必须生成与口播一致的人声音轨」，并写「画面中不得烧录任何字幕、标题、花字或说明文字，字幕由后期硬烧」。
+5. 合成：只混 `reference-bgm.m4a`（缺失则报错），不是整段 `reference-audio.m4a`。字幕在 compose 硬烧。读不到参考样式时 `method=default_safe`、`aligned=false`、说明为「未读到参考字幕样式，使用安全默认位置」；本机确认 `claims_reference_aligned(default_safe_style())` 为 False。
+6. 风险（未用测试证明）：参考片无音轨时会写出空的人声/BGM 占位，并警告「不能当作已分离口播」。但 `_apply_voiceover` 在无 TTS Key 时，只要占位文件 `size>0` 就会混入该文件，可能把静音占位当成口播。任务书「无音轨则补口播、不得静音充数」尚未被验证。
+
+### 测试与文档缺口
+
+任务书 §6 要求的新用例（落地页 URL/SSRF/静态 HTML、恰好 3 个候选与暂停且无 clips/final、选择后再生成与再出脚本、`resume_from` 合法/非法值、音轨分离、Seedance mock 请求体、无音轨回退、合成只混分离 BGM、字幕 `default_safe`）均未新增。现有 `test_pipeline.py` / `test_opening.py` / `test_understand.py` / `test_chat_native.py` 只改为经 `tests/helpers.py:finish_production` 在 `awaiting_script_choice` 时自动选第一个（或 `script_a`）再跑完。16:44 改完测试后未发现 pytest 进程或新日志。`docs/ARCHITECTURE.md`、README、`docs/API-SEEDANCE-VIDEO.md` 仍为 15:55，未按 §7 更新。
+
+前端相对 16:35 无新改动：规划卡卖点摘要、三脚本「选用」、等待文案、跟进按钮（`resume_from=script|generate`）已合入；当时自称 `npm test` 35 passed。完整「出 3 个 → 选 1 个 → 继续」隔离 e2e（5175+8001）仍待补。官方 e2e 仍指向 5175+8001，未指向 5174。
+
+### 运行时（本轮只读，未重启）
+
+- 8000：pid **861869**，启动于 16:10:33 Asia/Shanghai，`/api/health` 正常，`default_provider=local_ffmpeg`。因早于 16:42 接线，OpenAPI 无 `select-script`，向 live `POST /api/productions/dummy/select-script` 返回 **HTTP 405**。5174 现在无法用新状态机联调。
+- 5174：pid **881829**，启动于 16:39:14 Asia/Shanghai（STATUS 16:35 节曾记 16:35:40），已加载前端规划卡改动。
+- 5173：pid **3699806**，未动。
+
+未 git 提交，未写回本机，未配置或调用真实 Seedance / 多模态 Key，未改契约字段名。
+
+### 结论与跟进
+
+源码已接线，但还不能做正式功能验收。需要：
+
+- Codex：按 §6 补后端单测并留下 `cd /workspace/video-fission/backend && uv run pytest -q` 证据；无音轨回退不要把静音占位当成口播。
+- 与 Codex 约定后再重启 8000，以加载新后端；不要动 5173，不要杀错进程。
+- Claude：对照任务书 §4–5 交叉验证已接线后端（暂停/选择、分离产物、Seedance 请求体、字幕样式、口播回退），并补隔离 e2e。
+- 之后由 Grok 在 `http://127.0.0.1:5174/` 做无 Key 功能验收。不要把未重启的服务或未真实出片写成已验收。
+
+本盯盘 routine 继续保留。
+
+## 隔离 e2e 与源码交叉核对（Claude，2026-11-18 17:11 Asia/Shanghai）
+
+补了「出 3 个 → 选 1 个 → 继续」隔离 e2e，并对照任务书 §4–5 做了源码级交叉核对。未重启 8000，未动 5173/5174，未配 Key，未 git 提交，非正式功能验收。
+
+隔离 e2e（5175+8001，未指向 5174）：
+
+- 新增 `frontend/e2e/script-choice.spec.js`。首次失败是因为新建对话的 `selectConversation` 会清空附件，与上传竞态；已改为等 `localStorage` 中的 `video-fission.activeConversation` 就绪后再上传。等待选择时分解计划的 `video-segments-card` 可能已出现，不能当作已进入 generate。
+- 在 `/workspace/video-fission/frontend` 跑 `npx playwright test e2e/script-choice.spec.js`：**1 passed（13.2s）**。测完 8001/5175 已拆除。
+- 任务 `prd_b41fc643f259444eb991bc59`（brief「按原片风格做一条短视频」）：17:11:09 Asia/Shanghai 进入 `awaiting_script_choice`，候选为 `script_a` / `script_b` / `script_c`；选用 `script_b` 后 17:11:11 进入 generate，17:11:15 完成，`selected_script_id=script_b`。
+- 产物：`reference-vocals.m4a` 72495 字节、`reference-bgm.m4a` 72580 字节（`method=local_ms`，`usable=true`，二者字节不同）；`with-bgm.mp4` 与 `final.mp4` 均存在。`subtitle_style.method=default_safe`，`aligned=false`，说明为「未读到参考字幕样式，使用安全默认位置」。
+
+源码交叉核对（只读，不是 8000 live）：
+
+- SSRF、三候选与跟进分类、Seedance 请求体（`generate_audio=true`，`reference_video` + 两路 `reference_audio`，提示词含口播与「不得烧录」）、`default_safe` 不声称对齐：与任务书一致。
+- 无音轨回退：`separate_reference_audio` 在无音轨时为 `method=placeholder`、`usable=False`；`_vocals_stem_usable` 会拒绝占位/不可用茎，无 TTS 时 `_apply_voiceover` 警告「没有可用口播，未写入静音轨」。官方夹具分离出的两文件大小不同。16:57 盯盘指出的静音占位被当成口播的漏洞，源码侧已补守卫。
+- Codex 已于 17:04 新增 `backend/tests/test_landing_creative_audio.py`（含暂停/选择、分离、Seedance 请求体、占位茎不当口播、字幕样式）。我尚未独立复跑 `uv run pytest -q`。
+
+运行时：8000 仍为 pid **861869**（16:10:33 Asia/Shanghai 启动），未重启。5174 pid **881829**，5173 pid **3699806**，均未动。live `select-script` 仍未加载，5174 功能验收需约定重启 8000 后再做。未走视频生成模型。
+
+## 落地页与三脚本前端（Claude，2026-11-18 16:35 Asia/Shanghai）
+
+按 `docs/TASKS-LANDING-CREATIVE-AUDIO.md` §4.1–4.2、§8 改前端，未改后端，未恢复能力侧栏或旧顶栏。
+
+- 规划卡展示落地页卖点摘要：`parse_status=failed|partial` 时明确失败/部分解析，不写成已完整分析；`ok` 只标「落地页卖点」。
+- 规划卡展示最多收到的脚本候选（角度 + 口播摘要）和「选用」；等待选择时进度卡写「请选择创意脚本」（`data-testid="video-progress-awaiting-script"`）。
+- 已选用后标记「已选用」。跟进按钮分开：`再出 3 个脚本` 只走 `resume_from=script`，`再生成视频` 仅在已选且非等待态出现，走 `resume_from=generate`。发送跟进消息仍走对话接口，由后端分类，前端不把「用第 2 个」自行当重出脚本。
+- 选择 API：`POST /api/productions/{id}/select-script`，body 为 `{ "script_id": "<候选 id>" }`。请 Codex 后端按此字段对齐。
+
+验证：`cd frontend && npm test` **35 passed**（186ms）。官方隔离 e2e（5175+8001）在规划卡后若出现「选用」则先点再等片段/成片，后端未暂停时仍兼容旧的直接出片路径。完整「出 3 个 → 选 1 个 → 继续」隔离 e2e 等 Codex 状态机落地后再补。
+
+5174 已重启为 pid **881829**（16:35:40 Asia/Shanghai），健康检查 200。8000 仍为 pid 861869，5173 仍为 pid 3699806，均未动。
 
 ## 合并说明（2026-11-18 12:56 Asia/Shanghai）
 

@@ -148,6 +148,8 @@ POST https://api.giikin.com/acore/model/v1/task/generate/video
 }
 ```
 
+本项目向 Seedance 提交参考视频生成时，会在 `input_contents` 中放入一条 `type=video_url`、`role=reference_video`，以及人声、BGM 两条 `type=audio_url`、`role=reference_audio`，并设置 `options.generate_audio=true`；参考文件的公网地址由设置项 `video_generator.media_public_base_url` 拼接，为空或指向本机时只告警，不假装模型可访问。
+
 ### 图生视频请求示例
 
 ```json

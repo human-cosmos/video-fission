@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.helpers import finish_production
 from video_fission.container import configure
 from video_fission.conversation_cards import observe_payload, plan_payload, segments_payload, understanding_payload
 from video_fission.main import app
@@ -229,7 +230,7 @@ def test_no_key_pipeline_keeps_local_fallback_opening(client: TestClient, test_s
     production_id = created.json()["id"]
     from video_fission import container
 
-    public = container.productions.run(production_id, wait=True)
+    public = finish_production(production_id, container.productions.run(production_id, wait=True))
     assert public["status"] == "completed", public.get("error")
     opening = (public.get("decomposition") or {}).get("opening") or {}
     assert opening.get("method") == "local_fallback"

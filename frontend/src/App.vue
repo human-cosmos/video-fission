@@ -45,6 +45,7 @@ const sending = ref(false)
 const policyMode = ref('brief')
 const productions = ref([])
 const rerunning = ref(false)
+const selectingScript = ref(false)
 const cancelling = ref(false)
 const videoInput = ref(null)
 const showArchived = ref(false)
@@ -150,6 +151,11 @@ const isArchived = computed(() => Boolean(currentConversation.value?.is_archived
 const productionVideo = computed(() => attachments.value.find((file) => isVideoFile(file)))
 const otherAttachments = computed(() => attachments.value.filter((file) => !isVideoFile(file)))
 const needsBriefHint = computed(() => Boolean(productionVideo.value) && !composer.value.trim())
+const awaitingScriptChoice = computed(() =>
+  (currentConversation.value?.items || []).some(
+    (item) => item?.item_type === 'video_progress' && item?.payload?.status === 'awaiting_script_choice',
+  ),
+)
 const canSend = computed(
   () =>
     !sending.value &&
@@ -697,6 +703,54 @@ async function rerunBrief(productionId) {
   }
 }
 
+async function selectScript({ productionId, scriptId }) {
+  if (!productionId || !scriptId) return
+  selectingScript.value = true
+  try {
+    await api.selectScript(productionId, scriptId)
+    await refreshCurrent()
+    await loadProductions()
+    notify('已选用脚本，开始生成')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    selectingScript.value = false
+  }
+}
+
+async function regenerateScripts(productionId) {
+  if (!productionId) return
+  rerunning.value = true
+  try {
+    await api.runProduction(productionId, { resume_from: 'script' })
+    await refreshCurrent()
+    await loadProductions()
+    notify('正在再出 3 个脚本')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    rerunning.value = false
+  }
+}
+
+async function regenerateVideo(productionId) {
+  if (!productionId) return
+  rerunning.value = true
+  try {
+    await api.runProduction(productionId, { resume_from: 'generate' })
+    await refreshCurrent()
+    await loadProductions()
+    notify('正在按已选脚本再生成')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    rerunning.value = false
+  }
+}
+
 async function bindUnboundProduction(productionId) {
   try {
     let conversation = currentConversation.value
@@ -920,6 +974,7 @@ onBeforeUnmount(() => {
         ref="timeline"
         :conversation="currentConversation"
         :rerunning="rerunning"
+        :selecting="selectingScript"
         :cancelling="cancelling"
         @decide-approval="decideApproval"
         @answer-clarification="answerClarification"
@@ -927,6 +982,9 @@ onBeforeUnmount(() => {
         @cancel-production="cancelProduction"
         @rerun-selected="rerunSelected"
         @rerun-brief="rerunBrief"
+        @select-script="selectScript"
+        @regenerate-scripts="regenerateScripts"
+        @regenerate-video="regenerateVideo"
       />
 
       <section class="composer-dock">
@@ -1000,6 +1058,8 @@ onBeforeUnmount(() => {
                 ? '该对话已归档，取消归档后可继续发送'
                 : currentConversation?.status === 'running'
                 ? '追问当前执行，或补充新的限制…'
+                : awaitingScriptChoice
+                ? '改文案或卖点可再出 3 个脚本；输入「用第 2 个」也可挑选'
                 : '描述你想拆解、策划或完成的视频任务…'
             "
             @keydown="insertLineBreak"
@@ -1054,6 +1114,13 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="needsBriefHint" class="composer-hint composer-hint-need-brief" data-testid="composer-hint-need-brief">
           补充创作说明后再发送
+        </p>
+        <p
+          v-else-if="awaitingScriptChoice"
+          class="composer-hint"
+          data-testid="composer-hint-awaiting-script"
+        >
+          请先在规划卡选用一个脚本。改说明再发送会再出 3 个脚本；「用第 2 个」「选这个」视为挑选。
         </p>
         <p v-else class="composer-hint">
           <span>ENTER 发送 · SHIFT + ENTER 换行</span>

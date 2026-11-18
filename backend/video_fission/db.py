@@ -268,6 +268,11 @@ class Database:
                 "TEXT REFERENCES conversations(id) ON DELETE SET NULL",
             )
             self._ensure_column(connection, "productions", "source_item_id", "TEXT")
+            self._ensure_column(connection, "productions", "landing_page", "TEXT")
+            self._ensure_column(connection, "productions", "script_candidates", "TEXT")
+            self._ensure_column(connection, "productions", "selected_script_id", "TEXT")
+            self._ensure_column(connection, "productions", "audio_separation", "TEXT")
+            self._ensure_column(connection, "productions", "subtitle_style", "TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_productions_conversation ON productions(conversation_id)"
             )
@@ -1247,6 +1252,11 @@ class Database:
             "replace_plan",
             "conversation_id",
             "source_item_id",
+            "landing_page",
+            "script_candidates",
+            "selected_script_id",
+            "audio_separation",
+            "subtitle_style",
         }
         json_fields = {
             "warnings",
@@ -1259,6 +1269,10 @@ class Database:
             "output",
             "replace_policy",
             "replace_plan",
+            "landing_page",
+            "script_candidates",
+            "audio_separation",
+            "subtitle_style",
         }
         values: dict[str, Any] = {}
         for key, value in fields.items():
@@ -1360,6 +1374,11 @@ class Database:
             "video_upload_id": row["video_upload_id"],
             "conversation_id": _row_get(row, "conversation_id"),
             "source_item_id": _row_get(row, "source_item_id"),
+            "landing_page": _load(_row_get(row, "landing_page"), None),
+            "script_candidates": _load(_row_get(row, "script_candidates"), []),
+            "selected_script_id": _row_get(row, "selected_script_id"),
+            "audio_separation": _load(_row_get(row, "audio_separation"), None),
+            "subtitle_style": _load(_row_get(row, "subtitle_style"), None),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

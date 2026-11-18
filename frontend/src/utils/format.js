@@ -67,6 +67,7 @@ export const STAGE_LABELS = {
 export const STATUS_LABELS = {
   draft: '草稿',
   running: '进行中',
+  awaiting_script_choice: '待选择脚本',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
@@ -100,6 +101,7 @@ export function referenceLabel(path) {
 export function historyStatusText(item) {
   const status = STATUS_LABELS[item?.status] || item?.status || ''
   if (item?.status === 'completed' || item?.current_stage === 'done') return status
+  if (item?.status === 'awaiting_script_choice') return status
   const stage = STAGE_LABELS[item?.current_stage] || item?.current_stage || ''
   if (status && stage) return `${status} · ${stage}`
   return status || stage

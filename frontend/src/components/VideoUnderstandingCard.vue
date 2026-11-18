@@ -6,6 +6,7 @@ import {
   formatTimecode,
 } from '../utils/format'
 import { sourceVideoUrl } from '../utils/productionMedia'
+import { slotTrail, videoDescribe, videoTagsOf, visibleVideoTags } from '../utils/understandDisplay'
 import AspectVideo from './AspectVideo.vue'
 
 const props = defineProps({
@@ -17,6 +18,8 @@ const summary = computed(
     cleanDisplayText(props.payload?.summary || props.payload?.decomposition?.summary) ||
     '暂无整片摘要',
 )
+const description = computed(() => videoDescribe(props.payload))
+const tags = computed(() => visibleVideoTags(videoTagsOf(props.payload)))
 const segments = computed(
   () => props.payload?.segments || props.payload?.decomposition?.segments || [],
 )
@@ -28,6 +31,15 @@ const sourceUrl = computed(() => sourceVideoUrl(props.payload))
   <section class="video-card studio-card" data-testid="video-understanding-card">
     <h3>视频理解</h3>
     <p class="summary-text">{{ summary }}</p>
+    <p v-if="description" class="describe-text" data-testid="video-understanding-describe">
+      {{ description }}
+    </p>
+    <ul v-if="tags.length" class="tag-list" data-testid="video-understanding-tags">
+      <li v-for="tag in tags" :key="tag.key" class="tag-chip">
+        <span class="tag-label">{{ tag.label }}</span>
+        {{ tag.values.join('、') }}
+      </li>
+    </ul>
     <AspectVideo
       v-if="sourceUrl"
       :src="sourceUrl"
@@ -44,6 +56,7 @@ const sourceUrl = computed(() => sourceVideoUrl(props.payload))
             {{ formatTimecode(segment.start_ms) }} – {{ formatTimecode(segment.end_ms) }}
           </span>
         </header>
+        <p v-if="slotTrail(segment)" class="page-muted">{{ slotTrail(segment) }}</p>
         <p v-if="cleanDisplayText(segment.summary || segment.points)">
           {{ cleanDisplayText(segment.summary || segment.points) }}
         </p>

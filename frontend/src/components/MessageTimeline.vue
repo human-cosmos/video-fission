@@ -6,6 +6,7 @@ import { isVideoFile } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { mediaUrl } from '../utils/productionMedia'
 import AspectVideo from './AspectVideo.vue'
+import VideoObserveCard from './VideoObserveCard.vue'
 import VideoOutputCard from './VideoOutputCard.vue'
 import VideoPlanCard from './VideoPlanCard.vue'
 import VideoProgressCard from './VideoProgressCard.vue'
@@ -228,6 +229,10 @@ defineExpose({ scrollToBottom })
             @rerun-selected="$emit('rerun-selected', $event)"
             @rerun-brief="$emit('rerun-brief', $event)"
           />
+        </template>
+
+        <template v-else-if="item.item_type === 'video_observe'">
+          <VideoObserveCard :payload="cardPayload(item)" />
         </template>
 
         <template v-else-if="item.item_type === 'video_output'">

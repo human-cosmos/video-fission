@@ -16,11 +16,12 @@ export function mediaUrl(file, productionId) {
 
 export function clipMediaUrl(clip, productionId) {
   if (!clip) return ''
-  if (clip.preview_url || clip.previewUrl || clip.url) {
-    return clip.preview_url || clip.previewUrl || clip.url
+  if (clip.clip_url || clip.preview_url || clip.previewUrl || clip.url) {
+    return clip.clip_url || clip.preview_url || clip.previewUrl || clip.url
   }
-  if (!productionId || !clip.path) return ''
-  const name = String(clip.path).split(/[\\/]/).pop()
+  const path = clip.clip_path || clip.path
+  if (!productionId || !path) return ''
+  const name = String(path).split(/[\\/]/).pop()
   return name ? productionArtifactUrl(productionId, name) : ''
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  VIDEO_ITEM_TYPES,
   WORKSPACE_MODES,
   aspectClass,
   cleanDisplayText,
@@ -71,6 +72,7 @@ describe('format helpers', () => {
     expect(needsRemoteFields('none')).toBe(false)
     expect(needsRemoteFields('openai_compatible')).toBe(true)
     expect(needsRemoteFields('generic_http')).toBe(true)
+    expect(needsRemoteFields('gemini_gateway')).toBe(true)
   })
 })
 
@@ -78,6 +80,7 @@ describe('chat-native production helpers', () => {
   it('keeps only chat and settings workspace modes', () => {
     expect(WORKSPACE_MODES.map((item) => item.id)).toEqual(['chat', 'settings'])
     expect(WORKSPACE_MODES.some((item) => item.id === 'studio')).toBe(false)
+    expect(VIDEO_ITEM_TYPES).toContain('video_observe')
   })
 
   it('detects production and filename videos', () => {

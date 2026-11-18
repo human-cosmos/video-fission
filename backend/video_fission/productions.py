@@ -9,7 +9,7 @@ from typing import Any
 
 from . import media
 from .config import Settings
-from .conversation_cards import cards_for, stable_item_id, upload_media_url
+from .conversation_cards import VIDEO_CARD_TYPES, cards_for, stable_item_id, upload_media_url
 from .db import Database
 from .paths import production_artifact_dir, user_artifact_root, user_upload_root, user_workspace
 from .pipeline import PipelineEngine
@@ -261,9 +261,7 @@ class ProductionService:
         brief = production.get("brief") or ""
         segments = (production.get("decomposition") or {}).get("segments") or []
         resume = self._resolve_resume_from(production, resume_from, segments)
-        if policy["mode"] == "selected" and not (
-            policy["segment_ids"] or policy["roles"] or policy["time_ranges"]
-        ):
+        if policy["mode"] == "selected" and not (policy["segment_ids"] or policy["roles"] or policy["time_ranges"]):
             raise ValueError("没有命中任何片段")
         if segments:
             # Validate selected/brief hits before starting, so HTTP can return 400.
@@ -373,7 +371,9 @@ class ProductionService:
         production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
-        if not name or name != Path(name).name or ".." in name or "/" in name or "\\" in name:
+        raw = str(name or "").replace("\\", "/").strip()
+        parts = Path(raw).parts
+        if not raw or raw.startswith(("/", "\\")) or any(part == ".." for part in parts):
             raise ValueError("非法文件名")
         artifact_root = production_artifact_dir(
             self.settings.artifacts_dir,
@@ -381,9 +381,9 @@ class ProductionService:
             production_id,
         )
         legacy_root = self.settings.artifacts_dir / "productions" / production_id
-        if user_id and not (artifact_root / name).is_file() and (legacy_root / name).is_file():
+        if user_id and not (artifact_root / raw).is_file() and (legacy_root / raw).is_file():
             artifact_root = legacy_root
-        path = (artifact_root / name).resolve()
+        path = (artifact_root / raw).resolve()
         root = artifact_root.resolve()
         if root not in path.parents and path != root:
             raise ValueError("非法文件名")
@@ -478,8 +478,24 @@ class ProductionService:
         legacy_artifact_dir = self.settings.artifacts_dir / "productions" / production_id
         if not artifact_dir.is_dir() and legacy_artifact_dir.is_dir():
             artifact_dir = legacy_artifact_dir
+        cards = cards_for(public, artifact_dir if artifact_dir.is_dir() else None)
+        current_types = {item_type for item_type, _payload in cards}
+        for item_type in VIDEO_CARD_TYPES:
+            if item_type in current_types:
+                continue
+            item_id = stable_item_id(production_id, item_type)
+            if self.db.delete_item(item_id, conversation_id):
+                self.db.append_event(
+                    conversation_id,
+                    "item_deleted",
+                    {
+                        "item_id": item_id,
+                        "item_type": item_type,
+                        "production_id": production_id,
+                    },
+                )
         last_item = None
-        for item_type, card_payload in cards_for(public, artifact_dir if artifact_dir.is_dir() else None):
+        for item_type, card_payload in cards:
             last_item = self.db.upsert_item(
                 conversation_id,
                 stable_item_id(production_id, item_type),
@@ -562,9 +578,8 @@ class ProductionService:
             output = {
                 **output,
                 "video_url": output.get("video_url") or f"/api/productions/{production_id}/artifacts/final.mp4",
-                "srt_url": output.get("srt_url") or (
-                    f"/api/productions/{production_id}/artifacts/final.srt" if output.get("srt_path") else ""
-                ),
+                "srt_url": output.get("srt_url")
+                or (f"/api/productions/{production_id}/artifacts/final.srt" if output.get("srt_path") else ""),
             }
         return {
             "id": production["id"],
@@ -581,7 +596,8 @@ class ProductionService:
             "script": production.get("script"),
             "clips": production.get("clips") or [],
             "output": output,
-            "replace_policy": production.get("replace_policy") or {
+            "replace_policy": production.get("replace_policy")
+            or {
                 "mode": "default",
                 "roles": [],
                 "segment_ids": [],

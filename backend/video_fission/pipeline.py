@@ -129,84 +129,19 @@ class PipelineEngine:
         self.db.update_production(production_id, {"source_video": source})
 
     def _stage_decompose(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
-        production = self._get(production_id)
-        source = production["source_video"]
-        src = Path(source["path"])
-        info = media.probe(src)
-        duration_ms = info["duration_ms"]
-        cuts = media.scene_cut_ms(src)
-        silence = media.silence_points_ms(src) if info["has_audio"] else []
-        segments = plan_segments(duration_ms, cuts, silence, info["has_audio"])
-        art = self.artifact_dir(production_id)
-        for segment in segments:
-            span = max(segment["end_ms"] - segment["start_ms"], 1)
-            stamps = [
-                segment["start_ms"] + int(span * ratio)
-                for ratio in (0.15, 0.5, 0.82)
-            ]
-            stamps = [
-                min(max(ts, segment["start_ms"]), max(segment["end_ms"] - 40, segment["start_ms"]))
-                for ts in stamps
-            ]
-            frames = media.extract_frames(src, stamps, art, f"{segment['id']}_frame")
-            segment["frames"] = [self.artifact_url(production_id, path.name) for path in frames]
-            segment["visual"] = (
-                f"{info['width']}x{info['height']} @{info['fps']:.2f}fps，"
-                f"{segment['start_ms']}-{segment['end_ms']}ms，抽取 {len(frames)} 帧"
-            )
-            segment["summary"] = (
-                f"{segment['role'].upper()} 段，时长 {span}ms。"
-                f"{'场景切点划分' if cuts else '按时间窗口划分'}。"
-            )
-            segment["audio"] = "检测到音轨" if info["has_audio"] else "无音轨"
-            if not segment.get("on_screen_text"):
-                segment["on_screen_text"] = segment["role"].upper()
-            self._raise_if_cancelled(cancel)
-        decomposition = {
-            "summary": (
-                f"参考视频 {duration_ms}ms，{info['width']}x{info['height']}，"
-                f"共 {len(segments)} 段（Hook / Value / CTA）。"
-            ),
-            "provider": "local_ffmpeg",
-            "model": "",
-            "segments": [
-                {key: value for key, value in segment.items() if key != "frames"}
-                | ({"frames": segment["frames"]} if segment.get("frames") else {})
-                for segment in segments
-            ],
-        }
-        # frames is extra; contract doesn't include it. Claude said they'll probe artifact names.
-        # Keep contract fields only in stored segments, frames are files on disk.
-        clean_segments = []
-        for segment in segments:
-            clean_segments.append(
-                {
-                    "id": segment["id"],
-                    "role": segment["role"],
-                    "start_ms": segment["start_ms"],
-                    "end_ms": segment["end_ms"],
-                    "summary": segment["summary"],
-                    "visual": segment["visual"],
-                    "audio": segment["audio"],
-                    "on_screen_text": segment["on_screen_text"],
-                    "reuse_recommended": segment["role"] == "value",
-                }
-            )
-        decomposition["segments"] = clean_segments
+        from .understand.service import run_decompose
 
+        production = self._get(production_id)
         public, secrets = self._settings_for_production(production_id)
-        mm = public["multimodal"]
-        if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
-            try:
-                refined = self._refine_with_multimodal(
-                    production, clean_segments, art, mm, secrets["multimodal"]
-                )
-                if refined:
-                    decomposition = refined
-            except Exception as exc:
-                message = f"多模态拆解失败，已保留本地切分：{exc.__class__.__name__}"
-                warnings.append(message)
-                self._emit(production_id, "warning", {"stage": "decompose", "message": message})
+        decomposition = run_decompose(
+            production,
+            self.artifact_dir(production_id),
+            public,
+            secrets,
+            warnings,
+            emit=lambda kind, payload: self._emit(production_id, kind, payload),
+            cancel=cancel,
+        )
         self.db.update_production(production_id, {"decomposition": decomposition, "warnings": warnings})
 
     def _refine_with_multimodal(

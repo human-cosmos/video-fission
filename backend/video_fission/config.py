@@ -68,6 +68,7 @@ class Settings:
     auth_admin_username: str = "admin"
     auth_admin_password: str = ""
     auth_token_expire_minutes: int = 60 * 24
+    auth_cookie_domain: str = ""
     sso_client_id: str = ""
     sso_client_secret: str = ""
     sso_client_name: str = "VideoFission"
@@ -77,6 +78,11 @@ class Settings:
     sso_callback_url: str = ""
     sso_frontend_url: str = "http://127.0.0.1:5174"
     allowed_origins: tuple[str, ...] = ()
+    gemini_api_url: str = ""
+    gemini_upload_url: str = ""
+    gemini_token_url: str = ""
+    gemini_model: str = ""
+    gemini_source: str = ""
 
     def __post_init__(self) -> None:
         if self.auth_required and not self.auth_secret_key:
@@ -109,6 +115,7 @@ class Settings:
             auth_admin_username=os.getenv("VF_AUTH_ADMIN_USERNAME", "admin").strip() or "admin",
             auth_admin_password=os.getenv("VF_AUTH_ADMIN_PASSWORD", ""),
             auth_token_expire_minutes=int(os.getenv("VF_AUTH_TOKEN_EXPIRE_MINUTES", str(60 * 24))),
+            auth_cookie_domain=os.getenv("VF_AUTH_COOKIE_DOMAIN", "").strip(),
             sso_client_id=os.getenv("VF_SSO_CLIENT_ID", "").strip(),
             sso_client_secret=os.getenv("VF_SSO_CLIENT_SECRET", "").strip(),
             sso_client_name=os.getenv("VF_SSO_CLIENT_NAME", "VideoFission").strip() or "VideoFission",
@@ -127,10 +134,16 @@ class Settings:
             sso_callback_url=os.getenv("VF_SSO_CALLBACK_URL", "").strip(),
             sso_frontend_url=os.getenv("VF_SSO_FRONTEND_URL", "http://127.0.0.1:5174").strip(),
             allowed_origins=tuple(
-                item.strip().rstrip("/")
-                for item in os.getenv("VF_ALLOWED_ORIGINS", "").split(",")
-                if item.strip()
+                item.strip().rstrip("/") for item in os.getenv("VF_ALLOWED_ORIGINS", "").split(",") if item.strip()
             ),
+            gemini_api_url=os.getenv("VF_GEMINI_API_URL", "").strip(),
+            gemini_upload_url=os.getenv("VF_GEMINI_UPLOAD_URL", "").strip(),
+            gemini_token_url=os.getenv(
+                "VF_GEMINI_TOKEN_URL",
+                os.getenv("VF_SSO_ACCESS_TOKEN_URL", ""),
+            ).strip(),
+            gemini_model=os.getenv("VF_GEMINI_MODEL", "").strip(),
+            gemini_source=os.getenv("VF_GEMINI_SOURCE", "").strip(),
         )
 
     def ensure_directories(self) -> None:

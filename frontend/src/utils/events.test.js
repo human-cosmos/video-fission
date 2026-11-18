@@ -21,6 +21,7 @@ describe('conversation event helpers', () => {
   it('labels tools and localizes item types', () => {
     expect(itemLabel('commandExecution')).toBe('命令')
     expect(itemLabel('video_output')).toBe('成片')
+    expect(itemLabel('video_observe')).toBe('观察')
     expect(toolCallName({ payload: { tool: 'create_video_brief' } })).toBe(
       'create_video_brief',
     )

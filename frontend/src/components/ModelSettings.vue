@@ -40,6 +40,7 @@ const clearKey = reactive({
 const MULTIMODAL_PROVIDERS = [
   { value: 'local_ffmpeg', label: 'local_ffmpeg（本地默认）' },
   { value: 'openai_compatible', label: 'openai_compatible' },
+  { value: 'gemini_gateway', label: 'gemini_gateway' },
 ]
 const VIDEO_PROVIDERS = [
   { value: 'local_ffmpeg', label: 'local_ffmpeg（本地默认）' },
@@ -55,9 +56,24 @@ function emptyProvider() {
   return {
     provider: 'local_ffmpeg',
     base_url: '',
+    upload_url: '',
+    token_url: '',
+    source: '',
     model: '',
+    max_tokens: 12000,
     timeout_seconds: 120,
     api_key_set: false,
+  }
+}
+
+function emptyUnderstand() {
+  return {
+    transition_detection: true,
+    clip_analysis: true,
+    observe: true,
+    clip_workers: 3,
+    gemini_max_size_mb: 15,
+    observe_timeout_seconds: 360,
   }
 }
 
@@ -82,6 +98,7 @@ function emptyForm() {
       mix_reference_bgm: true,
       bgm_volume: 0.18,
     },
+    understand: emptyUnderstand(),
   }
 }
 
@@ -91,10 +108,12 @@ function applySettings(payload) {
     Object.assign(next[key], payload?.[key] || {})
   }
   Object.assign(next.compose, payload?.compose || {})
+  Object.assign(next.understand, payload?.understand || {})
   Object.assign(form.multimodal, next.multimodal)
   Object.assign(form.video_generator, next.video_generator)
   Object.assign(form.tts, next.tts)
   Object.assign(form.compose, next.compose)
+  Object.assign(form.understand, next.understand)
   settings.value = payload
   keys.multimodal = ''
   keys.video_generator = ''
@@ -111,6 +130,12 @@ function providerPayload(name) {
     base_url: source.base_url || '',
     model: source.model || '',
     timeout_seconds: Number(source.timeout_seconds) || 0,
+  }
+  if (name === 'multimodal') {
+    payload.upload_url = source.upload_url || ''
+    payload.token_url = source.token_url || ''
+    payload.source = source.source || ''
+    payload.max_tokens = Number(source.max_tokens) || 12000
   }
   if (name === 'video_generator') {
     payload.fallback_to_local = Boolean(source.fallback_to_local)
@@ -152,6 +177,14 @@ async function saveSettings() {
         burn_in_subtitles: Boolean(form.compose.burn_in_subtitles),
         mix_reference_bgm: Boolean(form.compose.mix_reference_bgm),
         bgm_volume: Number(form.compose.bgm_volume),
+      },
+      understand: {
+        transition_detection: Boolean(form.understand.transition_detection),
+        clip_analysis: Boolean(form.understand.clip_analysis),
+        observe: Boolean(form.understand.observe),
+        clip_workers: Number(form.understand.clip_workers) || 1,
+        gemini_max_size_mb: Number(form.understand.gemini_max_size_mb) || 15,
+        observe_timeout_seconds: Number(form.understand.observe_timeout_seconds) || 360,
       },
     }
     applySettings(await api.updateSettings(payload))
@@ -210,7 +243,7 @@ onMounted(loadSettings)
           <legend>多模态理解</legend>
           <label>
             提供者
-            <select v-model="form.multimodal.provider">
+            <select v-model="form.multimodal.provider" data-testid="settings-multimodal-provider">
               <option v-for="item in MULTIMODAL_PROVIDERS" :key="item.value" :value="item.value">
                 {{ item.label }}
               </option>
@@ -221,9 +254,36 @@ onMounted(loadSettings)
               接口地址
               <input v-model="form.multimodal.base_url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
             </label>
+            <label v-if="form.multimodal.provider === 'gemini_gateway'">
+              媒体上传地址（可选）
+              <input
+                v-model="form.multimodal.upload_url"
+                type="url"
+                placeholder="留空则尝试 inlineData；配置后优先上传并使用 fileData"
+                autocomplete="off"
+              />
+            </label>
+            <label v-if="form.multimodal.provider === 'gemini_gateway'">
+              换票地址（可选）
+              <input
+                v-model="form.multimodal.token_url"
+                type="url"
+                data-testid="settings-token-url"
+                placeholder="留空则跳过换票，直接使用 API 密钥"
+                autocomplete="off"
+              />
+            </label>
+            <label v-if="form.multimodal.provider === 'gemini_gateway'">
+              来源标识（可选）
+              <input v-model="form.multimodal.source" type="text" autocomplete="off" />
+            </label>
             <label>
               模型
               <input v-model="form.multimodal.model" type="text" autocomplete="off" />
+            </label>
+            <label class="compact-field">
+              输出 Token 上限
+              <input v-model.number="form.multimodal.max_tokens" type="number" min="256" max="65536" />
             </label>
             <label>
               API 密钥
@@ -355,6 +415,53 @@ onMounted(loadSettings)
             · {{ testResults.tts.provider }}
             · {{ testResults.tts.detail }}
           </p>
+        </fieldset>
+
+
+        <fieldset class="settings-card" data-testid="settings-understand">
+          <legend>理解与切片</legend>
+          <label class="check-row">
+            <input
+              v-model="form.understand.transition_detection"
+              type="checkbox"
+              data-testid="settings-understand-transition_detection"
+            />
+            转场检测（缺依赖时自动退化）
+          </label>
+          <label class="check-row">
+            <input
+              v-model="form.understand.clip_analysis"
+              type="checkbox"
+              data-testid="settings-understand-clip_analysis"
+            />
+            片段级理解
+          </label>
+          <label class="check-row">
+            <input
+              v-model="form.understand.observe"
+              type="checkbox"
+              data-testid="settings-understand-observe"
+            />
+            生成观察卡
+          </label>
+          <label class="compact-field">
+            片段并发
+            <input v-model.number="form.understand.clip_workers" type="number" min="1" max="8" />
+          </label>
+          <label class="compact-field">
+            送模型视频上限（MB）
+            <input v-model.number="form.understand.gemini_max_size_mb" type="number" min="1" max="100" />
+          </label>
+          <label class="compact-field">
+            观察卡超时（秒）
+            <input
+              v-model.number="form.understand.observe_timeout_seconds"
+              type="number"
+              min="30"
+              max="3600"
+              data-testid="settings-understand-observe_timeout_seconds"
+            />
+          </label>
         </fieldset>
 
         <fieldset class="settings-card">

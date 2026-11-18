@@ -11,6 +11,7 @@ import {
   segmentFrameNames,
 } from '../utils/format'
 import { clipMediaUrl, frameMediaUrl } from '../utils/productionMedia'
+import { slotTrail } from '../utils/understandDisplay'
 import AspectVideo from './AspectVideo.vue'
 
 const props = defineProps({
@@ -71,6 +72,10 @@ function hideFrame(key) {
 function clipUrl(clip) {
   return clipMediaUrl(clip, productionId.value)
 }
+
+function segmentClipUrl(segment) {
+  return clipMediaUrl(segment, productionId.value)
+}
 </script>
 
 <template>
@@ -99,6 +104,13 @@ function clipUrl(clip) {
           >
             {{ ACTION_LABELS[actionOf(segment)] || actionOf(segment) }}
           </em>
+          <span
+            v-if="segment.reuse_recommended"
+            class="segment-reuse"
+            :data-testid="`video-segment-reuse-${segment.id}`"
+          >
+            建议复用
+          </span>
           <label class="segment-regen">
             <input
               type="checkbox"
@@ -110,10 +122,24 @@ function clipUrl(clip) {
             重新生成
           </label>
         </header>
+        <p v-if="slotTrail(segment)" class="page-muted" :data-testid="`video-segment-slot-${segment.id}`">
+          {{ slotTrail(segment) }}
+        </p>
+        <p v-if="cleanDisplayText(segment.description)" class="segment-description">
+          {{ cleanDisplayText(segment.description) }}
+        </p>
         <p v-if="cleanDisplayText(segment.summary)">{{ cleanDisplayText(segment.summary) }}</p>
         <p v-if="segment.visual && !isTechnicalVisual(segment.visual)" class="page-muted">
           画面：{{ cleanDisplayText(segment.visual) }}
         </p>
+        <AspectVideo
+          v-if="segmentClipUrl(segment)"
+          :src="segmentClipUrl(segment)"
+          :width="Number(segment.width) || 0"
+          :height="Number(segment.height) || 0"
+          :testid="`video-segment-clip-${segment.id}`"
+          compact
+        />
         <div class="frame-row">
           <img
             v-for="name in segmentFrameNames(segment.id)"

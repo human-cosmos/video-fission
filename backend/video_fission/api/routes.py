@@ -789,7 +789,7 @@ async def production_events(
     )
 
 
-@router.get("/productions/{production_id}/artifacts/{name}")
+@router.get("/productions/{production_id}/artifacts/{name:path}")
 def get_production_artifact(
     production_id: str,
     name: str,

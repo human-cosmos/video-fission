@@ -7,14 +7,19 @@ from copy import deepcopy
 from typing import Any
 
 from . import media
+from .config import Settings
 from .db import Database
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "multimodal": {
         "provider": "local_ffmpeg",
         "base_url": "",
+        "upload_url": "",
+        "token_url": "",
+        "source": "",
         "api_key_set": False,
         "model": "",
+        "max_tokens": 12000,
         "timeout_seconds": 120,
     },
     "video_generator": {
@@ -37,10 +42,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "mix_reference_bgm": True,
         "bgm_volume": 0.18,
     },
+    "understand": {
+        "transition_detection": True,
+        "clip_analysis": True,
+        "observe": True,
+        "clip_workers": 3,
+        "gemini_max_size_mb": 15,
+        "observe_timeout_seconds": 360,
+    },
 }
 
 PROVIDER_ENUMS = {
-    "multimodal": {"local_ffmpeg", "openai_compatible"},
+    "multimodal": {"local_ffmpeg", "openai_compatible", "gemini_gateway"},
     "video_generator": {"local_ffmpeg", "openai_compatible", "generic_http"},
     "tts": {"none", "openai_compatible"},
 }
@@ -49,8 +62,9 @@ SECRET_KEYS = ("multimodal", "video_generator", "tts")
 
 
 class SettingsStore:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, runtime_settings: Settings | None = None):
         self.db = db
+        self.runtime_settings = runtime_settings
 
     def public_settings(self, user_id: str | None = None) -> dict[str, Any]:
         public, secrets = self._load(user_id)
@@ -69,7 +83,7 @@ class SettingsStore:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         public, secrets = self._load(user_id)
-        for section in ("multimodal", "video_generator", "tts", "compose"):
+        for section in ("multimodal", "video_generator", "tts", "compose", "understand"):
             if section not in patch or patch[section] is None:
                 continue
             if not isinstance(patch[section], dict):
@@ -80,20 +94,45 @@ class SettingsStore:
                 if provider not in PROVIDER_ENUMS[section]:
                     raise ValueError(f"{section}.provider 不支持 {provider}")
                 public[section]["provider"] = provider
-            for field in ("base_url", "model", "voice"):
+            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice"):
                 if field in incoming and incoming[field] is not None and field in public[section]:
                     public[section][field] = str(incoming[field]).strip()
-            if "timeout_seconds" in incoming and incoming["timeout_seconds"] is not None:
+            if section == "multimodal" and "max_tokens" in incoming and incoming["max_tokens"] is not None:
+                max_tokens = int(incoming["max_tokens"])
+                if max_tokens < 256 or max_tokens > 65536:
+                    raise ValueError("multimodal.max_tokens 需在 256 到 65536 之间")
+                public[section]["max_tokens"] = max_tokens
+            if section != "understand" and "timeout_seconds" in incoming and incoming["timeout_seconds"] is not None:
                 timeout = int(incoming["timeout_seconds"])
                 if timeout < 5 or timeout > 3600:
                     raise ValueError("timeout_seconds 需在 5 到 3600 之间")
-                public[section]["timeout_seconds"] = timeout
+                if "timeout_seconds" in public[section]:
+                    public[section]["timeout_seconds"] = timeout
             if (
                 section == "video_generator"
                 and "fallback_to_local" in incoming
                 and incoming["fallback_to_local"] is not None
             ):
                 public[section]["fallback_to_local"] = bool(incoming["fallback_to_local"])
+            if section == "understand":
+                for flag in ("transition_detection", "clip_analysis", "observe"):
+                    if flag in incoming and incoming[flag] is not None:
+                        public[section][flag] = bool(incoming[flag])
+                if "clip_workers" in incoming and incoming["clip_workers"] is not None:
+                    workers = int(incoming["clip_workers"])
+                    if workers < 1 or workers > 8:
+                        raise ValueError("clip_workers 需在 1 到 8 之间")
+                    public[section]["clip_workers"] = workers
+                if "gemini_max_size_mb" in incoming and incoming["gemini_max_size_mb"] is not None:
+                    size = float(incoming["gemini_max_size_mb"])
+                    if size < 1 or size > 100:
+                        raise ValueError("gemini_max_size_mb 需在 1 到 100 之间")
+                    public[section]["gemini_max_size_mb"] = size
+                if "observe_timeout_seconds" in incoming and incoming["observe_timeout_seconds"] is not None:
+                    timeout = int(incoming["observe_timeout_seconds"])
+                    if timeout < 30 or timeout > 3600:
+                        raise ValueError("observe_timeout_seconds 需在 30 到 3600 之间")
+                    public[section]["observe_timeout_seconds"] = timeout
             if section == "compose":
                 if "burn_in_subtitles" in incoming and incoming["burn_in_subtitles"] is not None:
                     public[section]["burn_in_subtitles"] = bool(incoming["burn_in_subtitles"])
@@ -136,6 +175,19 @@ class SettingsStore:
         base_url = str(section.get("base_url") or "").rstrip("/")
         if not base_url:
             return {"ok": False, "provider": provider, "detail": "未配置 base_url"}
+        if provider == "gemini_gateway":
+            from .understand.gateway import GeminiGatewayClient
+
+            return GeminiGatewayClient(
+                base_url=base_url,
+                upload_url=str(section.get("upload_url") or ""),
+                token_url=str(section.get("token_url") or ""),
+                api_key=key,
+                model=str(section.get("model") or ""),
+                source=str(section.get("source") or ""),
+                max_tokens=int(section.get("max_tokens") or 12000),
+                timeout_seconds=int(section.get("timeout_seconds") or 30),
+            ).probe()
         if not key:
             return {"ok": False, "provider": provider, "detail": "未配置 API Key"}
         return self._probe_remote(
@@ -177,7 +229,8 @@ class SettingsStore:
 
     def _load(self, user_id: str | None = None) -> tuple[dict[str, Any], dict[str, str]]:
         row = self.db.get_user_settings(user_id) if user_id else self.db.get_app_settings()
-        public = deepcopy(DEFAULT_SETTINGS)
+        defaults = self._defaults()
+        public = deepcopy(defaults)
         secrets = {key: "" for key in SECRET_KEYS}
         if not row:
             if user_id:
@@ -186,20 +239,57 @@ class SettingsStore:
                 self.db.upsert_app_settings(public, secrets)
             return public, secrets
         stored = row.get("public") or {}
-        for section, defaults in DEFAULT_SETTINGS.items():
+        migrated = False
+        for section, section_defaults in defaults.items():
             if isinstance(stored.get(section), dict):
                 public[section] = {
-                    **defaults,
+                    **section_defaults,
                     **{
                         key: value
                         for key, value in stored[section].items()
-                        if key in defaults and key != "api_key"
+                        if key in section_defaults and key != "api_key"
                     },
                 }
+        stored_multimodal = stored.get("multimodal")
+        if (
+            defaults["multimodal"]["provider"] == "gemini_gateway"
+            and isinstance(stored_multimodal, dict)
+            and stored_multimodal.get("provider") == "local_ffmpeg"
+            and not stored_multimodal.get("base_url")
+            and not stored_multimodal.get("upload_url")
+            and not stored_multimodal.get("token_url")
+            and not stored_multimodal.get("source")
+            and not stored_multimodal.get("model")
+            and int(stored_multimodal.get("timeout_seconds") or 120) == 120
+        ):
+            public["multimodal"] = deepcopy(defaults["multimodal"])
+            migrated = True
         for key, value in (row.get("secrets") or {}).items():
             if key in secrets:
                 secrets[key] = str(value or "")
+        if migrated:
+            if user_id:
+                self.db.upsert_user_settings(user_id, public, secrets)
+            else:
+                self.db.upsert_app_settings(public, secrets)
         return public, secrets
+
+    def _defaults(self) -> dict[str, Any]:
+        defaults = deepcopy(DEFAULT_SETTINGS)
+        runtime = self.runtime_settings
+        if runtime and runtime.gemini_api_url:
+            defaults["multimodal"].update(
+                {
+                    "provider": "gemini_gateway",
+                    "base_url": runtime.gemini_api_url,
+                    "upload_url": runtime.gemini_upload_url,
+                    "token_url": runtime.gemini_token_url,
+                    "model": runtime.gemini_model or "gemini-3.8-flash",
+                    "source": runtime.gemini_source,
+                    "timeout_seconds": 360,
+                }
+            )
+        return defaults
 
     def _mask(self, public: dict[str, Any], secrets: dict[str, str]) -> dict[str, Any]:
         masked = deepcopy(public)

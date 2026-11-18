@@ -20,7 +20,8 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
 - 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频并下载可播放的 `final.mp4`
-- 模型设置持久化到 SQLite；API Key 只写不回显
+- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；缺依赖或无 Key 时自动退化，不中断出片
+- 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
 
 ## 系统要求
@@ -50,9 +51,17 @@ npm install --prefix frontend
 
 ### 视频创作
 
-默认无需 API Key。在「视频创作」页上传参考视频（最大 500MB）、填写创作说明后点「开始创作」。页面会展示拆解时间轴、意图与参考脚本路径、分镜、片段预览，完成后可播放并下载 `final.mp4` 和字幕 `final.srt`。刷新后会从已有任务恢复进度。
+默认无需 API Key。在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片；配置了理解模型后还会出现整片标签、三级标签和观察卡。完成后可播放并下载 `final.mp4` 和字幕 `final.srt`。刷新后会从已有任务恢复进度。
 
-「系统设置」可配置多模态、视频生成和 TTS 的端点、模型、超时与合成开关，并测试连接；同时集中管理全局 Skill、Tool 清单和成员账号。API Key 只写不回显；留空保存表示保留原 Key。开发阶段默认提供者为 `local_ffmpeg`。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成、TTS，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用，否则尝试 `inlineData`，无效时再退化为关键帧。`.env` 的 `VF_GEMINI_*` 会在当前项目首次启动或旧默认配置迁移时写入用户设置，显式自定义过的数据库设置优先。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+
+可选转场检测依赖单独安装，不要把它和 `uv sync --extra dev` 绑在一起：
+
+```bash
+uv sync --extra shot-detect
+```
+
+`shot-detect` 包含 CPU 可跑的 `torch`、`opencv-python`、`numpy`、`scenedetect`，以及包内约 30MB 的 TransNetV2 权重。缺 extra 或检测失败时自动退化为 ffmpeg 场景切分并写 warning，默认 pytest 仍须通过。
 
 也可以分别启动：
 
@@ -94,10 +103,16 @@ cd backend
 | `VF_AUTH_ADMIN_USERNAME` | `admin` | 首次启动时创建的引导管理员 |
 | `VF_AUTH_ADMIN_PASSWORD` | 自动生成 | 首次管理员密码；未配置时写入 `data/bootstrap_admin.txt` |
 | `VF_AUTH_TOKEN_EXPIRE_MINUTES` | `1440` | 登录会话有效分钟数 |
+| `VF_AUTH_COOKIE_DOMAIN` | 空 | API 与前端位于同一父域下不同主机时配置，例如 `.example.com` |
 | `VF_ALLOWED_ORIGINS` | 空 | 额外允许提交认证 API 的浏览器 Origin，逗号分隔；反向代理域名不自动匹配时需配置 |
 | `VF_SSO_CLIENT_ID` / `VF_SSO_CLIENT_SECRET` | 空 | CAS 应用凭证；为空时只提供账号密码登录 |
 | `VF_SSO_CALLBACK_URL` | 按请求生成 | CAS 回调地址，反向代理部署建议显式配置 |
 | `VF_SSO_FRONTEND_URL` | `http://127.0.0.1:5174` | SSO 成功后返回的前端地址 |
+| `VF_GEMINI_API_URL` | 空 | Gemini conversationV5 对话接口 |
+| `VF_GEMINI_UPLOAD_URL` | 空 | Gemini 媒体上传接口；配置后优先使用 `fileUri` |
+| `VF_GEMINI_TOKEN_URL` | SSO access token URL | 公司共享 token 获取地址 |
+| `VF_GEMINI_MODEL` | 空 | 多模态默认模型 |
+| `VF_GEMINI_SOURCE` | 空 | Gemini 网关请求来源标识 |
 
 环境变量由当前 shell 读取；项目不会自动覆盖已有 `.env`。
 

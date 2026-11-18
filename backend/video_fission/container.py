@@ -33,7 +33,7 @@ def configure(runtime_settings: Settings | None = None) -> None:
         settings.bundled_skills_dir,
         settings.disabled_skills_dir,
     )
-    settings_store = SettingsStore(db)
+    settings_store = SettingsStore(db, settings)
     productions = ProductionService(settings, db, settings_store)
     tools = build_registry(db, settings.workspace, settings.artifacts_dir, productions)
     hub = CodexHub(settings, db, skills, tools, productions=productions)

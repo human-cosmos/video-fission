@@ -37,6 +37,7 @@ export const VIDEO_ITEM_TYPES = [
   'video_understanding',
   'video_plan',
   'video_segments',
+  'video_observe',
   'video_output',
 ]
 
@@ -122,7 +123,11 @@ export function isTechnicalVisual(text) {
 }
 
 export function needsRemoteFields(provider) {
-  return provider === 'openai_compatible' || provider === 'generic_http'
+  return (
+    provider === 'openai_compatible' ||
+    provider === 'generic_http' ||
+    provider === 'gemini_gateway'
+  )
 }
 
 export function isVideoFile(file) {

@@ -28,7 +28,6 @@ def _load(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
-
 def _row_get(row: sqlite3.Row, key: str, default: Any = None) -> Any:
     try:
         return row[key]
@@ -273,18 +272,14 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_productions_conversation ON productions(conversation_id)"
             )
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_conversations_user_updated "
-                "ON conversations(user_id, updated_at DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)"
             )
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_productions_user_updated "
-                "ON productions(user_id, updated_at DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_productions_user_updated ON productions(user_id, updated_at DESC)"
             )
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_uploads_user_created "
-                "ON video_uploads(user_id, created_at DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_uploads_user_created ON video_uploads(user_id, created_at DESC)"
             )
-
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, name: str, decl: str) -> None:
         existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -687,6 +682,17 @@ class Database:
         value["payload"] = _load(value["payload"], {})
         return value
 
+    def delete_item(self, item_id: str, conversation_id: str | None = None) -> bool:
+        with self.transaction() as connection:
+            if conversation_id is None:
+                cursor = connection.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            else:
+                cursor = connection.execute(
+                    "DELETE FROM items WHERE id = ? AND conversation_id = ?",
+                    (item_id, conversation_id),
+                )
+            return cursor.rowcount > 0
+
     def upsert_item(self, conversation_id: str, item_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         existing = self.get_item(item_id)
         now = utc_now()
@@ -1027,6 +1033,7 @@ class Database:
             "secrets": _load(row["secrets_json"], {}),
             "updated_at": row["updated_at"],
         }
+
     def upsert_app_settings(self, public: dict[str, Any], secrets: dict[str, Any]) -> None:
         now = utc_now()
         with self.transaction() as connection:
@@ -1109,8 +1116,7 @@ class Database:
             "clips": _json(payload.get("clips") or []),
             "output": _json(payload.get("output")),
             "replace_policy": json.dumps(
-                payload.get("replace_policy")
-                or {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []},
+                payload.get("replace_policy") or {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []},
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),

@@ -8,6 +8,7 @@ VIDEO_CARD_TYPES = (
     "video_understanding",
     "video_plan",
     "video_segments",
+    "video_observe",
     "video_output",
 )
 
@@ -54,10 +55,14 @@ def understanding_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     source_url = upload_media_url(_upload_id(public))
     if source_url:
         source["url"] = source_url
+    tags = decomposition.get("video_tags") if isinstance(decomposition.get("video_tags"), dict) else {}
     return {
         "production_id": public["id"],
         "summary": decomposition.get("summary") or "",
+        "description": decomposition.get("description") or tags.get("video_describe") or "",
         "provider": decomposition.get("provider") or "",
+        "model": decomposition.get("model") or "",
+        "video_tags": tags,
         "segments": list(decomposition.get("segments") or []),
         "source_video": source,
         "source_video_url": source_url,
@@ -150,6 +155,53 @@ def output_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _observe_empty(observe: Any) -> bool:
+    if not isinstance(observe, dict):
+        return True
+    if observe.get("shot_observation_card") or observe.get("raw_claims"):
+        return False
+    speech = observe.get("speech_evidence") or {}
+    if isinstance(speech, dict) and (
+        speech.get("segments") or str(speech.get("status") or "not_used") not in {"", "not_used"}
+    ):
+        return False
+    return True
+
+
+def observe_payload(public: dict[str, Any]) -> dict[str, Any] | None:
+    decomposition = public.get("decomposition")
+    if not isinstance(decomposition, dict) or not decomposition:
+        return None
+    items = []
+    for segment in decomposition.get("segments") or []:
+        observe = segment.get("observe")
+        error = segment.get("error")
+        if _observe_empty(observe) and not error:
+            continue
+        if _observe_empty(observe) and error and "observe" not in str(error):
+            # 切片失败但没有观察结果时不单独占观察卡；仅 observe 失败才列出
+            continue
+        items.append(
+            {
+                "id": segment.get("id"),
+                "role": segment.get("role"),
+                "start_ms": segment.get("start_ms"),
+                "end_ms": segment.get("end_ms"),
+                "summary": segment.get("summary") or "",
+                "observe": observe if isinstance(observe, dict) else {},
+                "error": error,
+            }
+        )
+    if not items:
+        return None
+    return {
+        "production_id": public["id"],
+        "status": public.get("status"),
+        "updated_at": public.get("updated_at"),
+        "segments": items,
+    }
+
+
 def cards_for(public: dict[str, Any], artifact_dir: Path | None = None) -> list[tuple[str, dict[str, Any]]]:
     cards: list[tuple[str, dict[str, Any]]] = [("video_progress", progress_payload(public))]
     understanding = understanding_payload(public)
@@ -161,6 +213,9 @@ def cards_for(public: dict[str, Any], artifact_dir: Path | None = None) -> list[
     segments = segments_payload(public, artifact_dir)
     if segments:
         cards.append(("video_segments", segments))
+    observe = observe_payload(public)
+    if observe:
+        cards.append(("video_observe", observe))
     output = output_payload(public)
     if output:
         cards.append(("video_output", output))

@@ -59,6 +59,7 @@ FastAPI
   ├─ settings_store.py    public settings + write-only keys
   ├─ productions.py       upload / run / cancel / SSE / artifacts
   ├─ pipeline.py          ingest → decompose → intent → script → generate → compose
+  ├─ understand/          提示词、规范化、转场精修、切片、observe、GeminiGatewayClient
   ├─ providers.py         openai-compatible chat / video / TTS adapters
   ├─ references.py        real retrieval over skills/video-references
   ├─ media.py             ffmpeg / ffprobe helpers
@@ -187,7 +188,7 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 阶段固定为：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。状态可落盘恢复；已有拆解结果时可再次 `POST /run`（默认 `resume_from=intent`，空 body 兼容），也可 `PATCH` 更新 `brief` / `replace_policy`。SSE 事件至少包括 `stage_started`、`stage_completed`、`warning`、`error`、`completed`。
 
-- **decompose**：先用 `select='gt(scene,0.15)'` 切镜；切点不足则按 Hook/Value/CTA 时间窗切分。Hook/CTA 会吸附到合法窗口内最近的主切点（不限于目标前后 400ms）。无切点时 Hook/CTA 窗口为片头/片尾 `min(3000ms, max(1500ms, 15%))`。官方夹具切在 2700ms / 5400ms，分成 hook / value / cta 三段。片段覆盖源视频 `[0, duration_ms)`，允许 100ms 误差且互不重叠。每段写出 1–3 张关键帧，文件名为 `{seg_id}_frame_01.jpg`（以及 `_02` / `_03`），不把帧 URL 写进契约字段。若配置了远程多模态，本地切分后再做 refine，失败则保留本地结果并写 warning。
+- **decompose**：由 `video_fission.understand` 增强，`pipeline._stage_decompose` 调用 `run_decompose`。设置开启 `transition_detection` 且安装了 `shot-detect` extra 时，先用 PySceneDetect + TransNetV2 做帧级转场检测，并把模型时间点吸附到真实切点；依赖缺失或失败则退化为 `select='gt(scene,0.15)'` 的 ffmpeg 场景切分，并写 warning。切点仍按 Hook/Value/CTA 时间窗规划（无模型时），Hook/CTA 会吸附到合法窗口内最近的主切点。官方夹具切在 2700ms / 5400ms，分成 hook / value / cta 三段。片段覆盖源视频 `[0, duration_ms)`，允许 100ms 误差且互不重叠。每段写出可播放的 `clips/{seg_id}.mp4`（H.264 yuv420p，有音轨则保留）和 1–3 张关键帧 `{seg_id}_frame_01.jpg`（以及 `_02` / `_03`）。`openai_compatible` / `gemini_gateway` 配置可用时，用移植后的提示词做整片理解、片段解析和 observe（`observe` 超时取 `understand.observe_timeout_seconds`，默认 360，不套用 multimodal 的 120s）；失败不得让 production 失败，保留本地切分并 warning。无 Key 或关闭 `observe` 时不插入空白观察卡。多模态设置按用户隔离。一级标签到 `role` 的映射固定为：开场钩子→hook，痛点具象/方案登场/卖点展示/效果展示/场景演示/信任构建→value，响应号召→cta，其他或空→other。
 - **intent**：必须真实检索 `skills/video-references`：3 篇同品类 + 1 篇跨品类。此阶段只读首行骨架和第二条 `---` 之前的注意项；`intent.references[].path` 是相对项目根的真实路径。
 - **script**：至少读 3 篇参考全文。镜头策略以解析后的 `replace_plan` 为准：`mode=default` 且 brief 未点名片段时，Hook/CTA `generate`、中间 Value `reuse`；也可按 `all` / `selected` / brief 点名任意段生成。结构化勾选优先于 brief。
 - **generate**：reuse 按源片段裁切并保留原声；generate 默认对关键帧做 Ken Burns。无 TTS 时垫源片对应时间窗音频。默认硬烧字幕时不再叠一层 drawtext。H.264 yuv420p + AAC。远程失败且 `fallback_to_local=true` 时回退本地。分辨率跟随源视频（竖屏封顶 1080×1920，横屏长边 ≤1920）。
@@ -200,8 +201,10 @@ CJK 字幕优先使用 `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.tt
 前端采用 Vue 3 单页应用：
 
 - `ConversationSidebar`：搜索、最近/归档、会话状态。
-- `MessageTimeline`：对话、推理、计划、命令、Tool、审批、澄清。
-- `CapabilityPanel`：Skill 和 Tool。
+- `MessageTimeline`：对话、推理、计划、命令、Tool、审批、澄清，以及理解 / 片段 / 观察 / 成片卡片。
+- `CapabilityPanel`：Skill 和 Tool 引用；创建与启停在系统设置中管理。
+- `ModelSettings.vue`：每用户模型、密钥、`gemini_gateway` 可选 `token_url`，以及理解与切片开关。
+- `VideoObserveCard.vue`：仅在至少一段 observe 非空时出现。
 - `SkillEditorModal`：创建/编辑 `SKILL.md`。
 - `App.vue`：HTTP、SSE、模型、附件、会话操作和错误状态。
 

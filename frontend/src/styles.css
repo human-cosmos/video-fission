@@ -3654,6 +3654,73 @@ a.button.primary {
 .message--video_understanding .video-card,
 .message--video_plan .video-card,
 .message--video_segments .video-card,
+.message--video_observe .video-card,
 .message--video_output .video-card {
   margin: 0;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.6rem 0 0.9rem;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-chip {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: baseline;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--paper-ink) 6%, transparent);
+  font-size: 0.82rem;
+}
+
+.tag-label {
+  color: var(--page-muted, #6b7280);
+}
+
+.describe-text,
+.segment-description {
+  margin: 0.35rem 0 0;
+}
+
+.segment-reuse {
+  font-size: 0.78rem;
+  font-style: normal;
+  color: var(--page-muted, #6b7280);
+}
+
+.observe-block {
+  margin-top: 0.9rem;
+}
+
+.observe-block header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.observe-highlights {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.5rem 0 0;
+}
+
+.observe-highlights dt {
+  font-size: 0.75rem;
+  color: var(--page-muted, #6b7280);
+}
+
+.observe-highlights dd {
+  margin: 0.1rem 0 0;
+}
+
+.observe-claims,
+.observe-speech ol {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
 }

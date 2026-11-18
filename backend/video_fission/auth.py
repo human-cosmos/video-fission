@@ -92,6 +92,7 @@ def set_login_cookie(response: Response, request: Request, token: str) -> None:
         key=AUTH_COOKIE_NAME,
         value=token,
         max_age=max(60, int(container.settings.auth_token_expire_minutes) * 60),
+        domain=container.settings.auth_cookie_domain or None,
         path="/",
         httponly=True,
         secure=_request_is_secure(request),
@@ -102,6 +103,7 @@ def set_login_cookie(response: Response, request: Request, token: str) -> None:
 def clear_login_cookie(response: Response, request: Request) -> None:
     response.delete_cookie(
         key=AUTH_COOKIE_NAME,
+        domain=container.settings.auth_cookie_domain or None,
         path="/",
         httponly=True,
         secure=_request_is_secure(request),
@@ -147,11 +149,7 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     if not container.settings.auth_required:
         return LOCAL_USER
     user = next(
-        (
-            candidate
-            for token in _tokens_from_request(request)
-            if (candidate := user_from_token(token)) is not None
-        ),
+        (candidate for token in _tokens_from_request(request) if (candidate := user_from_token(token)) is not None),
         None,
     )
     if user is None:
@@ -175,14 +173,14 @@ def check_login_rate_limit(client_ip: str) -> None:
     with _fail_lock:
         if len(_fail_records) > 10_000:
             stale = [
-                key for key, timestamps in _fail_records.items()
+                key
+                for key, timestamps in _fail_records.items()
                 if not timestamps or now - timestamps[-1] >= _LOGIN_WINDOW_SECONDS
             ]
             for key in stale:
                 _fail_records.pop(key, None)
         _fail_records[client_ip] = [
-            timestamp for timestamp in _fail_records[client_ip]
-            if now - timestamp < _LOGIN_WINDOW_SECONDS
+            timestamp for timestamp in _fail_records[client_ip] if now - timestamp < _LOGIN_WINDOW_SECONDS
         ]
         if len(_fail_records[client_ip]) >= _LOGIN_MAX_ATTEMPTS:
             raise HTTPException(

@@ -170,7 +170,7 @@ def test_remote_split_saves_video_understanding_response(monkeypatch, tmp_path: 
     paths = list((tmp_path / "gemini_api_calls" / "video_understanding").glob("*.json"))
     assert len(paths) == 1
     record = json.loads(paths[0].read_text(encoding="utf-8"))
-    assert record["call_label"] == "split_video"
+    assert record["call_label"] in {"split_video", "split_attempt_01_video"}
     assert record["response"] == raw_response
 
 

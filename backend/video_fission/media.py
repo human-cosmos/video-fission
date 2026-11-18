@@ -15,6 +15,11 @@ FONT_CANDIDATES = [
     Path("/System/Library/Fonts/STHeiti Medium.ttc"),
     Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
     Path("/System/Library/Fonts/HelveticaNeue.ttc"),
+    Path("C:/Windows/Fonts/msyh.ttc"),
+    Path("C:/Windows/Fonts/msyhbd.ttc"),
+    Path("C:/Windows/Fonts/simhei.ttf"),
+    Path("C:/Windows/Fonts/simsun.ttc"),
+    Path("C:/Windows/Fonts/arial.ttf"),
 ]
 
 
@@ -577,6 +582,53 @@ def fit_av_duration(path: Path, dest: Path, duration_ms: int, fps: float) -> Pat
     if abs(fps - int(round(fps))) < 0.001:
         args.extend(["-video_track_timescale", str(int(round(fps)))])
     if probe(path).get("has_audio"):
+        args.extend(["-af", af, "-c:a", "aac", "-ac", "2", "-ar", "44100"])
+    else:
+        args.append("-an")
+    args.append(str(dest))
+    run_ffmpeg(args, timeout=180)
+    return dest
+
+
+def normalize_video_clip(
+    path: Path,
+    dest: Path,
+    duration_ms: int,
+    width: int,
+    height: int,
+    fps: float,
+) -> Path:
+    """Normalize a remote clip to the project's exact visual contract."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    frames, duration = exact_seconds(duration_ms, fps)
+    vf = limited_range_vf(
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        f"fps={fps:.4f},tpad=stop_mode=clone:stop_duration={duration:.6f},"
+        f"trim=end_frame={frames},setpts=PTS-STARTPTS"
+    )
+    args = [
+        ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(path),
+        "-vf",
+        vf,
+        *limited_x264_args(),
+        "-r",
+        f"{fps:.4f}",
+        "-t",
+        f"{duration:.6f}",
+        "-movflags",
+        "+faststart",
+    ]
+    if abs(fps - int(round(fps))) < 0.001:
+        args.extend(["-video_track_timescale", str(int(round(fps)))])
+    if probe(path).get("has_audio"):
+        af = (
+            f"atrim=0:{duration:.6f},asetpts=PTS-STARTPTS,"
+            f"aformat=sample_rates=44100:channel_layouts=stereo,apad=whole_dur={duration:.6f}"
+        )
         args.extend(["-af", af, "-c:a", "aac", "-ac", "2", "-ar", "44100"])
     else:
         args.append("-an")

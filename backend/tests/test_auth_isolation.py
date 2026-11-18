@@ -153,7 +153,7 @@ def test_production_and_uploads_cannot_cross_user_boundaries(test_settings):
             )
         assert upload.status_code == 201, upload.text
         upload_payload = upload.json()
-        assert "/uploads/users/" in upload_payload["path"]
+        assert "/uploads/users/" in Path(upload_payload["path"]).as_posix()
         production = alice_client.post(
             "/api/productions",
             headers=alice_headers,

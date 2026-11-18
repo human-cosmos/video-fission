@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import time
+import shutil
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from video_fission.container import configure
-from video_fission.db import Database
 from video_fission.main import app
 from video_fission.media import audio_levels, probe, scene_cut_ms
-from video_fission.pipeline import local_intent, local_script, plan_segments, brief_role_phrases, _shot_frame
-from video_fission.replace import parse_brief_targets, resolve_replace_plan, strip_rewrite_instructions, is_rewrite_only_brief
-from video_fission.productions import ProductionService
-from video_fission.settings_store import SettingsStore
+from video_fission.pipeline import _shot_frame, brief_role_phrases, local_intent, local_script, plan_segments
+from video_fission.replace import (
+    is_rewrite_only_brief,
+    parse_brief_targets,
+    resolve_replace_plan,
+    strip_rewrite_instructions,
+)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-reference.mp4"
 
@@ -124,7 +126,6 @@ def test_intent_references_exist_and_full_run_writes_final(test_settings, client
         assert path.is_file(), item["path"]
         existing += 1
     assert existing == len(refs)
-    categories = {item["path"].split("/")[2] if len(item["path"].split("/")) > 2 else "" for item in refs}
     # 3 same + 1 cross means at least two categories when possible
     assert len(refs) == 4
 
@@ -438,7 +439,14 @@ def _opening(public: dict) -> dict:
 def _opening_shot(public: dict) -> dict:
     script = public.get("script") or {}
     shot_id = (script.get("opening") or {}).get("shot_id") or "shot_opening"
-    return next((shot for shot in script.get("shots") or [] if shot.get("id") == shot_id or shot.get("source_kind") == "opening"), {})
+    return next(
+        (
+            shot
+            for shot in script.get("shots") or []
+            if shot.get("id") == shot_id or shot.get("source_kind") == "opening"
+        ),
+        {},
+    )
 
 
 def _actions(public: dict) -> dict[str, str]:
@@ -489,7 +497,11 @@ def test_replace_plan_modes_and_time_range_hit():
         {"id": "seg_04", "role": "value", "start_ms": 5400, "end_ms": 6600},
         {"id": "seg_05", "role": "cta", "start_ms": 6600, "end_ms": 8100},
     ]
-    default = resolve_replace_plan({"mode": "default"}, segments, "用香酥虾做一个开场抓人、中间展示产品、结尾促单的短视频")
+    default = resolve_replace_plan(
+        {"mode": "default"},
+        segments,
+        "用香酥虾做一个开场抓人、中间展示产品、结尾促单的短视频",
+    )
     assert default["resolved_segment_ids"] == ["seg_01", "seg_05"]
     assert {item["reason"] for item in default["reasons"]} == {"default_hook_cta"}
 
@@ -703,3 +715,68 @@ def test_selected_with_no_matching_segment_returns_400(client: TestClient):
     container.db.update_production(running["id"], {"status": "running"})
     conflict = client.post(f"/api/productions/{running['id']}/run")
     assert conflict.status_code == 409
+
+
+def test_seedance_generated_clips_are_normalized_and_composed(client: TestClient, monkeypatch):
+    from video_fission import providers
+
+    settings = client.put(
+        "/api/settings",
+        json={
+            "video_generator": {
+                "provider": "seedance",
+                "base_url": "https://api.giikin.com",
+                "model": "seedance-2-0-fast",
+                "source": "video-fission-test",
+                "resolution": "480p",
+                "timeout_seconds": 120,
+                "fallback_to_local": False,
+                "api_key": "dk-ai-p-test",
+            }
+        },
+    )
+    assert settings.status_code == 200, settings.text
+    calls = []
+
+    def fake_remote(*_args, **kwargs):
+        calls.append(kwargs)
+        dest = _args[10]
+        shutil.copyfile(FIXTURE, dest)
+        return dest
+
+    monkeypatch.setattr(providers, "generate_remote_video", fake_remote)
+    created = _create(client, "全部新生成，做一条香酥虾短视频")
+    public = _run_wait(created["id"])
+    _assert_final(public)
+    generated = [clip for clip in public["clips"] if clip["provider"] == "seedance"]
+    assert generated
+    assert calls
+    assert all(item["resolution"] == "480p" for item in calls)
+    for clip in generated:
+        info = probe(Path(clip["path"]))
+        assert info["width"] == public["source_video"]["width"]
+        assert info["height"] == public["source_video"]["height"]
+        assert abs(info["fps"] - public["source_video"]["fps"]) < 0.01
+
+
+def test_seedance_without_base_url_does_not_silently_use_local(client: TestClient):
+    settings = client.put(
+        "/api/settings",
+        json={
+            "video_generator": {
+                "provider": "seedance",
+                "base_url": "",
+                "model": "seedance-2-0-fast",
+                "fallback_to_local": False,
+            }
+        },
+    )
+    assert settings.status_code == 200, settings.text
+    created = _create(client, "全部新生成，做一条香酥虾短视频")
+    from video_fission import container
+
+    with pytest.raises(ValueError, match="base_url"):
+        container.productions.engine.run(created["id"])
+    public = container.productions.get(created["id"])
+    assert public["status"] == "failed"
+    assert "base_url" in public["error"]

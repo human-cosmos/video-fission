@@ -55,6 +55,8 @@ npm install --prefix frontend
 
 「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成、TTS，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用，否则尝试 `inlineData`，无效时再退化为关键帧。`.env` 的 `VF_GEMINI_*` 会在当前项目首次启动或旧默认配置迁移时写入用户设置，显式自定义过的数据库设置优先。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
+视频生成支持 `seedance` 内网 Provider。默认地址为 `https://api.giikin.com`，Seedance 2.0 Flash 对应的协议模型名为 `seedance-2-0-fast`（也兼容输入 `seedance-2.0-flash`）。提交走 `/acore/model/v1/task/generate/video`，状态查询走 `/acore/model/v1/task/video/{taskId}`；下载后会统一转成项目要求的分辨率、帧率和精确时长。也可以使用 `npx dksk auth <key>` 登录后，在系统设置中保存同一认证 Key。
+
 可选转场检测依赖单独安装，不要把它和 `uv sync --extra dev` 绑在一起：
 
 ```bash
@@ -189,7 +191,7 @@ SQLite 保存以下数据：
 
 阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`GET /api/health` 在原有字段外增加 `ffmpeg` 和 `pipeline`。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。勾选优先于 brief 点名。`mode=selected` 未命中任何段时 `/run` 返回 400。
 
-远程多模态走 `{base_url}/chat/completions`；视频生成可走 `openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`（支持 `url` / `job_id` 轮询）。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认烧录字幕并混合参考音频作为 BGM，可在设置中关闭。
+远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认烧录字幕并混合参考音频作为 BGM，可在设置中关闭。
 
 ## Tool
 
@@ -268,4 +270,6 @@ E2E 覆盖：
 E2E 使用独立的后端进程和 `.e2e-data/` 数据目录，不会读写正常的 `data/` 对话。
 
 详细的设计与抽离说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+Seedance 视频生成接口、请求字段和任务查询协议见 [docs/API-SEEDANCE-VIDEO.md](docs/API-SEEDANCE-VIDEO.md)。
 

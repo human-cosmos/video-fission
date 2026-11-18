@@ -25,6 +25,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "video_generator": {
         "provider": "local_ffmpeg",
         "base_url": "",
+        "source": "video-fission",
+        "resolution": "720p",
         "api_key_set": False,
         "model": "",
         "timeout_seconds": 300,
@@ -54,7 +56,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 PROVIDER_ENUMS = {
     "multimodal": {"local_ffmpeg", "openai_compatible", "gemini_gateway"},
-    "video_generator": {"local_ffmpeg", "openai_compatible", "generic_http"},
+    "video_generator": {"local_ffmpeg", "openai_compatible", "generic_http", "seedance"},
     "tts": {"none", "openai_compatible"},
 }
 
@@ -94,9 +96,13 @@ class SettingsStore:
                 if provider not in PROVIDER_ENUMS[section]:
                     raise ValueError(f"{section}.provider 不支持 {provider}")
                 public[section]["provider"] = provider
-            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice"):
+            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice", "resolution"):
                 if field in incoming and incoming[field] is not None and field in public[section]:
                     public[section][field] = str(incoming[field]).strip()
+            if section == "video_generator":
+                resolution = str(public[section].get("resolution") or "").strip()
+                if resolution not in {"480p", "720p"}:
+                    raise ValueError("video_generator.resolution 只能是 480p 或 720p")
             if section == "multimodal" and "max_tokens" in incoming and incoming["max_tokens"] is not None:
                 max_tokens = int(incoming["max_tokens"])
                 if max_tokens < 256 or max_tokens > 65536:
@@ -188,6 +194,15 @@ class SettingsStore:
                 max_tokens=int(section.get("max_tokens") or 12000),
                 timeout_seconds=int(section.get("timeout_seconds") or 30),
             ).probe()
+        if provider == "seedance":
+            from .providers import probe_seedance
+
+            return probe_seedance(
+                base_url,
+                key,
+                int(section.get("timeout_seconds") or 30),
+                str(section.get("model") or ""),
+            )
         if not key:
             return {"ok": False, "provider": provider, "detail": "未配置 API Key"}
         return self._probe_remote(

@@ -348,30 +348,60 @@ class PipelineEngine:
             else:
                 provider_name = vg.get("provider") or "local_ffmpeg"
                 generated = False
-                if provider_name in {"openai_compatible", "generic_http"} and vg.get("base_url"):
-                    try:
-                        providers.generate_remote_video(
-                            provider_name,
-                            vg.get("base_url") or "",
-                            secrets.get("video_generator") or "",
-                            vg.get("model") or "",
-                            shot.get("prompt") or shot.get("visual") or production["brief"],
-                            duration_ms,
-                            width,
-                            height,
-                            fps,
-                            int(vg.get("timeout_seconds") or 300),
-                            dest,
-                        )
-                        generated = dest.is_file() and dest.stat().st_size > 0
-                    except Exception as exc:
-                        if vg.get("fallback_to_local", True):
-                            message = f"{shot['id']} 远端生成失败，已回退本地：{exc.__class__.__name__}"
-                            warnings.append(message)
-                            self._emit(production_id, "warning", {"stage": "generate", "message": message})
-                            provider_name = "local_ffmpeg"
-                        else:
-                            raise
+                remote_provider = provider_name in {"openai_compatible", "generic_http", "seedance"}
+                if remote_provider:
+                    if not vg.get("base_url"):
+                        if not vg.get("fallback_to_local", True):
+                            raise ValueError(f"视频生成 Provider {provider_name} 未配置 base_url")
+                        message = f"{shot['id']} 远端 Provider 未配置 base_url，已回退本地"
+                        warnings.append(message)
+                        self._emit(production_id, "warning", {"stage": "generate", "message": message})
+                        provider_name = "local_ffmpeg"
+                    else:
+                        try:
+                            providers.generate_remote_video(
+                                provider_name,
+                                vg.get("base_url") or "",
+                                secrets.get("video_generator") or "",
+                                vg.get("model") or "",
+                                shot.get("prompt") or shot.get("visual") or production["brief"],
+                                duration_ms,
+                                width,
+                                height,
+                                fps,
+                                int(vg.get("timeout_seconds") or 300),
+                                dest,
+                                source=vg.get("source") or "",
+                                resolution=vg.get("resolution") or "720p",
+                                cancel=cancel,
+                            )
+                            self._raise_if_cancelled(cancel)
+                            generated = dest.is_file() and dest.stat().st_size > 0
+                            if not generated:
+                                raise providers.ProviderError("远端 Provider 返回了空文件")
+                            normalized = dest.with_name(dest.stem + "_normalized.mp4")
+                            media.normalize_video_clip(
+                                dest,
+                                normalized,
+                                duration_ms,
+                                width,
+                                height,
+                                fps,
+                            )
+                            normalized.replace(dest)
+                            self._raise_if_cancelled(cancel)
+                        except providers.ProviderCancelled as exc:
+                            raise PipelineCancelled("任务已取消") from exc
+                        except Exception as exc:
+                            if cancel.is_set():
+                                raise PipelineCancelled("任务已取消") from exc
+                            if vg.get("fallback_to_local", True):
+                                message = f"{shot['id']} 远端生成失败，已回退本地：{exc.__class__.__name__}"
+                                warnings.append(message)
+                                self._emit(production_id, "warning", {"stage": "generate", "message": message})
+                                provider_name = "local_ffmpeg"
+                            else:
+                                raise
                 if not generated:
                     frame = _shot_frame(art, shot, segments)
                     burn_in = bool(public.get("compose", {}).get("burn_in_subtitles", True))
@@ -390,7 +420,8 @@ class PipelineEngine:
                 if not _has_audio(dest):
                     tmp = dest.with_name(dest.stem + "_a.mp4")
                     start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
-                    if (segment or _is_opening_shot(shot, production.get("script") or {})) and media.probe(src).get("has_audio"):
+                    opening_shot = _is_opening_shot(shot, production.get("script") or {})
+                    if (segment or opening_shot) and media.probe(src).get("has_audio"):
                         media.mux_timeline_audio(
                             dest,
                             src,
@@ -402,8 +433,10 @@ class PipelineEngine:
                         media.add_silence_audio(dest, tmp, duration_ms)
                     tmp.replace(dest)
             info = media.probe(dest)
-            if abs(info["duration_ms"] - duration_ms) > 100 and info["duration_ms"] <= 0:
-                raise RuntimeError(f"{shot['id']} 生成结果无法探测")
+            if info["duration_ms"] <= 0 or abs(info["duration_ms"] - duration_ms) > 150:
+                raise RuntimeError(
+                    f"{shot['id']} 片段时长异常：期望 {duration_ms}ms，实际 {info['duration_ms']}ms"
+                )
             if dest.stat().st_size < 1000:
                 raise RuntimeError(f"{shot['id']} 生成了空文件")
             clips.append(
@@ -430,7 +463,7 @@ class PipelineEngine:
         shots = script.get("shots") or []
         source_info = production.get("source_video") or {}
         fps = float(source_info.get("fps") or 30)
-        opening_shot_id = str(((script.get("opening") or {}).get("shot_id") or ""))
+        opening_shot_id = str((script.get("opening") or {}).get("shot_id") or "")
         faded: list[Path] = []
         for index, item in enumerate(clips):
             path = Path(item["path"])
@@ -518,7 +551,7 @@ def _is_opening_shot(shot: dict[str, Any], script: dict[str, Any] | None = None)
 
 
 def _opening_from(production: dict[str, Any], script: dict[str, Any] | None = None) -> dict[str, Any]:
-    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
+    opening = dict((production.get("decomposition") or {}).get("opening") or {})
     if script and script.get("opening"):
         opening = {**opening, **(script.get("opening") or {})}
     return opening
@@ -582,7 +615,11 @@ def plan_segments(
     hook_high = max(duration_ms - 1200, 801)
     hook_end = snap(hook_target, 800, hook_high, invent=False)
     if hook_end is None:
-        later = [point for point in list(cuts) + (list(silence) if has_audio else []) if 800 <= point <= duration_ms - 400]
+        later = [
+            point
+            for point in list(cuts) + (list(silence) if has_audio else [])
+            if 800 <= point <= duration_ms - 400
+        ]
         hook_end = min(later) if later else None
     hook_for_cta = hook_end if hook_end is not None else 0
     cta_start = snap(cta_target, hook_for_cta + 400, max(duration_ms - 400, hook_for_cta + 400), invent=True)
@@ -781,7 +818,7 @@ def shot_on_screen_text(segment: dict[str, Any], voiceover: str) -> str:
 def local_script(production: dict[str, Any]) -> dict[str, Any]:
     brief = production.get("brief") or ""
     segments = (production.get("decomposition") or {}).get("segments") or []
-    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
+    opening = dict((production.get("decomposition") or {}).get("opening") or {})
     skeleton = production.get("skeleton") or {}
     plan = production.get("replace_plan") or {}
     generate_all = bool(re.search(r"全部新生成|全部生成|all generate|generate all", brief, re.I))
@@ -810,9 +847,18 @@ def local_script(production: dict[str, Any]) -> dict[str, Any]:
             return "reuse" if role == "value" else "generate"
         return "generate" if role in {"hook", "cta"} else "reuse"
 
-    def build_shot(index: int, segment: dict[str, Any], action: str, duration_ms: int | None = None, shot_id: str | None = None, source_kind: str = "", value_index: int = 0) -> dict[str, Any]:
+    def build_shot(
+        index: int,
+        segment: dict[str, Any],
+        action: str,
+        duration_ms: int | None = None,
+        shot_id: str | None = None,
+        source_kind: str = "",
+        value_index: int = 0,
+    ) -> dict[str, Any]:
         role = segment.get("role") or "other"
-        duration_ms = max(int(duration_ms if duration_ms is not None else int(segment["end_ms"]) - int(segment["start_ms"])), 1)
+        default_duration = int(segment["end_ms"]) - int(segment["start_ms"])
+        duration_ms = max(int(duration_ms if duration_ms is not None else default_duration), 1)
         visual = segment.get("visual") or f"{role} 镜头"
         text = shot_voiceover(segment, skeleton, duration_ms, brief=brief, value_index=value_index)
         prompt = (
@@ -837,7 +883,11 @@ def local_script(production: dict[str, Any]) -> dict[str, Any]:
     shots: list[dict[str, Any]] = []
     value_cursor = 0
     if opening_end > 0:
-        in_opening = [seg for seg in segments if str(seg.get("id") or "") in opening_ids or int(seg.get("start_ms") or 0) < opening_end]
+        in_opening = [
+            seg
+            for seg in segments
+            if str(seg.get("id") or "") in opening_ids or int(seg.get("start_ms") or 0) < opening_end
+        ]
         after = [seg for seg in segments if int(seg.get("start_ms") or 0) >= opening_end]
         head = in_opening[0] if in_opening else {
             "id": "",
@@ -865,7 +915,14 @@ def local_script(production: dict[str, Any]) -> dict[str, Any]:
             "summary": " ".join(parts) or (head.get("summary") or "开场连续块"),
         }
         action = segment_action(head, True)
-        opening_shot = build_shot(1, head, action, duration_ms=opening_end, shot_id="shot_opening", source_kind="opening")
+        opening_shot = build_shot(
+            1,
+            head,
+            action,
+            duration_ms=opening_end,
+            shot_id="shot_opening",
+            source_kind="opening",
+        )
         opening_shot["role"] = "hook"
         opening_shot["voiceover"] = " ".join(parts) or opening_shot.get("voiceover") or ""
         opening_shot["on_screen_text"] = shot_on_screen_text(head, opening_shot["voiceover"])
@@ -948,7 +1005,7 @@ def normalize_script(data: dict[str, Any], production: dict[str, Any], fallback:
 
 
 def merge_opening_script(script: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
-    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
+    opening = dict((production.get("decomposition") or {}).get("opening") or {})
     end_ms = int(opening.get("end_ms") or 0)
     if end_ms <= 0:
         return script
@@ -989,15 +1046,29 @@ def merge_opening_script(script: dict[str, Any], production: dict[str, Any]) -> 
     head["source_kind"] = "opening"
     head["role"] = "hook"
     head["duration_ms"] = end_ms
-    voices = [str(item.get("voiceover") or "").strip() for item in in_shots if str(item.get("voiceover") or "").strip()]
-    screens = [str(item.get("on_screen_text") or "").strip() for item in in_shots if str(item.get("on_screen_text") or "").strip()]
+    voices = [
+        str(item.get("voiceover") or "").strip()
+        for item in in_shots
+        if str(item.get("voiceover") or "").strip()
+    ]
+    screens = [
+        str(item.get("on_screen_text") or "").strip()
+        for item in in_shots
+        if str(item.get("on_screen_text") or "").strip()
+    ]
     if voices:
         head["voiceover"] = " ".join(voices)
     if screens:
         head["on_screen_text"] = screens[0]
     head["visual"] = head.get("visual") or "开头连续镜头"
     plan = production.get("replace_plan") or {}
-    generate_all = bool(re.search(r"全部新生成|全部生成|all generate|generate all", str(production.get("brief") or ""), re.I))
+    generate_all = bool(
+        re.search(
+            r"全部新生成|全部生成|all generate|generate all",
+            str(production.get("brief") or ""),
+            re.I,
+        )
+    )
     if generate_all or opening_block_generate(plan, opening, generate_all):
         head["action"] = "generate"
         if not head.get("prompt"):

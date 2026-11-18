@@ -90,11 +90,17 @@ class CodexAppServer:
                 logger.warning("Discarded non-JSON Codex output: %s", line[:300])
                 continue
             self._handle_message(message)
+        exit_code = self.proc.poll() if self.proc else None
+        if self.proc and exit_code is None:
+            try:
+                exit_code = self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                exit_code = self.proc.poll()
         with self._lock:
             if self._closed:
                 return
             detail = self.stderr or (
-                f"智能中枢运行时异常退出（代码 {self.proc.poll()}）" if self.proc else "智能中枢运行时已退出"
+                f"智能中枢运行时异常退出（代码 {exit_code}）" if self.proc else "智能中枢运行时已退出"
             )
             for waiter in self._pending.values():
                 waiter["error"] = detail

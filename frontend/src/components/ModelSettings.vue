@@ -44,6 +44,7 @@ const MULTIMODAL_PROVIDERS = [
 ]
 const VIDEO_PROVIDERS = [
   { value: 'local_ffmpeg', label: 'local_ffmpeg（本地默认）' },
+  { value: 'seedance', label: 'seedance（Acore 内网）' },
   { value: 'openai_compatible', label: 'openai_compatible' },
   { value: 'generic_http', label: 'generic_http' },
 ]
@@ -59,6 +60,7 @@ function emptyProvider() {
     upload_url: '',
     token_url: '',
     source: '',
+    resolution: '720p',
     model: '',
     max_tokens: 12000,
     timeout_seconds: 120,
@@ -138,6 +140,8 @@ function providerPayload(name) {
     payload.max_tokens = Number(source.max_tokens) || 12000
   }
   if (name === 'video_generator') {
+    payload.source = source.source || ''
+    payload.resolution = source.resolution || '720p'
     payload.fallback_to_local = Boolean(source.fallback_to_local)
   }
   if (name === 'tts') {
@@ -221,6 +225,18 @@ function keyPlaceholder(name) {
   if (clearKey[name]) return '将在保存后清除'
   if (form[name].api_key_set) return '已设置，留空则保留'
   return '未设置'
+}
+
+function applyVideoProviderDefaults() {
+  if (form.video_generator.provider !== 'seedance') return
+  form.video_generator.base_url = form.video_generator.base_url || 'https://api.giikin.com'
+  form.video_generator.model = form.video_generator.model || 'seedance-2-0-fast'
+  form.video_generator.source = form.video_generator.source || 'video-fission'
+  form.video_generator.resolution = form.video_generator.resolution || '720p'
+  form.video_generator.timeout_seconds = Math.max(
+    Number(form.video_generator.timeout_seconds) || 0,
+    360,
+  )
 }
 
 onMounted(loadSettings)
@@ -319,7 +335,7 @@ onMounted(loadSettings)
           <legend>视频生成</legend>
           <label>
             提供者
-            <select v-model="form.video_generator.provider">
+            <select v-model="form.video_generator.provider" @change="applyVideoProviderDefaults">
               <option v-for="item in VIDEO_PROVIDERS" :key="item.value" :value="item.value">
                 {{ item.label }}
               </option>
@@ -328,12 +344,25 @@ onMounted(loadSettings)
           <template v-if="needsRemoteFields(form.video_generator.provider)">
             <label>
               接口地址
-              <input v-model="form.video_generator.base_url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
+              <input v-model="form.video_generator.base_url" type="url" placeholder="https://api.giikin.com" autocomplete="off" />
             </label>
             <label>
               模型
-              <input v-model="form.video_generator.model" type="text" autocomplete="off" />
+              <input v-model="form.video_generator.model" type="text" placeholder="seedance-2.0-flash" autocomplete="off" />
             </label>
+            <template v-if="form.video_generator.provider === 'seedance'">
+              <label>
+                来源标识
+                <input v-model="form.video_generator.source" type="text" placeholder="video-fission" autocomplete="off" />
+              </label>
+              <label>
+                分辨率
+                <select v-model="form.video_generator.resolution">
+                  <option value="480p">480p</option>
+                  <option value="720p">720p</option>
+                </select>
+              </label>
+            </template>
             <label>
               API 密钥
               <input

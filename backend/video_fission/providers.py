@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from . import media
@@ -13,6 +17,15 @@ from . import media
 
 class ProviderError(RuntimeError):
     pass
+
+
+class ProviderCancelled(ProviderError):
+    pass
+
+
+SEEDANCE_SUBMIT_PATH = "/acore/model/v1/task/generate/video"
+SEEDANCE_TASK_PATH = "/acore/model/v1/task/video/{task_id}"
+SEEDANCE_MODELS_PATH = "/acore/model/v1/models"
 
 
 def chat_completions(
@@ -101,8 +114,26 @@ def generate_remote_video(
     fps: float,
     timeout: int,
     dest: Path,
+    source: str = "",
+    resolution: str = "720p",
+    cancel: Event | None = None,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if provider == "seedance":
+        return generate_seedance_video(
+            base_url,
+            api_key,
+            model,
+            prompt,
+            duration_ms,
+            width,
+            height,
+            timeout,
+            dest,
+            source=source,
+            resolution=resolution,
+            cancel=cancel,
+        )
     payload = {
         "model": model,
         "prompt": prompt,
@@ -142,20 +173,312 @@ def generate_remote_video(
     video_url = parsed.get("url")
     job_id = parsed.get("job_id")
     if job_id and not video_url:
-        video_url = _poll_job(base_url, api_key, job_id, timeout)
+        video_url = _poll_job(base_url, api_key, job_id, timeout, cancel)
     if not video_url:
         raise ProviderError("视频生成响应缺少 url")
-    _download(video_url, dest, api_key, timeout)
+    _download(video_url, dest, api_key, timeout, base_url)
     return dest
 
 
-def _poll_job(base_url: str, api_key: str, job_id: str, timeout: int) -> str:
-    import time
+def generate_seedance_video(
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    duration_ms: int,
+    width: int,
+    height: int,
+    timeout: int,
+    dest: Path,
+    source: str = "",
+    resolution: str = "720p",
+    cancel: Event | None = None,
+) -> Path:
+    _raise_if_cancelled(cancel)
+    if not base_url:
+        raise ProviderError("Seedance 未配置 base_url")
+    if not api_key:
+        raise ProviderError("Seedance 未配置 API Key")
+    model = _seedance_model(model)
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "duration": max(1, int(math.ceil(max(duration_ms, 1) / 1000))),
+        "mode": "async_poll",
+        "source": source or "video-fission",
+        "aspect_ratio": _seedance_aspect_ratio(width, height),
+        "output_format": "mp4",
+        "options": {
+            "resolution": resolution if resolution in {"480p", "720p"} else "720p",
+            "watermark": False,
+            "generate_audio": True,
+            "return_last_frame": False,
+        },
+    }
+    submit_url = _seedance_endpoint(base_url, SEEDANCE_SUBMIT_PATH)
+    response = _request_seedance(
+        submit_url,
+        api_key,
+        timeout=min(max(timeout, 5), 120),
+        payload=payload,
+    )
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise ProviderError(f"Seedance 提交失败：{_provider_message(response)}")
+    task_id = str(data.get("task_id") or data.get("taskId") or "").strip()
+    if not task_id:
+        raise ProviderError(f"Seedance 提交响应缺少 task_id：{_provider_message(response)}")
+    # The submit response currently returns a gateway-local /api/v1/tasks path
+    # that is not exposed on api.giikin.com. The documented /acore route is the
+    # stable task query endpoint.
+    deadline = time.monotonic() + max(timeout, 10)
+    last_status = ""
+    while time.monotonic() < deadline:
+        _raise_if_cancelled(cancel)
+        query_url = _seedance_query_url(base_url, task_id)
+        task = _request_seedance(query_url, api_key, timeout=min(30, max(timeout, 5)))
+        task_data = task.get("data")
+        if not isinstance(task_data, dict):
+            message = _provider_message(task)
+            if "不存在" in message:
+                time.sleep(1)
+                continue
+            raise ProviderError(f"Seedance 任务查询失败：{message}")
+        last_status = str(task_data.get("status") or "").strip().lower()
+        if last_status == "completed":
+            video_url = _seedance_video_url(task_data)
+            if not video_url:
+                raise ProviderError("Seedance 任务已完成但未返回视频 URL")
+            _download_seedance_video(video_url, dest, api_key, timeout, base_url)
+            return dest
+        if last_status in {"failed", "cancelled", "canceled"}:
+            error = task_data.get("error")
+            detail = ""
+            if isinstance(error, dict):
+                detail = str(error.get("message") or error.get("code") or "")
+            raise ProviderError(f"Seedance 任务{last_status}：{detail or _provider_message(task)}")
+        if cancel is not None:
+            cancel.wait(2)
+        else:
+            time.sleep(2)
+    suffix = f"，最后状态 {last_status}" if last_status else ""
+    raise ProviderError(f"Seedance 视频生成超时{suffix}")
 
+
+def probe_seedance(base_url: str, api_key: str, timeout: int, model: str = "") -> dict[str, Any]:
+    if not base_url:
+        return {"ok": False, "provider": "seedance", "detail": "未配置 base_url"}
+    if not api_key:
+        return {"ok": False, "provider": "seedance", "detail": "未配置 API Key"}
+    url = _seedance_endpoint(base_url, SEEDANCE_MODELS_PATH)
+    request = urllib.request.Request(url, headers=_seedance_headers(api_key), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=min(max(timeout, 5), 20)) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        models = payload.get("data")
+        if not isinstance(models, list):
+            return {"ok": False, "provider": "seedance", "detail": "模型列表响应格式无效"}
+        model_ids = {
+            str(item.get("id") or "")
+            for item in models
+            if isinstance(item, dict) and item.get("id")
+        }
+        expected = _seedance_model(model)
+        if expected not in model_ids:
+            return {
+                "ok": False,
+                "provider": "seedance",
+                "detail": f"模型未启用：{expected}",
+            }
+        return {
+            "ok": True,
+            "provider": "seedance",
+            "detail": f"模型已启用：{expected}",
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return {"ok": False, "provider": "seedance", "detail": f"认证失败 HTTP {exc.code}"}
+        return {"ok": False, "provider": "seedance", "detail": f"探活失败 HTTP {exc.code}"}
+    except Exception as exc:
+        return {"ok": False, "provider": "seedance", "detail": f"探活失败：{exc.__class__.__name__}"}
+
+
+def _request_seedance(
+    url: str,
+    api_key: str,
+    *,
+    timeout: int,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=_seedance_headers(api_key),
+        method="POST" if body is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise ProviderError(f"Seedance 认证失败 HTTP {exc.code}") from exc
+        raise ProviderError(f"Seedance 请求失败 HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise ProviderError(f"Seedance 请求失败：{exc.__class__.__name__}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProviderError("Seedance 返回了非 JSON 响应") from exc
+    if not isinstance(parsed, dict):
+        raise ProviderError("Seedance 返回结构不是对象")
+    return parsed
+
+
+def _seedance_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _seedance_endpoint(base_url: str, path: str) -> str:
+    parsed = urllib.parse.urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    if base_path.endswith(path):
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path, parsed.query, ""))
+    marker = "/acore/model/v1"
+    marker_index = base_path.find(marker)
+    if marker_index >= 0:
+        base_path = base_path[:marker_index]
+    elif base_path.endswith("/acore"):
+        base_path = base_path[:-len("/acore")]
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path + path, "", ""))
+
+
+def _seedance_query_url(base_url: str, task_id: str) -> str:
+    return _seedance_endpoint(base_url, SEEDANCE_TASK_PATH.format(task_id=task_id))
+
+
+def _seedance_aspect_ratio(width: int, height: int) -> str:
+    width = max(int(width), 1)
+    height = max(int(height), 1)
+    ratio = width / height
+    if ratio < 0.9:
+        return "9:16"
+    if ratio > 2.1:
+        return "21:9"
+    if 0.98 <= ratio <= 1.02:
+        return "adaptive"
+    return "16:9"
+
+
+def _seedance_model(model: str) -> str:
+    value = str(model or "").strip().lower()
+    if value in {"", "seedance-2.0-flash", "seedance-2-0-fast", "seedance-2.0-fast", "flash"}:
+        return "seedance-2-0-fast"
+    if value in {"seedance-2.0", "seedance-2-0", "seedance-2.0-pro", "pro"}:
+        return "seedance-2-0"
+    return str(model).strip()
+
+
+def _provider_message(payload: dict[str, Any]) -> str:
+    text = str(payload.get("msg") or payload.get("message") or "").strip()
+    if text:
+        return text[:240]
+    data = payload.get("data")
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("code") or "")[:240]
+    code = payload.get("code")
+    biz_code = payload.get("bizCode")
+    return f"code={code}, bizCode={biz_code}" if code is not None or biz_code is not None else "未知错误"
+
+
+def _seedance_video_url(task_data: dict[str, Any]) -> str:
+    result = task_data.get("result")
+    if isinstance(result, dict):
+        video = result.get("video")
+        if isinstance(video, dict):
+            url = str(video.get("url") or "").strip()
+            if url:
+                return url
+    response_body = task_data.get("responseBody")
+    if isinstance(response_body, str) and response_body.strip():
+        try:
+            response_body = json.loads(response_body)
+        except json.JSONDecodeError:
+            response_body = None
+    found = _find_video_url(response_body)
+    if found:
+        return found
+    return _find_video_url(task_data)
+
+
+def _find_video_url(value: Any) -> str:
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith(("http://", "https://", "data:video/")):
+            return candidate
+        if candidate.startswith("{") or candidate.startswith("["):
+            try:
+                return _find_video_url(json.loads(candidate))
+            except json.JSONDecodeError:
+                return ""
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            found = _find_video_url(item)
+            if found:
+                return found
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    for key in ("video", "video_url", "videoUrl", "url", "result", "data", "output", "responseBody"):
+        if key not in value:
+            continue
+        found = _find_video_url(value[key])
+        if found:
+            return found
+    return ""
+
+
+def _download_seedance_video(
+    url: str,
+    dest: Path,
+    api_key: str,
+    timeout: int,
+    api_base_url: str,
+) -> None:
+    request = urllib.request.Request(
+        url,
+        headers=_media_download_headers(api_base_url, url, api_key),
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        content_type = response.headers.get("Content-Type", "")
+        data = response.read()
+    if "json" in content_type or "html" in content_type:
+        raise ProviderError("Seedance 视频下载地址返回了非视频内容")
+    if not data:
+        raise ProviderError("Seedance 视频下载结果为空")
+    dest.write_bytes(data)
+
+
+def _poll_job(
+    base_url: str,
+    api_key: str,
+    job_id: str,
+    timeout: int,
+    cancel: Event | None = None,
+) -> str:
     url = base_url.rstrip("/") + f"/jobs/{job_id}"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     deadline = time.time() + max(timeout, 5)
     while time.time() < deadline:
+        _raise_if_cancelled(cancel)
         request = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(request, timeout=20) as response:
             parsed = json.loads(response.read().decode("utf-8"))
@@ -164,15 +487,33 @@ def _poll_job(base_url: str, api_key: str, job_id: str, timeout: int) -> str:
             return str(parsed["url"])
         if status in {"failed", "error"}:
             raise ProviderError("视频生成任务失败")
-        time.sleep(1.5)
+        if cancel is not None:
+            cancel.wait(1.5)
+        else:
+            time.sleep(1.5)
     raise ProviderError("视频生成任务超时")
 
 
-def _download(url: str, dest: Path, api_key: str, timeout: int) -> None:
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+def _download(url: str, dest: Path, api_key: str, timeout: int, api_base_url: str) -> None:
+    headers = _media_download_headers(api_base_url, url, api_key)
     request = urllib.request.Request(url, headers=headers, method="GET")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         dest.write_bytes(response.read())
+
+
+def _media_download_headers(api_base_url: str, media_url: str, api_key: str) -> dict[str, str]:
+    if not api_key:
+        return {}
+    api_host = urllib.parse.urlsplit(api_base_url).netloc.lower()
+    media_host = urllib.parse.urlsplit(media_url).netloc.lower()
+    if api_host and api_host == media_host:
+        return {"Authorization": f"Bearer {api_key}"}
+    return {}
+
+
+def _raise_if_cancelled(cancel: Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise ProviderCancelled("视频生成已取消")
 
 
 def synthesize_speech(

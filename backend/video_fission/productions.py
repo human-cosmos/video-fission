@@ -9,8 +9,9 @@ from typing import Any
 
 from . import media
 from .config import Settings
-from .db import Database
 from .conversation_cards import cards_for, stable_item_id, upload_media_url
+from .db import Database
+from .paths import production_artifact_dir, user_artifact_root, user_upload_root, user_workspace
 from .pipeline import PipelineEngine
 from .replace import normalize_replace_policy, resolve_replace_plan
 from .settings_store import SettingsStore
@@ -46,13 +47,20 @@ class ProductionService:
         self._cancels: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
 
-    def save_upload(self, filename: str, content_type: str, data_iter, size_hint: int | None = None) -> dict[str, Any]:
+    def save_upload(
+        self,
+        filename: str,
+        content_type: str,
+        data_iter,
+        size_hint: int | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         original = Path(filename or "reference.mp4").name
         suffix = Path(original).suffix.lower()[:12] or ".mp4"
         if suffix not in VIDEO_SUFFIXES and (content_type or "") not in VIDEO_CONTENT_TYPES:
             raise ValueError("只接受 mp4 / mov / webm / m4v 参考视频")
         upload_id = f"upl_{uuid.uuid4().hex[:24]}"
-        dest_dir = self.settings.uploads_dir / "productions"
+        dest_dir = user_upload_root(self.settings.uploads_dir, user_id, production=True)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{upload_id}{suffix}"
         total = 0
@@ -72,6 +80,7 @@ class ProductionService:
         record = self.db.create_video_upload(
             {
                 "id": upload_id,
+                "user_id": user_id,
                 "name": original,
                 "path": str(dest.resolve()),
                 "size": total,
@@ -100,13 +109,14 @@ class ProductionService:
         replace_policy: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         source_item_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         brief = (brief or "").strip()
         if not brief:
             raise ValueError("brief 必填")
         if len(brief) > 20_000:
             raise ValueError("brief 最长 20000 字")
-        upload = self.db.get_video_upload(video_upload_id)
+        upload = self.db.get_video_upload(video_upload_id, user_id)
         if not upload:
             raise ValueError("参考视频不存在")
         production_id = f"prd_{uuid.uuid4().hex[:24]}"
@@ -121,11 +131,12 @@ class ProductionService:
             "fps": upload["fps"],
         }
         bound_conversation = (conversation_id or "").strip() or None
-        if bound_conversation and not self.db.get_conversation(bound_conversation):
+        if bound_conversation and not self.db.get_conversation(bound_conversation, user_id):
             raise ValueError("对话不存在")
         self.db.create_production(
             {
                 "id": production_id,
+                "user_id": user_id,
                 "title": title_text,
                 "brief": brief,
                 "status": "draft",
@@ -146,7 +157,7 @@ class ProductionService:
                 "source_item_id": (source_item_id or "").strip() or None,
             }
         )
-        public = self.public(production_id)
+        public = self.public(production_id, user_id=user_id)
         self.sync_conversation_cards(production_id)
         return public
 
@@ -157,8 +168,9 @@ class ProductionService:
         brief: str | None = None,
         replace_policy: dict[str, Any] | None = None,
         conversation_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
-        production = self.db.get_production(production_id)
+        production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] == "running":
@@ -186,25 +198,29 @@ class ProductionService:
             if current and current != desired:
                 raise ProductionConflict("已绑定的创作任务不能改到另一个对话")
             if desired:
-                if not self.db.get_conversation(desired):
+                if not self.db.get_conversation(desired, user_id):
                     raise ValueError("对话不存在")
                 updates["conversation_id"] = desired
         if updates:
             self.db.update_production(production_id, updates)
-        public = self.public(production_id)
+        public = self.public(production_id, user_id=user_id)
         if "conversation_id" in updates:
             self.sync_conversation_cards(production_id)
         return public
 
-    def get(self, production_id: str) -> dict[str, Any]:
-        production = self.db.get_production(production_id)
+    def get(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
         return self._to_public(production)
 
-    def list_items(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+    def list_items(
+        self,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         items = []
-        for production in self.db.list_productions(conversation_id=conversation_id):
+        for production in self.db.list_productions(conversation_id=conversation_id, user_id=user_id):
             public = self._to_public(production)
             items.append(
                 {
@@ -222,8 +238,8 @@ class ProductionService:
             )
         return items
 
-    def public(self, production_id: str) -> dict[str, Any]:
-        return self.get(production_id)
+    def public(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
+        return self.get(production_id, user_id=user_id)
 
     def run(
         self,
@@ -231,8 +247,9 @@ class ProductionService:
         wait: bool = False,
         replace_policy: dict[str, Any] | None = None,
         resume_from: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
-        production = self.db.get_production(production_id)
+        production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] == "running":
@@ -264,7 +281,7 @@ class ProductionService:
             finally:
                 with self._lock:
                     self._cancels.pop(production_id, None)
-            return self.public(production_id)
+            return self.public(production_id, user_id=user_id)
         thread = threading.Thread(
             target=self._run_thread,
             args=(production_id, cancel, resume),
@@ -274,7 +291,7 @@ class ProductionService:
         with self._lock:
             self._threads[production_id] = thread
         thread.start()
-        return self.public(production_id)
+        return self.public(production_id, user_id=user_id)
 
     def _resolve_resume_from(
         self,
@@ -294,8 +311,8 @@ class ProductionService:
             return "intent"
         return None
 
-    def cancel(self, production_id: str) -> dict[str, Any]:
-        production = self.db.get_production(production_id)
+    def cancel(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] in {"completed", "failed"}:
@@ -306,38 +323,68 @@ class ProductionService:
             event.set()
         if production["status"] != "running":
             self.db.update_production(production_id, {"status": "cancelled"})
-        public = self.public(production_id)
+        public = self.public(production_id, user_id=user_id)
         self.sync_conversation_cards(production_id)
         return public
 
-    def delete(self, production_id: str) -> None:
-        production = self.db.get_production(production_id)
+    def delete(self, production_id: str, user_id: str | None = None) -> None:
+        production = self.db.get_production(production_id, user_id)
         if not production:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] == "running":
             raise ProductionConflict("运行中的任务请先取消")
         upload_id = production.get("video_upload_id") or production.get("source_video", {}).get("upload_id")
-        artifact_dir = self.settings.artifacts_dir / "productions" / production_id
+        artifact_dir = production_artifact_dir(
+            self.settings.artifacts_dir,
+            production.get("user_id"),
+            production_id,
+        )
+        legacy_artifact_dir = self.settings.artifacts_dir / "productions" / production_id
         self.db.delete_production(production_id)
         shutil.rmtree(artifact_dir, ignore_errors=True)
+        if legacy_artifact_dir != artifact_dir:
+            shutil.rmtree(legacy_artifact_dir, ignore_errors=True)
         if upload_id and self.db.count_productions_for_upload(upload_id) == 0:
             upload = self.db.get_video_upload(upload_id)
             if upload:
                 Path(upload["path"]).unlink(missing_ok=True)
                 self.db.delete_video_upload(upload_id)
 
-    def events(self, production_id: str, after_id: int = 0) -> list[dict[str, Any]]:
-        if not self.db.get_production(production_id):
+    def events(
+        self,
+        production_id: str,
+        after_id: int = 0,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.db.get_production(production_id, user_id):
             raise ProductionNotFound("创作任务不存在")
-        return self.db.list_production_events(production_id, after_id=after_id)
+        return self.db.list_production_events(
+            production_id,
+            after_id=after_id,
+            user_id=user_id,
+        )
 
-    def artifact_path(self, production_id: str, name: str) -> Path:
-        if not self.db.get_production(production_id):
+    def artifact_path(
+        self,
+        production_id: str,
+        name: str,
+        user_id: str | None = None,
+    ) -> Path:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
             raise ProductionNotFound("创作任务不存在")
         if not name or name != Path(name).name or ".." in name or "/" in name or "\\" in name:
             raise ValueError("非法文件名")
-        path = (self.settings.artifacts_dir / "productions" / production_id / name).resolve()
-        root = (self.settings.artifacts_dir / "productions" / production_id).resolve()
+        artifact_root = production_artifact_dir(
+            self.settings.artifacts_dir,
+            production.get("user_id"),
+            production_id,
+        )
+        legacy_root = self.settings.artifacts_dir / "productions" / production_id
+        if user_id and not (artifact_root / name).is_file() and (legacy_root / name).is_file():
+            artifact_root = legacy_root
+        path = (artifact_root / name).resolve()
+        root = artifact_root.resolve()
         if root not in path.parents and path != root:
             raise ValueError("非法文件名")
         if not path.is_file():
@@ -352,19 +399,25 @@ class ProductionService:
         replace_policy: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         source_item_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         if not video_upload_id and source_path:
-            video_upload_id = self._register_existing_path(source_path)
+            video_upload_id = self._register_existing_path(source_path, user_id)
         if not video_upload_id:
             raise ValueError("需要 video_upload_id 或已上传文件路径")
         brief_text = (brief or "").strip()
         conversation = (conversation_id or "").strip() or None
         if source_item_id:
-            existing = self.db.find_production_by_source_item(source_item_id)
+            existing = self.db.find_production_by_source_item(source_item_id, user_id)
             if existing:
                 return self._to_public(existing)
         if conversation:
-            existing = self.db.find_duplicate_production(conversation, video_upload_id, brief_text)
+            existing = self.db.find_duplicate_production(
+                conversation,
+                video_upload_id,
+                brief_text,
+                user_id,
+            )
             if existing:
                 return self._to_public(existing)
         production = self.create(
@@ -374,24 +427,42 @@ class ProductionService:
             replace_policy=replace_policy,
             conversation_id=conversation,
             source_item_id=source_item_id,
+            user_id=user_id,
         )
-        return self.run(production["id"])
+        return self.run(production["id"], user_id=user_id)
 
-    def upload_media_path(self, upload_id: str) -> tuple[Path, dict[str, Any]]:
+    def upload_media_path(
+        self,
+        upload_id: str,
+        user_id: str | None = None,
+    ) -> tuple[Path, dict[str, Any]]:
         if not UPLOAD_ID_RE.match(upload_id or ""):
             raise ValueError("非法上传标识")
-        record = self.db.get_video_upload(upload_id)
+        record = self.db.get_video_upload(upload_id, user_id)
         if not record:
             raise ProductionNotFound("参考视频不存在")
         path = Path(record["path"]).expanduser().resolve()
-        root = (self.settings.uploads_dir / "productions").resolve()
-        if root not in path.parents and path.parent != root:
+        root = user_upload_root(
+            self.settings.uploads_dir,
+            user_id,
+            production=True,
+        ).resolve()
+        legacy_root = (self.settings.uploads_dir / "productions").resolve()
+        allowed_roots = [root]
+        if user_id:
+            allowed_roots.append(legacy_root)
+        if not any(allowed == path or allowed in path.parents for allowed in allowed_roots):
             raise ValueError("非法文件路径")
         if not path.is_file():
             raise FileNotFoundError("参考视频不存在")
         return path, record
 
-    def sync_conversation_cards(self, production_id: str, kind: str | None = None, payload: dict[str, Any] | None = None) -> None:
+    def sync_conversation_cards(
+        self,
+        production_id: str,
+        kind: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         production = self.db.get_production(production_id)
         if not production:
             return
@@ -399,7 +470,14 @@ class ProductionService:
         if not conversation_id or not self.db.get_conversation(conversation_id):
             return
         public = self._to_public(production)
-        artifact_dir = self.settings.artifacts_dir / "productions" / production_id
+        artifact_dir = production_artifact_dir(
+            self.settings.artifacts_dir,
+            production.get("user_id"),
+            production_id,
+        )
+        legacy_artifact_dir = self.settings.artifacts_dir / "productions" / production_id
+        if not artifact_dir.is_dir() and legacy_artifact_dir.is_dir():
+            artifact_dir = legacy_artifact_dir
         last_item = None
         for item_type, card_payload in cards_for(public, artifact_dir if artifact_dir.is_dir() else None):
             last_item = self.db.upsert_item(
@@ -435,13 +513,13 @@ class ProductionService:
             },
         )
 
-    def _register_existing_path(self, source_path: str) -> str:
+    def _register_existing_path(self, source_path: str, user_id: str | None = None) -> str:
         path = Path(source_path).expanduser().resolve()
         # Allow workspace, uploads, artifacts, fixtures
         allowed_roots = [
-            self.settings.uploads_dir.resolve(),
-            self.settings.workspace.resolve(),
-            self.settings.artifacts_dir.resolve(),
+            user_upload_root(self.settings.uploads_dir, user_id).resolve(),
+            user_workspace(self.settings.workspace, user_id).resolve(),
+            user_artifact_root(self.settings.artifacts_dir, user_id).resolve(),
             (self.settings.project_root / "backend" / "tests" / "fixtures").resolve(),
         ]
         if not any(root == path or root in path.parents for root in allowed_roots):
@@ -450,13 +528,14 @@ class ProductionService:
             raise ValueError("参考视频不存在")
         info = media.probe(path)
         upload_id = f"upl_{uuid.uuid4().hex[:24]}"
-        dest_dir = self.settings.uploads_dir / "productions"
+        dest_dir = user_upload_root(self.settings.uploads_dir, user_id, production=True)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{upload_id}{path.suffix or '.mp4'}"
         dest.write_bytes(path.read_bytes())
         self.db.create_video_upload(
             {
                 "id": upload_id,
+                "user_id": user_id,
                 "name": path.name,
                 "path": str(dest),
                 "size": dest.stat().st_size,

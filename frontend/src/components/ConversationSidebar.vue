@@ -193,12 +193,12 @@ const filtered = computed(() => {
         data-testid="mode-settings"
         :class="{ active: settingsActive }"
         :aria-pressed="settingsActive"
-        aria-label="模型设置"
-        title="模型设置"
+        aria-label="系统设置"
+        title="系统设置"
         @click="$emit('open-settings')"
       >
         <Settings2 :size="15" />
-        <span>模型设置</span>
+        <span>系统设置</span>
       </button>
     </footer>
 

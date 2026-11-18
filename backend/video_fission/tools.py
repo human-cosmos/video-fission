@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .paths import conversation_artifact_dir
 
 
 @dataclass(frozen=True)
@@ -108,8 +109,25 @@ def _slug(text: str) -> str:
 def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productions=None) -> ToolRegistry:
     registry = ToolRegistry(db, workspace.resolve(), artifacts_dir.resolve())
 
+    def conversation_row(context: dict[str, Any]) -> dict[str, Any]:
+        conversation_id = str(context.get("conversation_id") or "")
+        row = db.get_conversation(conversation_id)
+        if not row:
+            raise ValueError("当前对话不存在")
+        return row
+
+    def conversation_user(context: dict[str, Any]) -> str | None:
+        conversation_id = str(context.get("conversation_id") or "")
+        row = db.get_conversation(conversation_id) if conversation_id else None
+        return str((row or {}).get("user_id") or "").strip() or None
+
+    def conversation_workspace(context: dict[str, Any]) -> Path:
+        row = conversation_row(context)
+        return Path(str(row.get("cwd") or registry.workspace)).expanduser().resolve()
+
     def workspace_snapshot(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        root = _safe_relative(str(arguments.get("path") or "."), registry.workspace)
+        workspace_root = conversation_workspace(context)
+        root = _safe_relative(str(arguments.get("path") or "."), workspace_root)
         limit = min(max(int(arguments.get("limit") or 80), 1), 200)
         entries: list[dict[str, Any]] = []
         truncated = False
@@ -121,7 +139,7 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 break
             try:
                 resolved = path.resolve()
-                if resolved != registry.workspace and registry.workspace not in resolved.parents:
+                if resolved != workspace_root and workspace_root not in resolved.parents:
                     continue
                 kind = "directory" if resolved.is_dir() else "file" if resolved.is_file() else "other"
                 size = resolved.stat().st_size if kind == "file" else None
@@ -129,25 +147,26 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 continue
             entries.append(
                 {
-                    "path": str(resolved.relative_to(registry.workspace)),
+                    "path": str(resolved.relative_to(workspace_root)),
                     "kind": kind,
                     "size": size,
                 }
             )
         return {
-            "workspace": str(registry.workspace),
+            "workspace": str(workspace_root),
             "entries": entries,
             "truncated": truncated,
         }
 
     def read_workspace_file(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        path = _safe_relative(str(arguments.get("path") or ""), registry.workspace)
+        workspace_root = conversation_workspace(context)
+        path = _safe_relative(str(arguments.get("path") or ""), workspace_root)
         if not path.is_file():
             raise ValueError("File does not exist")
         if path.stat().st_size > 200_000:
             raise ValueError("File is larger than 200 KB")
         return {
-            "path": str(path.relative_to(registry.workspace)),
+            "path": str(path.relative_to(workspace_root)),
             "text": path.read_text(encoding="utf-8", errors="replace"),
         }
 
@@ -173,7 +192,12 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         duration = min(max(int(arguments.get("duration_seconds") or 30), 5), 600)
         angle = str(arguments.get("angle") or "高信息密度、强节奏的开场").strip()[:500]
         conversation_id = str(context.get("conversation_id") or "shared")
-        folder = registry.artifacts_dir / conversation_id
+        row = conversation_row(context)
+        folder = conversation_artifact_dir(
+            registry.artifacts_dir,
+            row.get("user_id"),
+            conversation_id,
+        )
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{_slug(topic)}.md"
         hook_end = min(3, max(1, duration // 4))
@@ -313,12 +337,21 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         source_path = str(arguments.get("source_path") or arguments.get("path") or "").strip() or None
         policy = arguments.get("replace_policy")
         conversation_id = str(arguments.get("conversation_id") or context.get("conversation_id") or "").strip() or None
+        user_id = conversation_user(context)
+        if conversation_id:
+            owned = db.get_conversation(conversation_id, user_id)
+            if not owned:
+                raise ValueError("目标对话不存在")
+        call_kwargs: dict[str, Any] = {}
+        if user_id is not None:
+            call_kwargs["user_id"] = user_id
         result = productions.start_from_tool(
             brief,
             video_upload_id=upload_id,
             source_path=source_path,
             replace_policy=policy if isinstance(policy, dict) else None,
             conversation_id=conversation_id,
+            **call_kwargs,
         )
         return {
             "production": result,
@@ -329,7 +362,12 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         if productions is None:
             raise ValueError("视频创作管线尚未就绪")
         production_id = str(arguments.get("production_id") or arguments.get("id") or "").strip()
-        result = productions.get(production_id)
+        user_id = conversation_user(context)
+        result = (
+            productions.get(production_id, user_id=user_id)
+            if user_id is not None
+            else productions.get(production_id)
+        )
         return {"production": result}
 
     def run_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -338,11 +376,14 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         production_id = str(arguments.get("production_id") or arguments.get("id") or "").strip()
         policy = arguments.get("replace_policy")
         resume_from = arguments.get("resume_from")
-        result = productions.run(
-            production_id,
-            replace_policy=policy if isinstance(policy, dict) else None,
-            resume_from=str(resume_from).strip() if resume_from else None,
-        )
+        user_id = conversation_user(context)
+        run_kwargs: dict[str, Any] = {
+            "replace_policy": policy if isinstance(policy, dict) else None,
+            "resume_from": str(resume_from).strip() if resume_from else None,
+        }
+        if user_id is not None:
+            run_kwargs["user_id"] = user_id
+        result = productions.run(production_id, **run_kwargs)
         return {
             "production": result,
             "message": f"已重跑创作任务 {result['id']}，状态 {result['status']}",

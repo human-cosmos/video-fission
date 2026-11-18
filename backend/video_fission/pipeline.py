@@ -9,7 +9,8 @@ from typing import Any
 from . import media, providers
 from .config import Settings
 from .db import Database
-from .references import ReferenceLibrary, read_intent_excerpt
+from .paths import production_artifact_dir
+from .references import ReferenceLibrary
 from .replace import apply_replace_plan, resolve_replace_plan, strip_rewrite_instructions
 from .settings_store import SettingsStore
 
@@ -30,9 +31,27 @@ class PipelineEngine:
         self.library = ReferenceLibrary(settings.project_root)
 
     def artifact_dir(self, production_id: str) -> Path:
-        path = self.settings.artifacts_dir / "productions" / production_id
+        production = self.db.get_production(production_id)
+        if not production:
+            raise ValueError("创作任务不存在")
+        path = production_artifact_dir(
+            self.settings.artifacts_dir,
+            production.get("user_id"),
+            production_id,
+        )
+        legacy_path = self.settings.artifacts_dir / "productions" / production_id
+        if production.get("user_id") and not path.exists() and legacy_path.exists():
+            path = legacy_path
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _settings_for_production(
+        self,
+        production_id: str,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        production = self.db.get_production(production_id)
+        user_id = str((production or {}).get("user_id") or "").strip() or None
+        return self.store.raw(user_id)
 
     def artifact_url(self, production_id: str, name: str) -> str:
         return f"/api/productions/{production_id}/artifacts/{name}"
@@ -125,7 +144,10 @@ class PipelineEngine:
                 segment["start_ms"] + int(span * ratio)
                 for ratio in (0.15, 0.5, 0.82)
             ]
-            stamps = [min(max(ts, segment["start_ms"]), max(segment["end_ms"] - 40, segment["start_ms"])) for ts in stamps]
+            stamps = [
+                min(max(ts, segment["start_ms"]), max(segment["end_ms"] - 40, segment["start_ms"]))
+                for ts in stamps
+            ]
             frames = media.extract_frames(src, stamps, art, f"{segment['id']}_frame")
             segment["frames"] = [self.artifact_url(production_id, path.name) for path in frames]
             segment["visual"] = (
@@ -172,7 +194,7 @@ class PipelineEngine:
             )
         decomposition["segments"] = clean_segments
 
-        public, secrets = self.store.raw()
+        public, secrets = self._settings_for_production(production_id)
         mm = public["multimodal"]
         if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
             try:
@@ -201,7 +223,8 @@ class PipelineEngine:
                 "type": "text",
                 "text": (
                     "请根据参考视频关键帧和已有本地切分，返回严格 JSON："
-                    '{"summary": str, "segments":[{"id","role","start_ms","end_ms","summary","visual","audio","on_screen_text","reuse_recommended"}]}。'
+                    '{"summary": str, "segments":[{"id","role","start_ms","end_ms",'
+                    '"summary","visual","audio","on_screen_text","reuse_recommended"}]}。'
                     "角色只能是 hook/value/cta/other。时间必须覆盖整段且不重叠。"
                     f"创作说明：{production['brief']}\n本地切分：{segments}"
                 ),
@@ -238,7 +261,7 @@ class PipelineEngine:
             if not path.is_file():
                 raise ValueError(f"参考文件不存在: {item['path']}")
         intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
-        public, secrets = self.store.raw()
+        public, secrets = self._settings_for_production(production_id)
         mm = public["multimodal"]
         if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
             try:
@@ -319,7 +342,7 @@ class PipelineEngine:
             warnings.append("完整参考脚本不足 3 篇，已尽可能读取现有参考")
             self._emit(production_id, "warning", {"stage": "script", "message": warnings[-1]})
         script = local_script(production)
-        public, secrets = self.store.raw()
+        public, secrets = self._settings_for_production(production_id)
         mm = public["multimodal"]
         if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
             try:
@@ -342,7 +365,8 @@ class PipelineEngine:
                     "content": (
                         "按 universal-ugc-video-script-generation 产出严格 JSON script 对象，"
                         "字段为 total_duration_ms, shots[], audio_plan。"
-                        "shots 需含 id,role,duration_ms,action,source_segment_id,visual,voiceover,on_screen_text,prompt。"
+                        "shots 需含 id,role,duration_ms,action,source_segment_id,"
+                        "visual,voiceover,on_screen_text,prompt。"
                         "action 只能是 reuse 或 generate。reuse 必须带 source_segment_id。"
                         f"创作说明：{production['brief']}\n骨架：{production.get('skeleton')}\n"
                         f"拆解：{production.get('decomposition')}\n参考全文节选：{full_texts[:3]}"
@@ -363,7 +387,7 @@ class PipelineEngine:
         fps = float(source["fps"] or 30)
         src = Path(source["path"])
         art = self.artifact_dir(production_id)
-        public, secrets = self.store.raw()
+        public, secrets = self._settings_for_production(production_id)
         vg = public["video_generator"]
         clips: list[dict[str, Any]] = []
         for shot in script.get("shots") or []:
@@ -459,7 +483,7 @@ class PipelineEngine:
         clip_paths = [Path(item["path"]) for item in clips]
         if not clip_paths:
             raise ValueError("没有可合成的片段")
-        public, _secrets = self.store.raw()
+        public, _secrets = self._settings_for_production(production_id)
         compose = public["compose"]
         shots = script.get("shots") or []
         source_info = production.get("source_video") or {}
@@ -619,7 +643,11 @@ def brief_one_liner(brief: str) -> str:
     return sentence[:80]
 
 
-def local_intent(brief: str, decomposition: dict[str, Any], refs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def local_intent(
+    brief: str,
+    decomposition: dict[str, Any],
+    refs: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     text = brief.strip() or "补一条可投放的短视频"
     hook_seg = next((seg for seg in decomposition.get("segments") or [] if seg.get("role") == "hook"), None)
     value_seg = next((seg for seg in decomposition.get("segments") or [] if seg.get("role") == "value"), None)
@@ -889,7 +917,11 @@ def normalize_model_segments(
                 "visual": str(raw.get("visual") or ""),
                 "audio": str(raw.get("audio") or ""),
                 "on_screen_text": str(raw.get("on_screen_text") or role.upper()),
-                "reuse_recommended": bool(raw.get("reuse_recommended")) if "reuse_recommended" in raw else role == "value",
+                "reuse_recommended": (
+                    bool(raw.get("reuse_recommended"))
+                    if "reuse_recommended" in raw
+                    else role == "value"
+                ),
             }
         )
     if not cleaned:

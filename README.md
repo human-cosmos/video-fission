@@ -1,6 +1,6 @@
 # Video Fission
 
-Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出的独立项目。它只保留 Codex 对话、持久化、Skill 和 Tool，不依赖原项目的用户体系、选品流水线、MongoDB、Redis 或业务前端。
+Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出的独立项目。它保留 Codex 对话、持久化、Skill 和 Tool，并参考原项目加入本地账号、JWT 会话与企业 CAS 单点登录。项目不依赖 MongoDB、Redis 或原业务前端。
 
 ## 已实现
 
@@ -10,6 +10,9 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - SSE 实时事件流，持久化 Agent 回复、推理、计划、命令、文件变更和工具调用轨迹
 - 持续追问（steer）、停止执行、审批和用户澄清
 - 模型与推理强度选择
+- 用户名密码登录、HttpOnly Cookie/Bearer JWT、退出登录和登录失败限流
+- 企业 CAS 单点登录，并将企业账号同步为本地用户
+- 用户会话、模型设置、工作目录、附件、创作任务和产物按用户隔离；Skill / Tool 保持全局
 - 文件上传和附件上下文
 - SQLite 数据存储，默认启用 WAL
 - 项目内 Skill 目录、图形化创建/编辑/启停/删除
@@ -43,13 +46,13 @@ npm install --prefix frontend
 
 打开 `http://127.0.0.1:5173`。
 
-工作台顶栏可在「对话 / 视频创作 / 模型设置」之间切换，原有 Codex 对话能力保持不变。
+工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 
 ### 视频创作
 
 默认无需 API Key。在「视频创作」页上传参考视频（最大 500MB）、填写创作说明后点「开始创作」。页面会展示拆解时间轴、意图与参考脚本路径、分镜、片段预览，完成后可播放并下载 `final.mp4` 和字幕 `final.srt`。刷新后会从已有任务恢复进度。
 
-「模型设置」可配置多模态、视频生成和 TTS 的端点、模型、超时与合成开关，并测试连接。API Key 只写不回显；留空保存表示保留原 Key。开发阶段默认提供者为 `local_ffmpeg`。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+「系统设置」可配置多模态、视频生成和 TTS 的端点、模型、超时与合成开关，并测试连接；同时集中管理全局 Skill、Tool 清单和成员账号。API Key 只写不回显；留空保存表示保留原 Key。开发阶段默认提供者为 `local_ffmpeg`。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
 也可以分别启动：
 
@@ -86,6 +89,15 @@ cd backend
 | `VF_DATA_DIR` | `data` | 数据、附件、产物与 Skill 根目录 |
 | `VF_CODEX_TIMEOUT_SECONDS` | `180` | 单次 RPC 超时 |
 | `VF_APPROVAL_TIMEOUT_SECONDS` | `300` | 审批/澄清等待超时 |
+| `VF_AUTH_REQUIRED` | `true` | 是否启用登录保护；仅自动化测试可显式关闭 |
+| `VF_AUTH_SECRET_KEY` | 自动生成 | JWT 签名密钥，生产环境建议显式配置 `openssl rand -hex 32` |
+| `VF_AUTH_ADMIN_USERNAME` | `admin` | 首次启动时创建的引导管理员 |
+| `VF_AUTH_ADMIN_PASSWORD` | 自动生成 | 首次管理员密码；未配置时写入 `data/bootstrap_admin.txt` |
+| `VF_AUTH_TOKEN_EXPIRE_MINUTES` | `1440` | 登录会话有效分钟数 |
+| `VF_ALLOWED_ORIGINS` | 空 | 额外允许提交认证 API 的浏览器 Origin，逗号分隔；反向代理域名不自动匹配时需配置 |
+| `VF_SSO_CLIENT_ID` / `VF_SSO_CLIENT_SECRET` | 空 | CAS 应用凭证；为空时只提供账号密码登录 |
+| `VF_SSO_CALLBACK_URL` | 按请求生成 | CAS 回调地址，反向代理部署建议显式配置 |
+| `VF_SSO_FRONTEND_URL` | `http://127.0.0.1:5174` | SSO 成功后返回的前端地址 |
 
 环境变量由当前 shell 读取；项目不会自动覆盖已有 `.env`。
 
@@ -94,18 +106,23 @@ cd backend
 ```text
 data/
 ├── video_fission.db       # SQLite
-├── workspace/             # Codex 只读工作区
+├── auth_secret            # 未显式配置时自动生成的 JWT 密钥（600 权限）
+├── bootstrap_admin.txt    # 自动生成的首次管理员密码（600 权限）
+├── workspace/
+│   └── users/{user}/      # 每用户 Codex 隔离工作区
 ├── uploads/               # 对话附件
-│   └── productions/       # 视频创作参考视频（最大 500MB）
+│   └── users/{user}/      # 每用户附件与 productions 参考视频
 ├── artifacts/             # Tool 生成产物
-│   └── productions/{id}/  # 管线产物：关键帧、片段、final.mp4 / final.srt
-├── skills/                # 用户 Skill
-└── skills_disabled/       # 停用的用户 Skill
+│   └── users/{user}/      # 每用户简报、关键帧、片段、final.mp4 / final.srt
+├── skills/                # 全局自定义 Skill
+└── skills_disabled/       # 已停用的全局 Skill
 skills/                    # 随项目分发的内置 Skill
 ```
 
 SQLite 保存以下数据：
 
+- `users`：本地账号、bcrypt 密码哈希、角色与 SSO 身份映射
+- `user_settings`：每用户模型、端点和密钥配置
 - `conversations`：会话设置、Codex Thread ID 和运行状态
 - `items`：对话消息与结构化执行项
 - `events`：可重放的 SSE 事件
@@ -114,6 +131,28 @@ SQLite 保存以下数据：
 - `tool_runs`：动态 Tool 的入参、输出与成功状态
 - `app_settings`：模型与合成设置；密钥单独存，读取只返回 `api_key_set`
 - `video_uploads` / `productions` / `production_events`：参考视频、创作任务和 SSE 事件
+
+## 登录与用户隔离
+
+首次启用认证启动时，系统会创建一个管理员账号。若没有配置 `VF_AUTH_ADMIN_PASSWORD`，随机密码只写入 `data/bootstrap_admin.txt`（权限 `600`）；登录后请立即通过用户 API 修改密码并按需创建成员账号。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/auth/login` | `application/x-www-form-urlencoded`：`username`、`password` |
+| `GET` | `/api/auth/me` | 当前用户 |
+| `POST` | `/api/auth/logout` | 清除登录 Cookie |
+| `GET` | `/api/sso/login` | 获取 CAS 登录地址 |
+| `GET` | `/api/sso/callback` | CAS ticket 回调 |
+| `GET` / `POST` | `/api/users` | 管理员查看或创建用户 |
+| `PATCH` / `DELETE` | `/api/users/{id}` | 管理员更新或删除用户 |
+
+除认证、SSO 入口与健康检查外，所有 `/api` 接口都要求登录。服务端对每个会话、附件、创作任务、事件流和产物下载执行所有权校验；其他用户直接使用已知 ID 访问时统一返回 404。Skill 与 Tool 是全局配置，不在用户之间隔离，相关管理界面统一位于系统设置。SSE 通过同源 HttpOnly Cookie 认证，不把长期令牌放进事件流 URL。
+
+升级旧数据时，首次创建管理员会把原有的未归属会话、创作任务和全局模型设置归入该管理员，避免历史内容丢失。用户自定义目录使用用户 ID 的 SHA-256 短摘要作为目录名，不直接暴露账号或原始 ID。
+
+密码或角色被管理员修改后，该用户的旧 JWT 会因 `token_version` 变化立即失效。删除并重新创建同名账号也不会复用旧令牌。SSO 只会继续已绑定的企业身份；如果同名本地账号尚未绑定企业身份，系统会拒绝自动接管，避免把本地管理员权限直接交给同名企业账号。
+
+所有非只读 API 请求会校验浏览器 `Origin`。反向代理使用新的外部域名时，请把完整 Origin 写入 `VF_ALLOWED_ORIGINS`，并在生产环境显式设置 `VF_SSO_CALLBACK_URL` 与 `VF_SSO_FRONTEND_URL`。
 
 ## 视频创作 API
 
@@ -165,7 +204,7 @@ Tool 定义位于 `backend/video_fission/tools.py`。新增 Tool 时注册名称
 
 参考脚本和全量索引导航位于 `skills/video-references/references/`。意图阶段读取首行骨架和注意项，完整脚本阶段读取至少 3 篇目标脚本全文。
 
-用户可在右侧能力台创建 Skill，文件会写入 `data/skills/<slug>/SKILL.md`；停用时移动到 `data/skills_disabled/<slug>`。
+用户可在「系统设置」中创建全局 Skill，文件会写入 `data/skills/<slug>/SKILL.md`；停用时移动到 `data/skills_disabled/<slug>`。聊天侧能力台只负责查看并引用 Skill。
 
 新增对话或刷新 Runtime 时，应用通过 `skills/extraRoots/set` 注册：
 
@@ -206,7 +245,7 @@ E2E 覆盖：
 1. 页面连接 Codex Runtime
 2. 创建新对话并收到真实模型回复
 3. 调用 `create_video_brief` 并落盘
-4. 创建、停用、重新启用用户 Skill
+4. 在系统设置中创建、停用、重新启用全局 Skill
 5. 刷新页面后恢复会话、工具轨迹和 Skill
 6. 390px 移动端下会话列表和能力抽屉可达
 7. 未创建对话时上传附件，发送后附件不会丢失

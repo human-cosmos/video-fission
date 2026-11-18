@@ -2,15 +2,26 @@ const BASE = '/api'
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {})
+  const token = window.localStorage.getItem('video-fission.token')
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
   if (options.body && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json')
   }
-  const response = await fetch(`${BASE}${path}`, { ...options, headers })
+  const response = await fetch(`${BASE}${path}`, {
+    credentials: 'same-origin',
+    ...options,
+    headers,
+  })
   const contentType = response.headers.get('content-type') || ''
   const data = contentType.includes('application/json')
     ? await response.json()
     : await response.text()
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/')) {
+      window.dispatchEvent(new CustomEvent('video-fission:auth-expired'))
+    }
     const detail = typeof data === 'string' ? data : data.detail || data.message
     const message = Array.isArray(detail)
       ? detail.map((item) => item.msg || String(item)).join('；')
@@ -26,6 +37,21 @@ const json = (method, body) => ({
 })
 
 export const api = {
+  login: (username, password) => {
+    const body = new FormData()
+    body.append('username', username)
+    body.append('password', password)
+    return request('/auth/login', { method: 'POST', body })
+  },
+  me: () => request('/auth/me'),
+  logout: () => request('/auth/logout', { method: 'POST' }),
+  ssoLoginUrl: () => request('/sso/login'),
+  users: () => request('/users'),
+  createUser: (payload) => request('/users', json('POST', payload)),
+  updateUser: (id, payload) =>
+    request(`/users/${encodeURIComponent(id)}`, json('PATCH', payload)),
+  deleteUser: (id) =>
+    request(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   health: () => request('/health'),
   capabilities: () => request('/capabilities'),
   models: (refresh = false) => request(`/models${refresh ? '?refresh=true' : ''}`),

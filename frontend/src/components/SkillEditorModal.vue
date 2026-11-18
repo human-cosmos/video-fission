@@ -81,7 +81,7 @@ function submit() {
       </label>
       <label v-if="!skill">
         <span>标识（可选）</span>
-        <input v-model="form.slug" pattern="[a-zA-Z0-9-]*" placeholder="hook-analysis" />
+        <input v-model="form.slug" pattern="[0-9A-Za-z\\-]*" placeholder="hook-analysis" />
       </label>
       <label>
         <span>一句话描述</span>

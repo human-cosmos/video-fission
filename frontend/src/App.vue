@@ -6,6 +6,7 @@ import {
   Check,
   Clapperboard,
   GitBranch,
+  LogOut,
   Menu,
   MoreHorizontal,
   Paperclip,
@@ -24,7 +25,6 @@ import CapabilityPanel from './components/CapabilityPanel.vue'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
-import SkillEditorModal from './components/SkillEditorModal.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
 import { isRefreshEvent } from './utils/events'
 import {
@@ -36,6 +36,11 @@ import {
   isVideoFile,
   toProductionVideoFile,
 } from './utils/format'
+
+defineProps({
+  currentUser: { type: Object, required: true },
+})
+defineEmits(['logout'])
 
 const conversations = ref([])
 const currentConversation = ref(null)
@@ -58,9 +63,6 @@ const videoInput = ref(null)
 const showArchived = ref(false)
 const mobileSidebar = ref(false)
 const mobileCapabilities = ref(false)
-const skillModalOpen = ref(false)
-const editingSkill = ref(null)
-const skillBusy = ref(false)
 const toast = ref('')
 const streamConnected = ref(false)
 const timeline = ref(null)
@@ -73,6 +75,8 @@ let selectionSequence = 0
 let uploadGeneration = 0
 let toastTimer = null
 let titleBeforeEdit = ''
+let bootstrapPromise = null
+let navigationPromise = null
 
 const MODE_STORAGE_KEY = 'video-fission.workspaceMode'
 const MODE_IDS = WORKSPACE_MODES.map((item) => item.id)
@@ -207,6 +211,22 @@ function setBootError(error) {
 }
 
 async function bootstrap() {
+  if (bootstrapPromise) return bootstrapPromise
+  bootstrapPromise = runBootstrap()
+  try {
+    return await bootstrapPromise
+  } finally {
+    bootstrapPromise = null
+  }
+}
+
+async function waitForAppReady() {
+  while (bootstrapPromise || navigationPromise) {
+    await Promise.all([bootstrapPromise, navigationPromise].filter(Boolean))
+  }
+}
+
+async function runBootstrap() {
   loading.value = true
   bootError.value = ''
   try {
@@ -335,6 +355,16 @@ async function flushScheduledRefresh(conversationId) {
 
 async function selectConversation(id) {
   if (!id) return
+  const operation = selectConversationTask(id)
+  navigationPromise = operation
+  try {
+    return await operation
+  } finally {
+    if (navigationPromise === operation) navigationPromise = null
+  }
+}
+
+async function selectConversationTask(id) {
   workspaceMode.value = 'chat'
   const sequence = ++selectionSequence
   closeStream()
@@ -364,6 +394,17 @@ function openSettings() {
 }
 
 async function newConversation() {
+  await waitForAppReady()
+  const operation = createConversationTask()
+  navigationPromise = operation
+  try {
+    return await operation
+  } finally {
+    if (navigationPromise === operation) navigationPromise = null
+  }
+}
+
+async function createConversationTask() {
   workspaceMode.value = 'chat'
   try {
     const model = currentConversation.value?.model || models.value[0]?.id || null
@@ -511,6 +552,7 @@ async function attachProductionVideo(file, generation) {
 }
 
 async function uploadFiles(event) {
+  await waitForAppReady()
   const files = Array.from(event.target.files || [])
   event.target.value = ''
   if (!files.length) return
@@ -800,50 +842,6 @@ async function deleteConversation() {
   }
 }
 
-async function toggleSkill(slug, enabled) {
-  try {
-    await api.toggleSkill(slug, enabled)
-    await loadCapabilities()
-    notify(enabled ? 'Skill 已启用' : 'Skill 已停用')
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
-function openSkillEditor(skill = null) {
-  editingSkill.value = skill
-  skillModalOpen.value = true
-}
-
-async function saveSkill(payload) {
-  skillBusy.value = true
-  try {
-    if (editingSkill.value) {
-      await api.updateSkill(editingSkill.value.slug, payload)
-    } else {
-      await api.createSkill(payload)
-    }
-    skillModalOpen.value = false
-    await loadCapabilities()
-    notify(editingSkill.value ? 'Skill 已更新' : 'Skill 已创建')
-  } catch (error) {
-    notify(error.message)
-  } finally {
-    skillBusy.value = false
-  }
-}
-
-async function deleteSkill(skill) {
-  if (!window.confirm(`删除 Skill「${skill.name}」？`)) return
-  try {
-    await api.deleteSkill(skill.slug)
-    await loadCapabilities()
-    notify('Skill 已删除')
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
 async function copyReply(text) {
   try {
     await navigator.clipboard.writeText(text)
@@ -869,7 +867,6 @@ function handleShortcut(event) {
   if (event.key === 'Escape') {
     mobileSidebar.value = false
     mobileCapabilities.value = false
-    skillModalOpen.value = false
     return
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
@@ -963,9 +960,9 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <template v-else>
-            <h1>模型设置</h1>
+            <h1>系统设置</h1>
             <div class="conversation-meta">
-              <span class="page-subtitle">密钥只写不回显</span>
+              <span class="page-subtitle">账号、模型、Skill 与 Tool</span>
             </div>
           </template>
         </div>
@@ -1011,6 +1008,19 @@ onBeforeUnmount(() => {
               <button class="danger" @click="deleteConversation">
                 <Trash2 :size="14" /> 永久删除
               </button>
+            </div>
+          </details>
+          <details class="account-menu">
+            <summary class="account-button" :title="currentUser.display_name || currentUser.username">
+              <span>{{ (currentUser.display_name || currentUser.username || 'U')[0].toUpperCase() }}</span>
+              <b>{{ currentUser.display_name || currentUser.username }}</b>
+            </summary>
+            <div class="menu-popover account-popover">
+              <div class="account-summary">
+                <strong>{{ currentUser.display_name || currentUser.username }}</strong>
+                <span>@{{ currentUser.username }} · {{ currentUser.role === 'admin' ? '管理员' : '成员' }}</span>
+              </div>
+              <button @click="$emit('logout')"><LogOut :size="14" /> 退出登录</button>
             </div>
           </details>
           <button
@@ -1201,28 +1211,21 @@ onBeforeUnmount(() => {
       </section>
       </template>
 
-      <ModelSettings v-else-if="workspaceMode === 'settings'" @notify="notify" />
+      <ModelSettings
+        v-else-if="workspaceMode === 'settings'"
+        :current-user="currentUser"
+        @notify="notify"
+        @capabilities-changed="loadCapabilities"
+      />
     </main>
 
     <CapabilityPanel
       v-if="isChatMode"
       :skills="skills"
-      :tools="tools"
       :mobile-open="mobileCapabilities"
-      @create-skill="openSkillEditor()"
-      @edit-skill="openSkillEditor"
-      @delete-skill="deleteSkill"
-      @toggle-skill="toggleSkill"
       @use-skill="useSkill"
+      @open-settings="openSettings"
       @close-mobile="mobileCapabilities = false"
-    />
-
-    <SkillEditorModal
-      :open="skillModalOpen"
-      :skill="editingSkill"
-      :busy="skillBusy"
-      @close="skillModalOpen = false"
-      @save="saveSkill"
     />
 
     <Transition name="toast">

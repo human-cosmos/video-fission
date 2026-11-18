@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from . import media
-from .db import Database, utc_now
+from .db import Database
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "multimodal": {
@@ -52,19 +52,23 @@ class SettingsStore:
     def __init__(self, db: Database):
         self.db = db
 
-    def public_settings(self) -> dict[str, Any]:
-        public, secrets = self._load()
+    def public_settings(self, user_id: str | None = None) -> dict[str, Any]:
+        public, secrets = self._load(user_id)
         return self._mask(public, secrets)
 
-    def secret_for(self, target: str) -> str:
-        _, secrets = self._load()
+    def secret_for(self, target: str, user_id: str | None = None) -> str:
+        _, secrets = self._load(user_id)
         return str(secrets.get(target) or "")
 
-    def raw(self) -> tuple[dict[str, Any], dict[str, str]]:
-        return self._load()
+    def raw(self, user_id: str | None = None) -> tuple[dict[str, Any], dict[str, str]]:
+        return self._load(user_id)
 
-    def update(self, patch: dict[str, Any]) -> dict[str, Any]:
-        public, secrets = self._load()
+    def update(
+        self,
+        patch: dict[str, Any],
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        public, secrets = self._load(user_id)
         for section in ("multimodal", "video_generator", "tts", "compose"):
             if section not in patch or patch[section] is None:
                 continue
@@ -84,7 +88,11 @@ class SettingsStore:
                 if timeout < 5 or timeout > 3600:
                     raise ValueError("timeout_seconds 需在 5 到 3600 之间")
                 public[section]["timeout_seconds"] = timeout
-            if section == "video_generator" and "fallback_to_local" in incoming and incoming["fallback_to_local"] is not None:
+            if (
+                section == "video_generator"
+                and "fallback_to_local" in incoming
+                and incoming["fallback_to_local"] is not None
+            ):
                 public[section]["fallback_to_local"] = bool(incoming["fallback_to_local"])
             if section == "compose":
                 if "burn_in_subtitles" in incoming and incoming["burn_in_subtitles"] is not None:
@@ -103,13 +111,16 @@ class SettingsStore:
                     secrets[section] = ""
                 elif str(value) != "":
                     secrets[section] = str(value)
-        self.db.upsert_app_settings(public, secrets)
+        if user_id:
+            self.db.upsert_user_settings(user_id, public, secrets)
+        else:
+            self.db.upsert_app_settings(public, secrets)
         return self._mask(public, secrets)
 
-    def test_target(self, target: str) -> dict[str, Any]:
+    def test_target(self, target: str, user_id: str | None = None) -> dict[str, Any]:
         if target not in SECRET_KEYS:
             raise ValueError("target 必须是 multimodal、video_generator 或 tts")
-        public, secrets = self._load()
+        public, secrets = self._load(user_id)
         section = public[target]
         provider = section.get("provider") or "local_ffmpeg"
         if target == "tts" and provider == "none":
@@ -127,7 +138,13 @@ class SettingsStore:
             return {"ok": False, "provider": provider, "detail": "未配置 base_url"}
         if not key:
             return {"ok": False, "provider": provider, "detail": "未配置 API Key"}
-        return self._probe_remote(base_url, key, str(section.get("model") or ""), int(section.get("timeout_seconds") or 30), provider)
+        return self._probe_remote(
+            base_url,
+            key,
+            str(section.get("model") or ""),
+            int(section.get("timeout_seconds") or 30),
+            provider,
+        )
 
     def _probe_remote(self, base_url: str, api_key: str, model: str, timeout: int, provider: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -158,17 +175,27 @@ class SettingsStore:
             except Exception as exc:
                 return {"ok": False, "provider": provider, "detail": f"探活失败：{exc.__class__.__name__}"}
 
-    def _load(self) -> tuple[dict[str, Any], dict[str, str]]:
-        row = self.db.get_app_settings()
+    def _load(self, user_id: str | None = None) -> tuple[dict[str, Any], dict[str, str]]:
+        row = self.db.get_user_settings(user_id) if user_id else self.db.get_app_settings()
         public = deepcopy(DEFAULT_SETTINGS)
         secrets = {key: "" for key in SECRET_KEYS}
         if not row:
-            self.db.upsert_app_settings(public, secrets)
+            if user_id:
+                self.db.upsert_user_settings(user_id, public, secrets)
+            else:
+                self.db.upsert_app_settings(public, secrets)
             return public, secrets
         stored = row.get("public") or {}
         for section, defaults in DEFAULT_SETTINGS.items():
             if isinstance(stored.get(section), dict):
-                public[section] = {**defaults, **{k: v for k, v in stored[section].items() if k in defaults and k != "api_key"}}
+                public[section] = {
+                    **defaults,
+                    **{
+                        key: value
+                        for key, value in stored[section].items()
+                        if key in defaults and key != "api_key"
+                    },
+                }
         for key, value in (row.get("secrets") or {}).items():
             if key in secrets:
                 secrets[key] = str(value or "")

@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import container
+from .api.auth import router as auth_router
 from .api.routes import router
 from .config import settings
-from . import container
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,15 +32,23 @@ app = FastAPI(
     description="Standalone Codex conversation hub",
     lifespan=lifespan,
 )
+allowed_origins = sorted(
+    {
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+        "http://127.0.0.1:4173",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:4173",
+        f"http://{settings.host}:{settings.port}",
+        *settings.allowed_origins,
+    }
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(
-        {
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
-            f"http://{settings.host}:{settings.port}",
-        }
-    ),
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +57,19 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/api"):
+        origin = request.headers.get("origin", "").rstrip("/")
+        request_origin = str(request.base_url).rstrip("/")
+        if origin and origin not in allowed_origins and origin != request_origin:
+            return JSONResponse(
+                {"detail": "请求来源不受信任"},
+                status_code=403,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    "Referrer-Policy": "no-referrer",
+                },
+            )
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -56,6 +78,8 @@ async def security_headers(request: Request, call_next):
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=()",
     )
+    if request.url.path.startswith("/api"):
+        response.headers.setdefault("Cache-Control", "no-store")
     if not request.url.path.startswith(("/api", "/docs", "/openapi")):
         response.headers.setdefault(
             "Content-Security-Policy",
@@ -67,6 +91,7 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+app.include_router(auth_router)
 app.include_router(router)
 
 

@@ -8,16 +8,18 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .. import container, media
+from .. import container
+from ..auth import get_current_user, owner_id
+from ..paths import user_upload_root
 from ..productions import ProductionConflict, ProductionNotFound
 from ..service import ConversationBusy, ConversationNotFound, RuntimeUnavailable
 from ..skills import SkillValidationError
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(get_current_user)])
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
@@ -82,6 +84,8 @@ class SkillToggle(BaseModel):
 
 
 def _error(exc: Exception) -> None:
+    if isinstance(exc, KeyError):
+        raise HTTPException(404, "资源不存在") from exc
     if isinstance(exc, ConversationNotFound):
         raise HTTPException(404, str(exc)) from exc
     if isinstance(exc, ConversationBusy):
@@ -93,21 +97,9 @@ def _error(exc: Exception) -> None:
     raise exc
 
 
-@router.get("/health")
-def health() -> dict[str, Any]:
-    runtime = container.hub.runtime_status()
-    ffmpeg = media.ffmpeg_available()
-    return {
-        "ok": True,
-        "service": "video-fission",
-        "runtime": runtime,
-        "database": str(container.settings.database_path),
-        "ffmpeg": ffmpeg,
-        "pipeline": {
-            "ok": bool(ffmpeg.get("ok")),
-            "default_provider": "local_ffmpeg",
-        },
-    }
+def _conversation_owner(conversation_id: str, current_user: dict[str, Any]) -> None:
+    if not container.db.get_conversation(conversation_id, owner_id(current_user)):
+        raise HTTPException(404, "对话不存在")
 
 
 @router.get("/runtime")
@@ -138,100 +130,162 @@ def models(refresh: bool = False) -> dict[str, Any]:
 
 
 @router.get("/conversations")
-def conversations(include_archived: bool = False) -> dict[str, Any]:
-    return {"items": container.hub.list_conversations(include_archived=include_archived)}
+def conversations(
+    include_archived: bool = False,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    return {
+        "items": container.hub.list_conversations(
+            include_archived=include_archived,
+            user_id=owner_id(current_user),
+        )
+    }
 
 
 @router.post("/conversations", status_code=201)
-def create_conversation(request: ConversationCreate | None = None) -> dict[str, Any]:
-    return container.hub.create_conversation(request.model_dump(exclude_none=True) if request else {})
+def create_conversation(
+    request: ConversationCreate | None = None,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    return container.hub.create_conversation(
+        request.model_dump(exclude_none=True) if request else {},
+        user_id=owner_id(current_user),
+    )
 
 
 @router.get("/conversations/{conversation_id}")
-def get_conversation(conversation_id: str) -> dict[str, Any]:
+def get_conversation(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.get_conversation(conversation_id)
+        return container.hub.get_conversation(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.patch("/conversations/{conversation_id}")
-def update_conversation(conversation_id: str, request: ConversationUpdate) -> dict[str, Any]:
+def update_conversation(
+    conversation_id: str,
+    request: ConversationUpdate,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.update_conversation(conversation_id, request.model_dump(exclude_unset=True))
+        return container.hub.update_conversation(
+            conversation_id,
+            request.model_dump(exclude_unset=True),
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _error(exc)
 
 
 @router.delete("/conversations/{conversation_id}")
-def delete_conversation(conversation_id: str) -> dict[str, bool]:
+def delete_conversation(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, bool]:
     try:
-        container.hub.delete(conversation_id)
+        container.hub.delete(conversation_id, user_id=owner_id(current_user))
         return {"deleted": True}
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/messages")
-def send_message(conversation_id: str, request: MessageRequest) -> dict[str, Any]:
+def send_message(
+    conversation_id: str,
+    request: MessageRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.send_message(conversation_id, request.model_dump(exclude_none=True))
+        return container.hub.send_message(
+            conversation_id,
+            request.model_dump(exclude_none=True),
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/steer")
-def steer(conversation_id: str, request: MessageRequest) -> dict[str, Any]:
+def steer(
+    conversation_id: str,
+    request: MessageRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.steer(conversation_id, request.model_dump(exclude_none=True))
+        return container.hub.steer(
+            conversation_id,
+            request.model_dump(exclude_none=True),
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/interrupt")
-def interrupt(conversation_id: str) -> dict[str, Any]:
+def interrupt(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.interrupt(conversation_id)
+        return container.hub.interrupt(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/compact")
-def compact(conversation_id: str) -> dict[str, Any]:
+def compact(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.compact(conversation_id)
+        return container.hub.compact(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/fork", status_code=201)
-def fork(conversation_id: str) -> dict[str, Any]:
+def fork(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.fork(conversation_id)
+        return container.hub.fork(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/archive")
-def archive(conversation_id: str) -> dict[str, Any]:
+def archive(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.archive(conversation_id, True)
+        return container.hub.archive(conversation_id, True, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/unarchive")
-def unarchive(conversation_id: str) -> dict[str, Any]:
+def unarchive(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.archive(conversation_id, False)
+        return container.hub.archive(conversation_id, False, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/conversations/{conversation_id}/sync")
-def sync(conversation_id: str) -> dict[str, Any]:
+def sync(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.hub.sync(conversation_id)
+        return container.hub.sync(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
@@ -241,9 +295,10 @@ async def events(
     conversation_id: str,
     request: Request,
     after_id: int = Query(default=0, ge=0),
+    current_user: dict[str, Any] = Depends(get_current_user),
 ) -> StreamingResponse:
     try:
-        container.hub.get_conversation(conversation_id)
+        container.hub.get_conversation(conversation_id, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
@@ -256,7 +311,12 @@ async def events(
         while True:
             if await request.is_disconnected():
                 break
-            rows = container.hub.db.list_events(conversation_id, after_id=cursor, limit=250)
+            rows = container.hub.db.list_events(
+                conversation_id,
+                after_id=cursor,
+                limit=250,
+                user_id=owner_id(current_user),
+            )
             for row in rows:
                 cursor = int(row["id"])
                 data = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
@@ -279,7 +339,15 @@ async def events(
 
 
 @router.post("/approvals/{approval_id}/decide")
-def decide_approval(approval_id: str, request: ApprovalDecision) -> dict[str, Any]:
+def decide_approval(
+    approval_id: str,
+    request: ApprovalDecision,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    approval = container.db.get_approval(approval_id)
+    if not approval:
+        raise HTTPException(404, "审批请求不存在")
+    _conversation_owner(str(approval["conversation_id"]), current_user)
     try:
         return container.hub.decide_approval(approval_id, request.decision)
     except Exception as exc:
@@ -287,7 +355,15 @@ def decide_approval(approval_id: str, request: ApprovalDecision) -> dict[str, An
 
 
 @router.post("/clarifications/{clarification_id}/answer")
-def answer_clarification(clarification_id: str, request: ClarificationAnswers) -> dict[str, Any]:
+def answer_clarification(
+    clarification_id: str,
+    request: ClarificationAnswers,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    clarification = container.db.get_clarification(clarification_id)
+    if not clarification:
+        raise HTTPException(404, "澄清请求不存在")
+    _conversation_owner(str(clarification["conversation_id"]), current_user)
     try:
         return container.hub.answer_clarification(clarification_id, request.answers)
     except Exception as exc:
@@ -295,7 +371,10 @@ def answer_clarification(clarification_id: str, request: ClarificationAnswers) -
 
 
 @router.post("/uploads", status_code=201)
-async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload(
+    file: UploadFile = File(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -308,7 +387,9 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
         chunks.append(chunk)
     original = Path(file.filename or "attachment").name
     suffix = Path(original).suffix[:12]
-    stored = container.settings.uploads_dir / f"{uuid.uuid4().hex}{suffix}"
+    upload_root = user_upload_root(container.settings.uploads_dir, owner_id(current_user))
+    upload_root.mkdir(parents=True, exist_ok=True)
+    stored = upload_root / f"{uuid.uuid4().hex}{suffix}"
     stored.write_bytes(b"".join(chunks))
     return {
         "id": stored.stem,
@@ -320,10 +401,20 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
 
 
 @router.delete("/uploads/{file_id}")
-def delete_upload(file_id: str) -> dict[str, bool]:
+def delete_upload(
+    file_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, bool]:
     if not re.fullmatch(r"[a-f0-9]{32}", file_id):
         raise HTTPException(400, "附件标识无效")
-    matches = [path for path in container.settings.uploads_dir.glob(f"{file_id}.*") if path.is_file()]
+    upload_root = user_upload_root(container.settings.uploads_dir, owner_id(current_user))
+    matches = [path for path in upload_root.glob(f"{file_id}.*") if path.is_file()]
+    if not matches and current_user.get("role") == "admin":
+        matches = [
+            path
+            for path in container.settings.uploads_dir.glob(f"{file_id}.*")
+            if path.is_file()
+        ]
     if not matches:
         raise HTTPException(404, "附件不存在")
     if any(container.hub.db.attachment_reference_count(str(path.resolve())) for path in matches):
@@ -385,7 +476,11 @@ def list_tools() -> dict[str, Any]:
 
 
 @router.get("/tool-runs")
-def list_tool_runs(conversation_id: str) -> dict[str, Any]:
+def list_tool_runs(
+    conversation_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    _conversation_owner(conversation_id, current_user)
     return {"items": container.hub.db.list_tool_runs(conversation_id)}
 
 
@@ -443,12 +538,15 @@ def _production_error(exc: Exception) -> None:
 
 
 @router.get("/settings")
-def get_settings() -> dict[str, Any]:
-    return container.settings_store.public_settings()
+def get_settings(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    return container.settings_store.public_settings(user_id=owner_id(current_user))
 
 
 @router.put("/settings")
-async def put_settings(request: Request) -> dict[str, Any]:
+async def put_settings(
+    request: Request,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
         payload = await request.json()
     except Exception as exc:
@@ -456,21 +554,30 @@ async def put_settings(request: Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求体必须是对象")
     try:
-        return container.settings_store.update(payload)
+        return container.settings_store.update(payload, user_id=owner_id(current_user))
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/settings/test")
-def test_settings(body: SettingsTestRequest) -> dict[str, Any]:
+def test_settings(
+    body: SettingsTestRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.settings_store.test_target(body.target)
+        return container.settings_store.test_target(
+            body.target,
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _error(exc)
 
 
 @router.post("/productions/uploads", status_code=201)
-async def upload_production_video(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_production_video(
+    file: UploadFile = File(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     async def chunks():
         while True:
             chunk = await file.read(1024 * 1024)
@@ -491,15 +598,22 @@ async def upload_production_video(file: UploadFile = File(...)) -> dict[str, Any
             file.filename or "reference.mp4",
             file.content_type or "application/octet-stream",
             collected,
+            user_id=owner_id(current_user),
         )
     except Exception as exc:
         _production_error(exc)
 
 
 @router.get("/productions/uploads/{upload_id}")
-def get_production_upload(upload_id: str):
+def get_production_upload(
+    upload_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     try:
-        path, record = container.productions.upload_media_path(upload_id)
+        path, record = container.productions.upload_media_path(
+            upload_id,
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _production_error(exc)
     return FileResponse(
@@ -511,7 +625,10 @@ def get_production_upload(upload_id: str):
 
 
 @router.post("/productions", status_code=201)
-def create_production(body: ProductionCreate) -> dict[str, Any]:
+def create_production(
+    body: ProductionCreate,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
         return container.productions.create(
@@ -520,27 +637,45 @@ def create_production(body: ProductionCreate) -> dict[str, Any]:
             body.video_upload_id,
             replace_policy=policy,
             conversation_id=body.conversation_id,
+            user_id=owner_id(current_user),
         )
     except Exception as exc:
         _production_error(exc)
 
 
 @router.get("/productions")
-def list_productions(conversation_id: str | None = Query(default=None)) -> dict[str, Any]:
+def list_productions(
+    conversation_id: str | None = Query(default=None),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     filtered = conversation_id.strip() if conversation_id else None
-    return {"items": container.productions.list_items(conversation_id=filtered)}
+    if filtered:
+        _conversation_owner(filtered, current_user)
+    return {
+        "items": container.productions.list_items(
+            conversation_id=filtered,
+            user_id=owner_id(current_user),
+        )
+    }
 
 
 @router.get("/productions/{production_id}")
-def get_production(production_id: str) -> dict[str, Any]:
+def get_production(
+    production_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.productions.get(production_id)
+        return container.productions.get(production_id, user_id=owner_id(current_user))
     except Exception as exc:
         _production_error(exc)
 
 
 @router.patch("/productions/{production_id}")
-def patch_production(production_id: str, body: ProductionPatch) -> dict[str, Any]:
+def patch_production(
+    production_id: str,
+    body: ProductionPatch,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
         return container.productions.patch(
@@ -549,13 +684,18 @@ def patch_production(production_id: str, body: ProductionPatch) -> dict[str, Any
             brief=body.brief,
             replace_policy=policy,
             conversation_id=body.conversation_id,
+            user_id=owner_id(current_user),
         )
     except Exception as exc:
         _production_error(exc)
 
 
 @router.post("/productions/{production_id}/run")
-async def run_production(production_id: str, request: Request) -> dict[str, Any]:
+async def run_production(
+    production_id: str,
+    request: Request,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     policy = None
     resume_from = None
     raw = await request.body()
@@ -567,32 +707,48 @@ async def run_production(production_id: str, request: Request) -> dict[str, Any]
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
         resume_from = body.resume_from
     try:
-        return container.productions.run(production_id, replace_policy=policy, resume_from=resume_from)
+        return container.productions.run(
+            production_id,
+            replace_policy=policy,
+            resume_from=resume_from,
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _production_error(exc)
 
 
 @router.post("/productions/{production_id}/cancel")
-def cancel_production(production_id: str) -> dict[str, Any]:
+def cancel_production(
+    production_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return container.productions.cancel(production_id)
+        return container.productions.cancel(production_id, user_id=owner_id(current_user))
     except Exception as exc:
         _production_error(exc)
 
 
 @router.delete("/productions/{production_id}")
-def delete_production(production_id: str) -> dict[str, bool]:
+def delete_production(
+    production_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, bool]:
     try:
-        container.productions.delete(production_id)
+        container.productions.delete(production_id, user_id=owner_id(current_user))
         return {"deleted": True}
     except Exception as exc:
         _production_error(exc)
 
 
 @router.get("/productions/{production_id}/events")
-async def production_events(production_id: str, request: Request, after_id: int = Query(default=0, ge=0)):
+async def production_events(
+    production_id: str,
+    request: Request,
+    after_id: int = Query(default=0, ge=0),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     try:
-        container.productions.get(production_id)
+        container.productions.get(production_id, user_id=owner_id(current_user))
     except Exception as exc:
         _production_error(exc)
 
@@ -602,13 +758,17 @@ async def production_events(production_id: str, request: Request, after_id: int 
         while True:
             if await request.is_disconnected():
                 break
-            rows = container.productions.events(production_id, after_id=cursor)
+            rows = container.productions.events(
+                production_id,
+                after_id=cursor,
+                user_id=owner_id(current_user),
+            )
             for row in rows:
                 cursor = int(row["id"])
                 data = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
                 yield f"id: {cursor}\ndata: {data}\n\n"
                 last_ping = time.monotonic()
-            production = container.db.get_production(production_id)
+            production = container.db.get_production(production_id, owner_id(current_user))
             if production and production["status"] in {"completed", "failed", "cancelled"}:
                 # flush any remaining then stop after a short idle
                 if not rows:
@@ -630,9 +790,17 @@ async def production_events(production_id: str, request: Request, after_id: int 
 
 
 @router.get("/productions/{production_id}/artifacts/{name}")
-def get_production_artifact(production_id: str, name: str):
+def get_production_artifact(
+    production_id: str,
+    name: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     try:
-        path = container.productions.artifact_path(production_id, name)
+        path = container.productions.artifact_path(
+            production_id,
+            name,
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _production_error(exc)
     media_types = {
@@ -643,4 +811,8 @@ def get_production_artifact(production_id: str, name: str):
         ".png": "image/png",
         ".m4a": "audio/mp4",
     }
-    return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "application/octet-stream"), filename=path.name)
+    return FileResponse(
+        path,
+        media_type=media_types.get(path.suffix.lower(), "application/octet-stream"),
+        filename=path.name,
+    )

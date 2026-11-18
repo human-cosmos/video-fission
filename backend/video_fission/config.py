@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,35 @@ load_dotenv(PROJECT_ROOT / ".env")
 def _env_path(name: str, default: Path) -> Path:
     raw = os.getenv(name, "").strip()
     return Path(raw).expanduser().resolve() if raw else default.resolve()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auth_secret(data_dir: Path) -> str:
+    configured = os.getenv("VF_AUTH_SECRET_KEY", "").strip()
+    if configured:
+        return configured
+    path = data_dir / "auth_secret"
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    value = secrets.token_hex(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_text(encoding="utf-8").strip() or value
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -33,6 +63,24 @@ class Settings:
     approval_timeout_seconds: int
     host: str
     port: int
+    auth_required: bool = True
+    auth_secret_key: str = ""
+    auth_admin_username: str = "admin"
+    auth_admin_password: str = ""
+    auth_token_expire_minutes: int = 60 * 24
+    sso_client_id: str = ""
+    sso_client_secret: str = ""
+    sso_client_name: str = "VideoFission"
+    sso_cas_auth_url: str = "https://manage.giikin.com/guard/sso/public/auth"
+    sso_business_api_url: str = "https://openapi.giikin.com"
+    sso_access_token_url: str = "https://idc-ai.giikin.com/api/common/get_access_token"
+    sso_callback_url: str = ""
+    sso_frontend_url: str = "http://127.0.0.1:5174"
+    allowed_origins: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.auth_required and not self.auth_secret_key:
+            object.__setattr__(self, "auth_secret_key", _auth_secret(self.data_dir))
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -56,6 +104,33 @@ class Settings:
             approval_timeout_seconds=int(os.getenv("VF_APPROVAL_TIMEOUT_SECONDS", "300")),
             host=os.getenv("VF_HOST", "127.0.0.1"),
             port=int(os.getenv("VF_PORT", "8000")),
+            auth_required=_env_bool("VF_AUTH_REQUIRED", True),
+            auth_secret_key=_auth_secret(data_dir),
+            auth_admin_username=os.getenv("VF_AUTH_ADMIN_USERNAME", "admin").strip() or "admin",
+            auth_admin_password=os.getenv("VF_AUTH_ADMIN_PASSWORD", ""),
+            auth_token_expire_minutes=int(os.getenv("VF_AUTH_TOKEN_EXPIRE_MINUTES", str(60 * 24))),
+            sso_client_id=os.getenv("VF_SSO_CLIENT_ID", "").strip(),
+            sso_client_secret=os.getenv("VF_SSO_CLIENT_SECRET", "").strip(),
+            sso_client_name=os.getenv("VF_SSO_CLIENT_NAME", "VideoFission").strip() or "VideoFission",
+            sso_cas_auth_url=os.getenv(
+                "VF_SSO_CAS_AUTH_URL",
+                "https://manage.giikin.com/guard/sso/public/auth",
+            ).strip(),
+            sso_business_api_url=os.getenv(
+                "VF_SSO_BUSINESS_API_URL",
+                "https://openapi.giikin.com",
+            ).strip(),
+            sso_access_token_url=os.getenv(
+                "VF_SSO_ACCESS_TOKEN_URL",
+                "https://idc-ai.giikin.com/api/common/get_access_token",
+            ).strip(),
+            sso_callback_url=os.getenv("VF_SSO_CALLBACK_URL", "").strip(),
+            sso_frontend_url=os.getenv("VF_SSO_FRONTEND_URL", "http://127.0.0.1:5174").strip(),
+            allowed_origins=tuple(
+                item.strip().rstrip("/")
+                for item in os.getenv("VF_ALLOWED_ORIGINS", "").split(",")
+                if item.strip()
+            ),
         )
 
     def ensure_directories(self) -> None:

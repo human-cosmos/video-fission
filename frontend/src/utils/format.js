@@ -23,7 +23,7 @@ export function formatBytes(bytes) {
 
 export const WORKSPACE_MODES = [
   { id: 'chat', label: '对话' },
-  { id: 'settings', label: '模型设置' },
+  { id: 'settings', label: '系统设置' },
 ]
 
 export const POLICY_MODES = [

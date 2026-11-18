@@ -2,8 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { needsRemoteFields } from '../utils/format'
+import SystemAssetsSettings from './SystemAssetsSettings.vue'
+import UserManagement from './UserManagement.vue'
 
-const emit = defineEmits(['notify'])
+const props = defineProps({
+  currentUser: { type: Object, required: true },
+})
+const emit = defineEmits(['notify', 'capabilities-changed'])
 
 const loading = ref(true)
 const saving = ref(false)
@@ -193,7 +198,7 @@ onMounted(loadSettings)
     <div class="page-stack">
       <header class="page-intro">
         <p>
-          默认使用 <code>local_ffmpeg</code>，无需 API Key 即可跑完成本地管线。密钥只写不回显，保存后不会出现在此页面或日志里。
+          系统级配置统一在此维护。模型使用当前账号的独立设置；Skill 与 Tool 为全局能力；密钥只写不回显。
         </p>
       </header>
 
@@ -375,6 +380,15 @@ onMounted(loadSettings)
           <button class="button subtle" type="button" :disabled="loading" @click="loadSettings">重新加载</button>
         </div>
       </form>
+      <SystemAssetsSettings
+        @notify="emit('notify', $event)"
+        @changed="emit('capabilities-changed')"
+      />
+      <UserManagement
+        v-if="props.currentUser.role === 'admin'"
+        :current-user="props.currentUser"
+        @notify="emit('notify', $event)"
+      />
     </div>
   </section>
 </template>

@@ -420,7 +420,7 @@ def add_silence_audio(video: Path, dest: Path, duration_ms: int) -> Path:
             "-f",
             "lavfi",
             "-i",
-            f"anullsrc=channel_layout=stereo:sample_rate=44100",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
             "-t",
             f"{duration:.3f}",
             "-c:v",

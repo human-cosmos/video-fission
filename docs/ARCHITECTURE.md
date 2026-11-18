@@ -24,12 +24,13 @@
 - Skill 发现与生命周期
 - Tool 注册、调用和审计
 - 对话工作台
+- 本地账号、JWT 会话、管理员角色与企业 CAS 单点登录
 
 移除：
 
 - 选品、采集、商品池、发布和业务流水线
 - Agent Profile 的选品/反馈分支
-- 用户、角色、SSO、分享和审计后台
+- 分享、运营和审计后台
 - MongoDB、Redis 和外部调度器
 - Git Worktree 代码修改模式
 - 应用预览进程
@@ -40,11 +41,15 @@
 ```text
 Vue UI
   ├─ Conversation workbench
+  ├─ Login / SSO gate
   ├─ Video studio
   └─ Model settings
           │ REST + SSE
           ▼
 FastAPI
+  ├─ auth.py              account/JWT/cookie dependencies
+  ├─ sso.py               CAS ticket validation and local-user sync
+  ├─ api/auth.py          login, SSO, logout and user administration
   ├─ routes.py            HTTP contract, settings, productions
   ├─ service.py           conversation orchestration
   │     ├─ app_server.py  stdio JSON-RPC client
@@ -126,9 +131,13 @@ archived
 
 SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
+### `users` / `user_settings`
+
+`users` 保存 bcrypt 密码哈希、角色、显示名以及 SSO `user_id` / `area_id` 映射。`token_version` 在密码或角色变化时递增，使已签发的旧 JWT 立即失效。`user_settings` 以用户 ID 为主键保存模型、端点和只写密钥，因此一个用户无法读取或覆盖另一个用户的 API Key。
+
 ### `conversations`
 
-保存标题、运行状态、模型、推理强度、Sandbox、审批策略、`codex_thread_id`、当前 Turn、代次、归档时间和错误。
+保存 `user_id`、标题、运行状态、模型、推理强度、Sandbox、审批策略、`codex_thread_id`、当前 Turn、代次、归档时间和错误。列表、详情、更新、删除、SSE 和运行操作都必须带当前用户条件。
 
 ### `items`
 
@@ -164,7 +173,13 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 ### `video_uploads` / `productions` / `production_events`
 
-参考视频元数据、创作任务快照（拆解、意图、骨架、脚本、clips、output、`replace_policy`、只读 `replace_plan`）以及按自增 ID 重放的管线 SSE。对话上传仍走 `POST /api/uploads`（20MB）；创作上传走 `POST /api/productions/uploads`（500MB），写入 `data/uploads/productions/`。产物在 `data/artifacts/productions/{id}/`，清理对话孤儿目录时会跳过 `productions/`。
+参考视频元数据、创作任务快照（拆解、意图、骨架、脚本、clips、output、`replace_policy`、只读 `replace_plan`）以及按自增 ID 重放的管线 SSE。两张业务表都带 `user_id`。对话上传仍走 `POST /api/uploads`（20MB）；创作上传走 `POST /api/productions/uploads`（500MB）。用户文件分别写入 `data/uploads/users/{user}/`、`data/artifacts/users/{user}/` 和 `data/workspace/users/{user}/`，目录名使用用户 ID 的 SHA-256 短摘要。
+
+### 认证与授权
+
+本地登录使用 bcrypt 哈希，成功后签发 HS256 JWT，并同时写入 `HttpOnly + SameSite=Lax` Cookie。API 接收 `Authorization: Bearer` 或同源 Cookie；SSE 依赖 Cookie，不把长期令牌暴露在 URL。SSO 按 CAS `ticket → loginId → user` 流程验证，随后按企业账号同步本地用户并签发相同格式的 JWT。未绑定的同名本地账号不会被 SSO 自动接管，已绑定身份则以稳定企业用户 ID 为主键继续同步。
+
+所有 `/api` 资源路由均先生成当前用户，再在数据库查询和文件路径两层执行所有权约束。用户直接访问其他用户已知的资源 ID 时返回 404，避免通过 ID 探测资源是否存在。非只读请求同时校验浏览器 Origin，并通过 `no-store` 禁止缓存用户 API 响应。Skill 与 Tool 是全局能力，所有登录用户共享同一套配置；聊天侧能力台用于引用，配置统一放在系统设置。
 
 ## 7. 视频创作管线
 
@@ -199,26 +214,26 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 | 维度 | 原智能中枢 | Video Fission |
 | --- | --- | --- |
 | 数据库 | MongoDB | SQLite |
-| 鉴权 | 用户/角色/管理员 | 本地单用户 |
-| 会话范围 | 多 Profile + 业务上下文 | 自由对话单 Profile |
+| 鉴权 | 用户/角色/管理员 | 本地账号 + JWT + 企业 CAS SSO |
+| 会话范围 | 多 Profile + 业务上下文 | 每用户独立自由对话 |
 | 写代码 | Git Worktree | 固定只读沙箱 |
 | Tool | 大量业务领域 Tool | 6 个通用/视频策划与创作 Tool |
-| Skill | 用户目录、商店、物化 | 项目目录 + 用户目录 + UGC 共享参考库 |
+| Skill | 用户目录、商店、物化 | 全局项目目录 + UGC 共享参考库 |
 | 前端 | 大后台中的一个页面 | 独立完整工作台 |
 | 部署 | MongoDB/Redis 等基础设施 | Python + Node build + Codex CLI |
 
 ## 10. 验证结果
 
-验证日期：2026-11-17。视频管线后端于同日补测。
+验证日期：2026-11-18。
 
 - Codex CLI：`0.169.0`
-- 后端测试（含管线、设置与指定片段替换）：`uv run pytest -q` → 35 passed, 1 skipped
+- 后端测试（含认证、用户隔离、管线与指定片段替换）：`uv run pytest -q` → 52 passed, 4 skipped
 - 夹具：`backend/tests/fixtures/sample-reference.mp4`
 - 无 Key 本地跑通：可下载 ffprobe 可解析的 `final.mp4` 与 `final.srt`
 - 真实 Codex 集成：1 passed
-- 前端单元测试：4 passed
+- 前端单元测试：18 passed
 - 前端生产构建：passed
-- Playwright E2E：3 passed
+- Playwright E2E：6 passed
 
 真实 E2E 已验证：
 
@@ -226,11 +241,14 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 - Codex 返回指定标记
 - `create_video_brief` 被真实调用
 - Markdown 产物真实写入 `data/artifacts/`
-- 用户 Skill 创建、停用、重新启用
+- 系统设置中的全局 Skill 创建、停用、重新启用
 - 页面刷新后会话、消息、Tool 轨迹和 Skill 均恢复
 - Thread 分叉、归档和取消归档
 - 390px 移动端下会话列表与能力抽屉可达
 - 首次对话前上传的附件在创建会话后仍保留
+- 用户名密码登录、HttpOnly Cookie 会话、管理员成员管理、退出登录
+- 两个用户之间无法读取彼此的会话、设置、上传视频、创作任务和产物
+- CAS 身份同步到本地用户并签发与密码登录相同的 JWT
 
 E2E 使用独立 `.e2e-data/` 数据目录和独立后端端口，不接触正常运行数据。
 

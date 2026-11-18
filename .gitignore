@@ -13,6 +13,8 @@ frontend/test-results/
 frontend/playwright-report/
 data/*.db
 data/*.db-*
+data/auth_secret
+data/bootstrap_admin.txt
 data/uploads/*
 data/artifacts/*
 data/workspace/*

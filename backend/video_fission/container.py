@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from .config import Settings, settings as default_settings
+from .config import Settings
+from .config import settings as default_settings
 from .db import Database
 from .productions import ProductionService
 from .service import CodexHub
@@ -23,6 +24,10 @@ def configure(runtime_settings: Settings | None = None) -> None:
     settings.ensure_directories()
     db = Database(settings.database_path)
     db.initialize()
+    if settings.auth_required:
+        from .auth import bootstrap_auth
+
+        bootstrap_auth()
     skills = SkillManager(
         settings.skills_dir,
         settings.bundled_skills_dir,

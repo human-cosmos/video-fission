@@ -891,6 +891,76 @@ body.is-resizing-sidebar {
   display: none;
 }
 
+.account-menu {
+  position: relative;
+}
+
+.account-menu summary {
+  list-style: none;
+}
+
+.account-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.account-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 11px 0 6px;
+  color: var(--ink);
+  cursor: pointer;
+  background: var(--paper-bright);
+  border: 1px solid #c9ccc3;
+  border-radius: 11px;
+}
+
+.account-button > span {
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 29px;
+  color: #18352d;
+  font-size: 12px;
+  font-weight: 700;
+  background: #d7ff70;
+  border-radius: 9px;
+}
+
+.account-button > b {
+  max-width: 92px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-popover {
+  width: 210px;
+}
+
+.account-summary {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px 11px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-summary strong {
+  font-size: 12px;
+}
+
+.account-summary span {
+  overflow: hidden;
+  color: #7c8982;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .menu-popover {
   position: absolute;
   top: 42px;
@@ -2470,6 +2540,16 @@ a.button.primary {
 
   .effort-control,
   .more-menu {
+    display: none;
+  }
+
+  .account-button {
+    width: 36px;
+    height: 36px;
+    padding: 3px;
+  }
+
+  .account-button > b {
     display: none;
   }
 

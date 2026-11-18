@@ -63,7 +63,8 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
     timeout: 120_000,
   })
 
-  await page.getByTestId('create-skill').click()
+  await page.getByTestId('mode-settings').click()
+  await page.getByTestId('settings-create-skill').click()
   const editor = page.getByTestId('skill-editor')
   await expect(editor).toBeVisible()
   await editor.getByLabel('显示名称').fill(`E2E 钩子检查 ${marker.slice(-6)}`)
@@ -78,12 +79,13 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   await expect(page.getByText(`E2E 钩子检查 ${marker.slice(-6)}`, { exact: true })).toBeVisible()
 
   const createdSkill = page
-    .locator('.skill-card')
+    .locator('.global-skill')
     .filter({ hasText: `E2E 钩子检查 ${marker.slice(-6)}` })
   await createdSkill.getByRole('checkbox').uncheck()
   await expect(createdSkill).toHaveClass(/disabled/)
   await createdSkill.getByRole('checkbox').check()
   await expect(createdSkill).not.toHaveClass(/disabled/)
+  await page.locator('.conversation-row').first().click()
 
   await page.reload()
   await expect(page.getByText(`${marker}_OK`, { exact: true })).toBeVisible({

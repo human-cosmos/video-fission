@@ -22,7 +22,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'node ../frontend/e2e/reset-e2e-data.js && VF_DATA_DIR=../.e2e-data ../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8001',
+        'node ../frontend/e2e/reset-e2e-data.js && VF_AUTH_REQUIRED=false VF_DATA_DIR=../.e2e-data ../.venv/bin/python -m uvicorn video_fission.main:app --host 127.0.0.1 --port 8001',
       cwd: '../backend',
       url: 'http://127.0.0.1:8001/api/health',
       reuseExistingServer: false,

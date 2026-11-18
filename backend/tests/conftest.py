@@ -26,6 +26,7 @@ def test_settings(tmp_path: Path) -> Settings:
         approval_timeout_seconds=30,
         host="127.0.0.1",
         port=8000,
+        auth_required=False,
     )
     settings.ensure_directories()
     return settings

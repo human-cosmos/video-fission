@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,8 +59,18 @@ class SkillManager:
         self.user_root = user_root
         self.bundled_root = bundled_root
         self.disabled_root = disabled_root
+        self._mutation_lock = threading.RLock()
         for path in (self.user_root, self.disabled_root):
             path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _write_skill_file(destination: Path, content: str) -> None:
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @property
     def runtime_roots(self) -> list[str]:
@@ -142,54 +154,62 @@ class SkillManager:
         return f"---\n{frontmatter}\n---\n\n{body}\n"
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
-        name = str(payload.get("name") or "").strip()
-        slug = _slug(str(payload.get("slug") or name))
-        destination = self.user_root / slug
-        if destination.exists() or (self.disabled_root / slug).exists():
-            raise SkillValidationError("Skill 标识已存在")
-        rendered = self.render(
-            name,
-            str(payload.get("description") or ""),
-            str(payload.get("body") or ""),
-        )
-        destination.mkdir(parents=True)
-        try:
-            (destination / "SKILL.md").write_text(rendered, encoding="utf-8")
-        except Exception:
-            shutil.rmtree(destination, ignore_errors=True)
-            raise
-        return self.get(slug)
+        with self._mutation_lock:
+            name = str(payload.get("name") or "").strip()
+            slug = _slug(str(payload.get("slug") or name))
+            destination = self.user_root / slug
+            if (
+                destination.exists()
+                or (self.disabled_root / slug).exists()
+                or (self.bundled_root / slug).exists()
+            ):
+                raise SkillValidationError("Skill 标识已存在")
+            rendered = self.render(
+                name,
+                str(payload.get("description") or ""),
+                str(payload.get("body") or ""),
+            )
+            destination.mkdir(parents=True)
+            try:
+                self._write_skill_file(destination / "SKILL.md", rendered)
+            except Exception:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise
+            return self.get(slug)
 
     def update(self, slug: str, payload: dict[str, Any]) -> dict[str, Any]:
-        existing = self.get(slug)
-        if existing["read_only"]:
-            raise SkillValidationError("内置 Skill 为只读")
-        folder = Path(existing["path"]).parent
-        (folder / "SKILL.md").write_text(
-            self.render(
-                str(payload.get("name") or existing["name"]),
-                str(payload.get("description") or existing["description"]),
-                str(payload.get("body") if "body" in payload else existing["content"]),
-            ),
-            encoding="utf-8",
-        )
-        return self.get(slug)
+        with self._mutation_lock:
+            existing = self.get(slug)
+            if existing["read_only"]:
+                raise SkillValidationError("内置 Skill 为只读")
+            folder = Path(existing["path"]).parent
+            self._write_skill_file(
+                folder / "SKILL.md",
+                self.render(
+                    str(payload.get("name") or existing["name"]),
+                    str(payload.get("description") or existing["description"]),
+                    str(payload.get("body") if "body" in payload else existing["content"]),
+                ),
+            )
+            return self.get(slug)
 
     def toggle(self, slug: str, enabled: bool) -> dict[str, Any]:
-        existing = self.get(slug)
-        if existing["read_only"]:
-            raise SkillValidationError("内置 Skill 不能停用")
-        safe_slug = _slug(slug)
-        current = self.user_root / safe_slug if enabled is False else self.disabled_root / safe_slug
-        target = self.disabled_root / safe_slug if enabled is False else self.user_root / safe_slug
-        if target.exists() and target != current:
-            raise SkillValidationError("Skill 目标状态目录已存在")
-        if current.exists():
-            shutil.move(str(current), str(target))
-        return self.get(slug)
+        with self._mutation_lock:
+            existing = self.get(slug)
+            if existing["read_only"]:
+                raise SkillValidationError("内置 Skill 不能停用")
+            safe_slug = _slug(slug)
+            current = self.user_root / safe_slug if enabled is False else self.disabled_root / safe_slug
+            target = self.disabled_root / safe_slug if enabled is False else self.user_root / safe_slug
+            if target.exists() and target != current:
+                raise SkillValidationError("Skill 目标状态目录已存在")
+            if current.exists():
+                shutil.move(str(current), str(target))
+            return self.get(slug)
 
     def delete(self, slug: str) -> None:
-        existing = self.get(slug)
-        if existing["read_only"]:
-            raise SkillValidationError("内置 Skill 不能删除")
-        shutil.rmtree(Path(existing["path"]).parent)
+        with self._mutation_lock:
+            existing = self.get(slug)
+            if existing["read_only"]:
+                raise SkillValidationError("内置 Skill 不能删除")
+            shutil.rmtree(Path(existing["path"]).parent)

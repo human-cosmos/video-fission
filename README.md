@@ -20,7 +20,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
 - 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频，经 3 选 1 脚本后下载可播放的 `final.mp4`
-- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；缺依赖或无 Key 时自动退化，不中断出片
+- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘；缺依赖或无 Key 时自动退化，不中断出片
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
 
@@ -193,6 +193,8 @@ SQLite 保存以下数据：
 | `GET` | `/api/productions/{id}/artifacts/{name}` | 下载产物，禁止路径穿越 |
 
 阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。`script` 产出 3 个候选后暂停，需选用后才生成；跟进可再出脚本或在已选脚本上再生成。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`GET /api/health` 在原有字段外增加 `ffmpeg` 和 `pipeline`。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。勾选优先于 brief 点名。`mode=selected` 未命中任何段时 `/run` 返回 400。
+
+配置 `gemini_gateway` 后，整片理解与片段分析的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/` 和 `gemini_api_calls/clip_analysis/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
 
 远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认按参考样式（读不到则用安全默认位置）硬烧字幕，并只混合已分离的参考 BGM，可在设置中关闭。
 

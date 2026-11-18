@@ -33,6 +33,7 @@ from .normalize import (
 )
 from .observe import empty_observe, extract_observe_payload, normalize_observe_response, observe_prompt, probe_has_audio
 from .opening import estimate_local_opening, finalize_opening, parse_opening, snap_opening_end
+from .records import GeminiCallRecorder
 from .transitions import TransitionDetector, TransitionInfo, detection_available
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,66 @@ def _run_cancellable(work: Callable[[], Any], cancel: Any) -> Any:
         if ok:
             return value
         raise value
+
+
+def _record_gemini_call(
+    recorder: GeminiCallRecorder | None,
+    *,
+    label: str,
+    input_mode: str,
+    started: float,
+    response: Any = None,
+    error: BaseException | None = None,
+) -> None:
+    if recorder is None:
+        return
+    try:
+        recorder.record(
+            label=label,
+            input_mode=input_mode,
+            status="failed" if error is not None else "succeeded",
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            response=response,
+            error=error,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must not break video processing
+        logger.warning(
+            "gemini_api_result_save_failed type=%s label=%s",
+            recorder.call_type,
+            label,
+            exc_info=True,
+        )
+
+
+def _call_gemini_recorded(
+    client: GeminiGatewayClient,
+    recorder: GeminiCallRecorder | None,
+    *,
+    label: str,
+    input_mode: str,
+    call: Callable[[], Any],
+    cancel: Any,
+) -> Any:
+    started = time.perf_counter()
+    try:
+        response = _run_cancellable(call, cancel)
+    except Exception as exc:
+        _record_gemini_call(
+            recorder,
+            label=label,
+            input_mode=input_mode,
+            started=started,
+            error=exc,
+        )
+        raise
+    _record_gemini_call(
+        recorder,
+        label=label,
+        input_mode=input_mode,
+        started=started,
+        response=response,
+    )
+    return response
 
 
 def understand_settings(public: dict[str, Any]) -> dict[str, Any]:
@@ -561,6 +622,16 @@ def _remote_split(
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str, str, dict[str, Any] | None]:
     _raise_if_cancelled(cancel)
     started = time.perf_counter()
+    recorder = (
+        GeminiCallRecorder(
+            artifact_dir,
+            "video_understanding",
+            provider=provider,
+            model=str(mm.get("model") or ""),
+        )
+        if provider == "gemini_gateway"
+        else None
+    )
     prompt = build_split_prompt(duration_s)
     compressed, warning = ensure_under_size(src, artifact_dir / "tmp", options["gemini_max_size_mb"])
     use_video = compressed.is_file() and compressed.stat().st_size <= options["gemini_max_size_mb"] * 1024 * 1024
@@ -590,6 +661,8 @@ def _remote_split(
         frames,
         temperature=0.6,
         cancel=cancel,
+        recorder=recorder,
+        label="split",
     )
     _raise_if_cancelled(cancel)
     if used_frames and not warning:
@@ -626,6 +699,8 @@ def _call_understand(
     timeout_seconds: int | None = None,
     max_tokens: int | None = None,
     cancel: Any = None,
+    recorder: GeminiCallRecorder | None = None,
+    label: str = "understand",
 ) -> tuple[Any, bool]:
     timeout = int(timeout_seconds or mm.get("timeout_seconds") or 120)
     output_tokens = int(max_tokens or mm.get("max_tokens") or 12000)
@@ -655,9 +730,13 @@ def _call_understand(
         )
         if video_path is not None and frames:
             try:
-                response = _run_cancellable(
-                    lambda: client.call(prompt, video_path=video_path, temperature=temperature),
-                    cancel,
+                response = _call_gemini_recorded(
+                    client,
+                    recorder,
+                    label=f"{label}_video",
+                    input_mode="video",
+                    call=lambda: client.call(prompt, video_path=video_path, temperature=temperature),
+                    cancel=cancel,
                 )
                 payload = client.extract_payload(response)
                 if payload is not None:
@@ -667,22 +746,34 @@ def _call_understand(
                 if _cancel_requested(cancel):
                     _raise_if_cancelled(cancel)
                 logger.warning("llm.understand_video_failed provider=%s fallback=frames", provider, exc_info=True)
-            response = _run_cancellable(
-                lambda: client.call(prompt, frames=frames, temperature=temperature),
-                cancel,
+            response = _call_gemini_recorded(
+                client,
+                recorder,
+                label=f"{label}_frames",
+                input_mode="frames",
+                call=lambda: client.call(prompt, frames=frames, temperature=temperature),
+                cancel=cancel,
             )
             logger.info("llm.understand_call_completed provider=%s input=frames", provider)
             return client.extract_payload(response), True
         if video_path is not None:
-            response = _run_cancellable(
-                lambda: client.call(prompt, video_path=video_path, temperature=temperature),
-                cancel,
+            response = _call_gemini_recorded(
+                client,
+                recorder,
+                label=f"{label}_video",
+                input_mode="video",
+                call=lambda: client.call(prompt, video_path=video_path, temperature=temperature),
+                cancel=cancel,
             )
             logger.info("llm.understand_call_completed provider=%s input=video", provider)
             return client.extract_payload(response), False
-        response = _run_cancellable(
-            lambda: client.call(prompt, frames=frames, temperature=temperature),
-            cancel,
+        response = _call_gemini_recorded(
+            client,
+            recorder,
+            label=f"{label}_frames",
+            input_mode="frames",
+            call=lambda: client.call(prompt, frames=frames, temperature=temperature),
+            cancel=cancel,
         )
         logger.info("llm.understand_call_completed provider=%s input=frames", provider)
         return client.extract_payload(response), True
@@ -743,6 +834,16 @@ def _analyze_clips(
     if isinstance(names, list) and names:
         product = str(names[0])
     prompt = build_lens_prompt(product)
+    recorder = (
+        GeminiCallRecorder(
+            artifact_dir,
+            "clip_analysis",
+            provider=provider,
+            model=str(mm.get("model") or ""),
+        )
+        if provider == "gemini_gateway"
+        else None
+    )
 
     def work(segment: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         started = time.perf_counter()
@@ -768,6 +869,8 @@ def _analyze_clips(
                 frames,
                 temperature=0.4,
                 cancel=cancel,
+                recorder=recorder,
+                label=f"clip_{segment['id']}",
             )
             if not isinstance(data, dict):
                 raise RuntimeError("片段解析不是对象")

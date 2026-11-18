@@ -31,6 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "model": "",
         "timeout_seconds": 300,
         "fallback_to_local": True,
+        "media_public_base_url": "",
     },
     "tts": {
         "provider": "none",
@@ -96,7 +97,7 @@ class SettingsStore:
                 if provider not in PROVIDER_ENUMS[section]:
                     raise ValueError(f"{section}.provider 不支持 {provider}")
                 public[section]["provider"] = provider
-            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice", "resolution"):
+            for field in ("base_url", "upload_url", "token_url", "source", "model", "voice", "resolution", "media_public_base_url"):
                 if field in incoming and incoming[field] is not None and field in public[section]:
                     public[section][field] = str(incoming[field]).strip()
             if section == "video_generator":

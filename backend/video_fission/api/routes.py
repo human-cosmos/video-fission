@@ -534,6 +534,11 @@ class ProductionRunBody(BaseModel):
     resume_from: str | None = None
 
 
+class SelectScriptBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    script_id: str = Field(min_length=1, max_length=80)
+
+
 def _production_error(exc: Exception) -> None:
     if isinstance(exc, ProductionNotFound):
         raise HTTPException(404, str(exc)) from exc
@@ -720,6 +725,22 @@ async def run_production(
             production_id,
             replace_policy=policy,
             resume_from=resume_from,
+            user_id=owner_id(current_user),
+        )
+    except Exception as exc:
+        _production_error(exc)
+
+
+@router.post("/productions/{production_id}/select-script")
+def select_production_script(
+    production_id: str,
+    body: SelectScriptBody,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        return container.productions.select_script(
+            production_id,
+            body.script_id,
             user_id=owner_id(current_user),
         )
     except Exception as exc:

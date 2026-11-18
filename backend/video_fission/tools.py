@@ -444,7 +444,7 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             title="重跑视频创作",
             description=(
                 "Re-run an existing video production with the same POST /run body: "
-                "optional resume_from (ingest|decompose|intent) and replace_policy. "
+                "optional resume_from (ingest|decompose|intent|script|generate) and replace_policy. "
                 "Use this when the conversation already has a production_id and the user wants a follow-up."
             ),
             input_schema={

@@ -117,6 +117,7 @@ def generate_remote_video(
     source: str = "",
     resolution: str = "720p",
     cancel: Event | None = None,
+    input_contents: list[dict[str, Any]] | None = None,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if provider == "seedance":
@@ -133,6 +134,7 @@ def generate_remote_video(
             source=source,
             resolution=resolution,
             cancel=cancel,
+            input_contents=input_contents,
         )
     payload = {
         "model": model,
@@ -180,28 +182,50 @@ def generate_remote_video(
     return dest
 
 
-def generate_seedance_video(
-    base_url: str,
-    api_key: str,
+def build_reference_input_contents(
+    video_url: str = "",
+    vocals_url: str = "",
+    bgm_url: str = "",
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if video_url:
+        items.append({"type": "video_url", "role": "reference_video", "url": video_url})
+    if vocals_url:
+        items.append({"type": "audio_url", "role": "reference_audio", "url": vocals_url})
+    if bgm_url:
+        items.append({"type": "audio_url", "role": "reference_audio", "url": bgm_url})
+    return items
+
+
+def public_media_url(base_url: str, production_id: str, name: str) -> tuple[str, str]:
+    """Return (url, warning). Never claim a localhost URL is publicly reachable."""
+    base = str(base_url or "").strip().rstrip("/")
+    name = str(name or "").lstrip("/")
+    path = f"/api/productions/{production_id}/artifacts/{name}"
+    if not base:
+        return "", "未配置 media_public_base_url，参考音视频未写成公网 URL，Seedance 无法保证能拉取"
+    from urllib.parse import urlparse
+
+    host = (urlparse(base).hostname or "").lower()
+    url = f"{base}{path}"
+    private = host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost")
+    if private or host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
+        return url, "media_public_base_url 指向本机或内网，Seedance 通常无法拉取，请改成公网可访问地址"
+    return url, ""
+
+
+def build_seedance_submit_payload(
     model: str,
     prompt: str,
     duration_ms: int,
     width: int,
     height: int,
-    timeout: int,
-    dest: Path,
     source: str = "",
     resolution: str = "720p",
-    cancel: Event | None = None,
-) -> Path:
-    _raise_if_cancelled(cancel)
-    if not base_url:
-        raise ProviderError("Seedance 未配置 base_url")
-    if not api_key:
-        raise ProviderError("Seedance 未配置 API Key")
-    model = _seedance_model(model)
+    input_contents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     payload = {
-        "model": model,
+        "model": _seedance_model(model),
         "prompt": prompt,
         "duration": max(1, int(math.ceil(max(duration_ms, 1) / 1000))),
         "mode": "async_poll",
@@ -215,6 +239,41 @@ def generate_seedance_video(
             "return_last_frame": False,
         },
     }
+    if input_contents:
+        payload["input_contents"] = list(input_contents)
+    return payload
+
+
+def generate_seedance_video(
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    duration_ms: int,
+    width: int,
+    height: int,
+    timeout: int,
+    dest: Path,
+    source: str = "",
+    resolution: str = "720p",
+    cancel: Event | None = None,
+    input_contents: list[dict[str, Any]] | None = None,
+) -> Path:
+    _raise_if_cancelled(cancel)
+    if not base_url:
+        raise ProviderError("Seedance 未配置 base_url")
+    if not api_key:
+        raise ProviderError("Seedance 未配置 API Key")
+    payload = build_seedance_submit_payload(
+        model,
+        prompt,
+        duration_ms,
+        width,
+        height,
+        source=source,
+        resolution=resolution,
+        input_contents=input_contents,
+    )
     submit_url = _seedance_endpoint(base_url, SEEDANCE_SUBMIT_PATH)
     response = _request_seedance(
         submit_url,

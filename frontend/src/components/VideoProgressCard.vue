@@ -12,6 +12,7 @@ defineEmits(['cancel'])
 const status = computed(() => props.payload?.status || '')
 const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
+const awaitingScript = computed(() => status.value === 'awaiting_script_choice')
 const stages = computed(() => {
   const provided = props.payload?.stages
   if (Array.isArray(provided) && provided.length) return provided
@@ -49,6 +50,11 @@ const warnings = computed(() => {
         {{ stage.label }}
       </li>
     </ol>
+    <p
+      v-if="awaitingScript"
+      class="progress-awaiting-script"
+      data-testid="video-progress-awaiting-script"
+    >请选择创意脚本</p>
     <p v-if="payload.error" class="page-error">{{ payload.error }}</p>
     <ul v-if="warnings.length" class="warning-list">
       <li v-for="(warning, index) in warnings" :key="index">{{ warning }}</li>

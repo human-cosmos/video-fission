@@ -4269,3 +4269,127 @@ a.button.primary {
   font-size: 12px;
   font-style: normal;
 }
+
+.landing-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0.5rem 0 0.25rem;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--paper-soft, #fafafa);
+}
+
+.landing-summary--failed {
+  border-color: color-mix(in srgb, #b42318 35%, var(--line, #e5e7eb));
+}
+
+.landing-summary--partial {
+  border-color: color-mix(in srgb, #b54708 35%, var(--line, #e5e7eb));
+}
+
+.landing-source {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.landing-meta,
+.landing-points {
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+}
+
+.landing-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+}
+
+.landing-points li {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink, #111) 6%, transparent);
+}
+
+.script-candidates {
+  margin: 0.7rem 0 0.3rem;
+}
+
+.script-candidates-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.script-candidates-head span {
+  color: var(--ink-muted, #6b7280);
+  font-size: 12px;
+}
+
+.script-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.script-candidate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+}
+
+.script-candidate--selected {
+  border-color: color-mix(in srgb, var(--gold, #c4a35a) 70%, var(--line, #e5e7eb));
+  box-shadow: inset 3px 0 0 var(--gold, #c4a35a);
+}
+
+.script-candidate-copy {
+  flex: 1 1 220px;
+}
+
+.script-candidate-copy strong {
+  font-size: 14px;
+}
+
+.script-candidate-angle,
+.script-candidate-voice {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.script-candidate-voice {
+  color: var(--ink-muted, #6b7280);
+}
+
+.script-selected-flag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gold, #8a6d2f);
+  padding-top: 2px;
+}
+
+.script-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.progress-awaiting-script {
+  margin: 8px 0 0;
+  font-weight: 600;
+}

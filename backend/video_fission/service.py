@@ -397,7 +397,13 @@ class CodexHub:
             replace_policy=policy,
             user_id=user_id,
         )
-        return self.productions.run(latest["id"], user_id=user_id)
+        from .script_flow import classify_followup
+
+        latest = self.productions.db.get_production(latest["id"], user_id) or latest
+        action, value = classify_followup(latest, text)
+        if action == "select":
+            return self.productions.select_script(latest["id"], value, user_id=user_id)
+        return self.productions.run(latest["id"], resume_from=value, user_id=user_id)
 
     def send_message(
         self,

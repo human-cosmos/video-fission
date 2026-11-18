@@ -69,12 +69,20 @@ class PipelineEngine:
             raise ValueError("创作任务不存在")
         stages = list(STAGES)
         if resume_from:
-            if resume_from not in STAGES:
-                raise ValueError("resume_from 只能是 ingest|decompose|intent")
-            if resume_from not in {"ingest", "decompose", "intent"}:
-                raise ValueError("resume_from 只能是 ingest|decompose|intent")
-            if resume_from == "intent" and not (production.get("decomposition") or {}).get("segments"):
-                raise ValueError("还没有拆解结果，无法从 intent 恢复")
+            allowed = {"ingest", "decompose", "intent", "script", "generate"}
+            if resume_from not in allowed:
+                raise ValueError("resume_from 只能是 ingest|decompose|intent|script|generate")
+            if resume_from in {"intent", "script", "generate"} and not (
+                production.get("decomposition") or {}
+            ).get("segments"):
+                raise ValueError(f"还没有拆解结果，无法从 {resume_from} 恢复")
+            if resume_from == "generate":
+                selected = bool(production.get("selected_script_id"))
+                awaiting = production.get("status") == "awaiting_script_choice" or (
+                    production.get("script_candidates") and not production.get("selected_script_id")
+                )
+                if not selected and (awaiting or not (production.get("script") or {}).get("shots")):
+                    raise ValueError("还没有选定脚本，无法从 generate 恢复")
             stages = list(STAGES[STAGES.index(resume_from):])
         warnings: list[str] = list(production.get("warnings") or [])
         try:
@@ -84,6 +92,15 @@ class PipelineEngine:
                 self.db.update_production(production_id, {"current_stage": stage, "status": "running"})
                 handler = getattr(self, f"_stage_{stage}")
                 handler(production_id, cancel, warnings)
+                current = self.db.get_production(production_id)
+                if current and current.get("status") == "awaiting_script_choice":
+                    self._emit(production_id, "stage_completed", {"stage": stage})
+                    self._emit(
+                        production_id,
+                        "awaiting_script_choice",
+                        {"message": "请选择创意脚本"},
+                    )
+                    return current
                 self._emit(production_id, "stage_completed", {"stage": stage})
             self.db.update_production(
                 production_id,
@@ -144,6 +161,7 @@ class PipelineEngine:
             cancel=cancel,
         )
         self.db.update_production(production_id, {"decomposition": decomposition, "warnings": warnings})
+        self._prepare_media(production_id, warnings)
 
     def _refine_with_multimodal(
         self,
@@ -186,6 +204,8 @@ class PipelineEngine:
         }
 
     def _stage_intent(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
+        self._prepare_landing(production_id, warnings)
+        self._prepare_media(production_id, warnings)
         production = self._get(production_id)
         decomposition = production.get("decomposition") or {}
         segments = decomposition.get("segments") or []
@@ -237,7 +257,9 @@ class PipelineEngine:
                         "按 creative-intent-script-skeleton 产出严格 JSON："
                         '{"intent":{"goal","audience","promise","assumptions":[]},'
                         '"skeleton":{"one_liner","hook","value","cta"}}。'
-                        f"创作说明：{production['brief']}\n拆解：{production.get('decomposition')}\n参考：{excerpts}"
+                        f"创作说明：{production['brief']}\n"
+                        f"{self._landing_prompt(production)}\n"
+                        f"拆解：{production.get('decomposition')}\n参考：{excerpts}"
                     ),
                 }
             ],
@@ -262,6 +284,10 @@ class PipelineEngine:
         return merged_intent, merged_skeleton
 
     def _stage_script(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
+        from .script_flow import build_local_candidates, lock_script_to_timeline
+
+        self._prepare_landing(production_id, warnings)
+        self._prepare_media(production_id, warnings)
         production = self._get(production_id)
         refs = (production.get("intent") or {}).get("references") or []
         full_texts: list[str] = []
@@ -271,7 +297,6 @@ class PipelineEngine:
             except Exception:
                 continue
         if len(full_texts) < 3 and refs:
-            # Still proceed if library read fewer, but try harder by retrieving again
             extra = self.library.retrieve(production["brief"])
             for item in extra:
                 if len(full_texts) >= 3:
@@ -283,20 +308,39 @@ class PipelineEngine:
         if len(full_texts) < 3:
             warnings.append("完整参考脚本不足 3 篇，已尽可能读取现有参考")
             self._emit(production_id, "warning", {"stage": "script", "message": warnings[-1]})
-        script = local_script(production)
+        timeline = local_script(production)
+        candidates = build_local_candidates(production, timeline)
         public, secrets = self._settings_for_production(production_id)
         mm = public["multimodal"]
         if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
             try:
-                script = self._llm_script(production, full_texts, mm, secrets["multimodal"], script)
+                candidates = self._llm_script_candidates(
+                    production, full_texts, mm, secrets["multimodal"], timeline, candidates
+                )
             except Exception as exc:
                 message = f"分镜模型失败，已用本地规划器：{exc.__class__.__name__}"
                 warnings.append(message)
                 self._emit(production_id, "warning", {"stage": "script", "message": message})
-        script = apply_replace_plan(script, production)
-        self.db.update_production(production_id, {"script": script, "warnings": warnings})
+        for item in candidates:
+            locked = lock_script_to_timeline(item.get("script") or timeline, timeline)
+            item["script"] = apply_replace_plan(locked, production)
+        display = (candidates[0]["script"] if candidates else timeline)
+        self.db.update_production(
+            production_id,
+            {
+                "script": display,
+                "script_candidates": candidates,
+                "selected_script_id": None,
+                "warnings": warnings,
+                "status": "awaiting_script_choice",
+                "current_stage": "script",
+                "error": None,
+            },
+        )
 
-    def _llm_script(self, production, full_texts, mm, api_key, fallback):
+    def _llm_script_candidates(self, production, full_texts, mm, api_key, timeline, fallback_candidates):
+        from .script_flow import CANDIDATE_SPECS, lock_script_to_timeline
+
         raw = providers.chat_completions(
             mm.get("base_url") or "",
             api_key,
@@ -305,12 +349,18 @@ class PipelineEngine:
                 {
                     "role": "user",
                     "content": (
-                        "按 universal-ugc-video-script-generation 产出严格 JSON script 对象，"
-                        "字段为 total_duration_ms, shots[], audio_plan。"
+                        "请给出恰好 3 个创意脚本候选，返回严格 JSON："
+                        '{"candidates":[{"id","title","angle","script":{...}}]}。'
+                        "id 使用 script_a/script_b/script_c。"
+                        "每个 script 字段为 total_duration_ms, shots[], audio_plan。"
                         "shots 需含 id,role,duration_ms,action,source_segment_id,"
                         "visual,voiceover,on_screen_text,prompt。"
+                        "三个候选必须共用同一条参考时间轴和开头连续块，"
+                        "只允许角度、口播、画面描述和花字不同。"
                         "action 只能是 reuse 或 generate。reuse 必须带 source_segment_id。"
-                        f"创作说明：{production['brief']}\n骨架：{production.get('skeleton')}\n"
+                        f"创作说明：{production['brief']}\n"
+                        f"{self._landing_prompt(production)}\n"
+                        f"骨架：{production.get('skeleton')}\n"
                         f"拆解：{production.get('decomposition')}\n参考全文节选：{full_texts[:3]}"
                     ),
                 }
@@ -318,12 +368,38 @@ class PipelineEngine:
             int(mm.get("timeout_seconds") or 120),
         )
         data = providers.extract_json(raw)
-        return normalize_script(data, production, fallback)
+        incoming = data.get("candidates") or data.get("scripts") or []
+        if not incoming and (data.get("shots") or data.get("script")):
+            incoming = [data.get("script") or data]
+        merged = []
+        for index, spec in enumerate(CANDIDATE_SPECS):
+            source = incoming[index] if index < len(incoming) else {}
+            script_data = source.get("script") if isinstance(source, dict) and "script" in source else source
+            fallback = fallback_candidates[index]["script"] if index < len(fallback_candidates) else timeline
+            normalized = normalize_script(script_data or {}, production, fallback)
+            locked = lock_script_to_timeline(normalized, timeline)
+            merged.append(
+                {
+                    "id": spec["id"],
+                    "title": str(source.get("title") or spec["title"]),
+                    "angle": str(source.get("angle") or spec["angle"]),
+                    "script": locked,
+                }
+            )
+        return merged
+
+    def _llm_script(self, production, full_texts, mm, api_key, fallback):
+        data_candidates = self._llm_script_candidates(
+            production, full_texts, mm, api_key, fallback, [{"script": fallback}] * 3
+        )
+        return data_candidates[0]["script"] if data_candidates else fallback
 
     def _stage_generate(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
+        self._prepare_media(production_id, warnings)
         production = self._get(production_id)
         source = production["source_video"]
-        script = production.get("script") or {}
+        script = apply_replace_plan(production.get("script") or {}, production)
+        self.db.update_production(production_id, {"script": script})
         segments = {seg["id"]: seg for seg in (production.get("decomposition") or {}).get("segments") or []}
         width, height = media.target_dimensions(int(source["width"]), int(source["height"]))
         fps = float(source["fps"] or 30)
@@ -331,19 +407,20 @@ class PipelineEngine:
         art = self.artifact_dir(production_id)
         public, secrets = self._settings_for_production(production_id)
         vg = public["video_generator"]
+        input_contents = self._seedance_input_contents(production_id, public, warnings)
         clips: list[dict[str, Any]] = []
         for shot in script.get("shots") or []:
             self._raise_if_cancelled(cancel)
             dest = art / f"{shot['id']}.mp4"
             duration_ms = int(shot["duration_ms"])
+            start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
             if shot["action"] == "reuse":
-                start_ms, end_ms, segment = _reuse_range(shot, segments, production)
-                if end_ms <= start_ms:
+                if _end_ms <= start_ms:
                     raise ValueError(f"{shot['id']} 缺少可复用源片段")
-                media.cut_segment(src, dest, start_ms, end_ms, width, height, fps, True)
-                if not _has_audio(dest):
-                    media.add_silence_audio(dest, dest.with_name(dest.stem + "_a.mp4"), duration_ms)
-                    dest.with_name(dest.stem + "_a.mp4").replace(dest)
+                media.cut_segment(src, dest, start_ms, _end_ms, width, height, fps, False)
+                self._apply_voiceover(
+                    dest, shot, production, art, public, secrets, warnings, duration_ms, start_ms
+                )
                 provider_name = "local_ffmpeg"
             else:
                 provider_name = vg.get("provider") or "local_ffmpeg"
@@ -364,7 +441,7 @@ class PipelineEngine:
                                 vg.get("base_url") or "",
                                 secrets.get("video_generator") or "",
                                 vg.get("model") or "",
-                                shot.get("prompt") or shot.get("visual") or production["brief"],
+                                self._shot_generate_prompt(shot, production),
                                 duration_ms,
                                 width,
                                 height,
@@ -374,6 +451,7 @@ class PipelineEngine:
                                 source=vg.get("source") or "",
                                 resolution=vg.get("resolution") or "720p",
                                 cancel=cancel,
+                                input_contents=input_contents,
                             )
                             self._raise_if_cancelled(cancel)
                             generated = dest.is_file() and dest.stat().st_size > 0
@@ -418,20 +496,9 @@ class PipelineEngine:
                     )
                     provider_name = "local_ffmpeg"
                 if not _has_audio(dest):
-                    tmp = dest.with_name(dest.stem + "_a.mp4")
-                    start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
-                    opening_shot = _is_opening_shot(shot, production.get("script") or {})
-                    if (segment or opening_shot) and media.probe(src).get("has_audio"):
-                        media.mux_timeline_audio(
-                            dest,
-                            src,
-                            start_ms,
-                            tmp,
-                            duration_ms,
-                        )
-                    else:
-                        media.add_silence_audio(dest, tmp, duration_ms)
-                    tmp.replace(dest)
+                    self._apply_voiceover(
+                        dest, shot, production, art, public, secrets, warnings, duration_ms, start_ms
+                    )
             info = media.probe(dest)
             if info["duration_ms"] <= 0 or abs(info["duration_ms"] - duration_ms) > 150:
                 raise RuntimeError(
@@ -482,8 +549,9 @@ class PipelineEngine:
         total_ms = int(script.get("total_duration_ms") or source_info["duration_ms"])
         if compose.get("mix_reference_bgm", True):
             try:
-                bgm = art / "reference-audio.m4a"
-                media.extract_audio(source, bgm)
+                bgm = art / "reference-bgm.m4a"
+                if not bgm.is_file():
+                    raise FileNotFoundError("reference-bgm.m4a")
                 mixed = art / "with-bgm.mp4"
                 media.mix_bgm(current, bgm, mixed, float(compose.get("bgm_volume") or 0.18), total_ms)
                 current = mixed
@@ -497,7 +565,7 @@ class PipelineEngine:
         final_path = art / "final.mp4"
         if compose.get("burn_in_subtitles", True):
             try:
-                media.burn_subtitles(current, srt_path, burned)
+                media.burn_subtitles(current, srt_path, burned, production.get("subtitle_style"))
                 current = burned
             except Exception as exc:
                 message = f"字幕硬烧失败，已输出无硬字幕成片：{exc.__class__.__name__}"
@@ -522,6 +590,129 @@ class PipelineEngine:
             "srt_url": self.artifact_url(production_id, "final.srt"),
         }
         self.db.update_production(production_id, {"output": output, "warnings": warnings})
+
+    def _prepare_landing(self, production_id: str, warnings: list[str]) -> None:
+        from .landing import analyze_landing
+
+        production = self._get(production_id)
+        landing = analyze_landing(production.get("brief") or "")
+        if not landing:
+            return
+        status = landing.get("parse_status") or ""
+        if status == "failed":
+            message = "落地页抓取失败，可在对话里粘贴页面正文后再解析"
+            warnings.append(message)
+            self._emit(production_id, "warning", {"stage": "intent", "message": message})
+        elif status == "partial":
+            message = "落地页仅部分解析，未当作完整卖点"
+            warnings.append(message)
+            self._emit(production_id, "warning", {"stage": "intent", "message": message})
+        self.db.update_production(production_id, {"landing_page": landing, "warnings": warnings})
+
+    def _prepare_media(self, production_id: str, warnings: list[str]) -> None:
+        from .audio_separate import separate_reference_audio
+        from .subtitle_style import detect_subtitle_style
+
+        production = self._get(production_id)
+        source_path = Path((production.get("source_video") or {}).get("path") or "")
+        if not source_path.is_file():
+            return
+        art = self.artifact_dir(production_id)
+        vocals = art / "reference-vocals.m4a"
+        bgm = art / "reference-bgm.m4a"
+        if not production.get("audio_separation") or not vocals.is_file() or not bgm.is_file():
+            result = separate_reference_audio(source_path, art)
+            if result.get("warning"):
+                warnings.append(str(result["warning"]))
+                self._emit(production_id, "warning", {"stage": "decompose", "message": result["warning"]})
+            self.db.update_production(production_id, {"audio_separation": result, "warnings": warnings})
+        if not production.get("subtitle_style"):
+            style = detect_subtitle_style(source_path, art)
+            self.db.update_production(production_id, {"subtitle_style": style})
+
+    def _landing_prompt(self, production: dict[str, Any]) -> str:
+        from .landing import landing_prompt_block
+
+        return landing_prompt_block(production.get("landing_page"))
+
+    def _shot_generate_prompt(self, shot: dict[str, Any], production: dict[str, Any]) -> str:
+        voiceover = str(shot.get("voiceover") or "").strip()
+        base = str(shot.get("prompt") or shot.get("visual") or production.get("brief") or "").strip()
+        parts = [
+            base,
+            f"必须生成与口播一致的人声音轨，口播原文：{voiceover or '（按镜头口播）'}",
+            "画面中不得烧录任何字幕、标题、花字或说明文字，字幕由后期硬烧。",
+            self._landing_prompt(production),
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _seedance_input_contents(
+        self,
+        production_id: str,
+        public: dict[str, Any],
+        warnings: list[str],
+    ) -> list[dict[str, Any]]:
+        production = self._get(production_id)
+        source = Path((production.get("source_video") or {}).get("path") or "")
+        base = str((public.get("video_generator") or {}).get("media_public_base_url") or "")
+        video_url, video_warn = providers.public_media_url(base, production_id, source.name if source.name else "source.mp4")
+        vocals_url, _ = providers.public_media_url(base, production_id, "reference-vocals.m4a")
+        bgm_url, _ = providers.public_media_url(base, production_id, "reference-bgm.m4a")
+        if video_warn:
+            warnings.append(video_warn)
+            self._emit(production_id, "warning", {"stage": "generate", "message": video_warn})
+        return providers.build_reference_input_contents(video_url, vocals_url, bgm_url)
+
+    def _apply_voiceover(
+        self,
+        dest: Path,
+        shot: dict[str, Any],
+        production: dict[str, Any],
+        art: Path,
+        public: dict[str, Any],
+        secrets: dict[str, str],
+        warnings: list[str],
+        duration_ms: int,
+        start_ms: int,
+    ) -> None:
+        tmp = dest.with_name(dest.stem + "_vo.mp4")
+        tts = public.get("tts") or {}
+        tts_key = secrets.get("tts") or ""
+        text = str(shot.get("voiceover") or shot.get("on_screen_text") or "").strip()
+        if tts.get("provider") == "openai_compatible" and tts.get("base_url") and tts_key and text:
+            try:
+                speech = art / f"{shot['id']}_tts.mp3"
+                providers.synthesize_speech(
+                    tts.get("base_url") or "",
+                    tts_key,
+                    tts.get("model") or "",
+                    tts.get("voice") or "alloy",
+                    text,
+                    int(tts.get("timeout_seconds") or 60),
+                    speech,
+                )
+                media.mux_timeline_audio(dest, speech, 0, tmp, duration_ms)
+                tmp.replace(dest)
+                return
+            except Exception as exc:
+                message = f"{shot['id']} TTS 口播失败，将尝试参考人声：{exc.__class__.__name__}"
+                warnings.append(message)
+                self._emit(production_id := production["id"], "warning", {"stage": "generate", "message": message})
+        vocals = art / "reference-vocals.m4a"
+        if _vocals_stem_usable(production.get("audio_separation"), vocals):
+            try:
+                media.mux_timeline_audio(dest, vocals, start_ms, tmp, duration_ms)
+                tmp.replace(dest)
+                return
+            except Exception as exc:
+                message = f"{shot['id']} 参考人声混入失败：{exc.__class__.__name__}"
+                warnings.append(message)
+                self._emit(production["id"], "warning", {"stage": "generate", "message": message})
+        if _has_audio(dest):
+            return
+        message = f"{shot['id']} 没有可用口播，未写入静音轨"
+        warnings.append(message)
+        self._emit(production["id"], "warning", {"stage": "generate", "message": message})
 
     def _get(self, production_id: str) -> dict[str, Any]:
         production = self.db.get_production(production_id)
@@ -1188,6 +1379,19 @@ def _shot_frame(art: Path, shot: dict[str, Any], segments: dict[str, Any]) -> Pa
     if frames:
         return frames[0]
     raise ValueError(f"找不到 {shot.get('id')} 的关键帧")
+
+
+def _vocals_stem_usable(separation: dict[str, Any] | None, vocals: Path) -> bool:
+    if not vocals.is_file() or vocals.stat().st_size <= 0:
+        return False
+    sep = separation or {}
+    if sep.get("usable") is False:
+        return False
+    if str(sep.get("method") or "") in {"placeholder", "none"}:
+        return False
+    if "不能当作已分离口播" in str(sep.get("warning") or ""):
+        return False
+    return True
 
 
 def _has_audio(path: Path) -> bool:

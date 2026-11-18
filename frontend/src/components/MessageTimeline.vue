@@ -16,6 +16,7 @@ import VideoUnderstandingCard from './VideoUnderstandingCard.vue'
 const props = defineProps({
   conversation: { type: Object, default: null },
   rerunning: { type: Boolean, default: false },
+  selecting: { type: Boolean, default: false },
   cancelling: { type: Boolean, default: false },
 })
 
@@ -26,6 +27,9 @@ const emit = defineEmits([
   'cancel-production',
   'rerun-selected',
   'rerun-brief',
+  'select-script',
+  'regenerate-scripts',
+  'regenerate-video',
 ])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
@@ -273,7 +277,14 @@ defineExpose({ scrollToBottom })
         </template>
 
         <template v-else-if="item.item_type === 'video_plan'">
-          <VideoPlanCard :payload="cardPayload(item)" />
+          <VideoPlanCard
+            :payload="cardPayload(item)"
+            :selecting="selecting"
+            :rerunning="rerunning"
+            @select-script="$emit('select-script', $event)"
+            @regenerate-scripts="$emit('regenerate-scripts', $event)"
+            @regenerate-video="$emit('regenerate-video', $event)"
+          />
         </template>
 
         <template v-else-if="item.item_type === 'video_segments'">

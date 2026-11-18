@@ -19,7 +19,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 参考视频意图、UGC 脚本生成和 13 篇吹风机/除吹雪机参考脚本共享技能链
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
-- 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频并下载可播放的 `final.mp4`
+- 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频，经 3 选 1 脚本后下载可播放的 `final.mp4`
 - decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；缺依赖或无 Key 时自动退化，不中断出片
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
@@ -183,15 +183,16 @@ SQLite 保存以下数据：
 | `POST` | `/api/productions` | 创建草稿（`title`、`brief`、`video_upload_id`，可选 `replace_policy`） |
 | `GET` | `/api/productions` / `/api/productions/{id}` | 列表或详情；详情含只读 `replace_plan` |
 | `PATCH` | `/api/productions/{id}` | 更新 `title` / `brief` / `replace_policy`；运行中 409 |
-| `POST` | `/api/productions/{id}/run` | 启动或重跑管线。空 body 兼容；可选 `{ replace_policy, resume_from }`。已有拆解时默认从 `intent` 重跑；运行中 409 |
+| `POST` | `/api/productions/{id}/run` | 启动或重跑管线。空 body 兼容；可选 `{ replace_policy, resume_from }`。`resume_from` 允许 `ingest\|decompose\|intent\|script\|generate`；省略时按跟进消息分类，已有拆解时默认仍从 `intent` 重跑；运行中 409 |
+| `POST` | `/api/productions/{id}/select-script` | 在 `awaiting_script_choice` 时选用脚本（body：`{ "script_id" }`），随后从 generate 继续 |
 | `POST` | `/api/productions/{id}/cancel` | 取消 |
 | `DELETE` | `/api/productions/{id}` | 删除任务和产物；仍被引用的源视频不删 |
 | `GET` | `/api/productions/{id}/events?after_id=` | SSE 进度 |
 | `GET` | `/api/productions/{id}/artifacts/{name}` | 下载产物，禁止路径穿越 |
 
-阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`GET /api/health` 在原有字段外增加 `ffmpeg` 和 `pipeline`。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。勾选优先于 brief 点名。`mode=selected` 未命中任何段时 `/run` 返回 400。
+阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。`script` 产出 3 个候选后暂停，需选用后才生成；跟进可再出脚本或在已选脚本上再生成。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`GET /api/health` 在原有字段外增加 `ffmpeg` 和 `pipeline`。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。勾选优先于 brief 点名。`mode=selected` 未命中任何段时 `/run` 返回 400。
 
-远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认烧录字幕并混合参考音频作为 BGM，可在设置中关闭。
+远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认按参考样式（读不到则用安全默认位置）硬烧字幕，并只混合已分离的参考 BGM，可在设置中关闭。
 
 ## Tool
 

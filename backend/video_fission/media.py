@@ -176,8 +176,49 @@ def probe(path: Path) -> dict[str, Any]:
         "height": height,
         "fps": fps,
         "has_audio": audio is not None,
+        "audio_channels": int(audio.get("channels") or 1) if audio else 0,
         "pix_fmt": str(video.get("pix_fmt") or ""),
         "color_range": str(video.get("color_range") or ""),
+    }
+
+
+def probe_audio(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise MediaError("音频文件不存在")
+    result = subprocess.run(
+        [
+            ffprobe_bin(),
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise MediaError("无法解析音频文件")
+    try:
+        info = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise MediaError("ffprobe 输出无法解析") from exc
+    audio = next((s for s in (info.get("streams") or []) if s.get("codec_type") == "audio"), None)
+    if not audio:
+        raise MediaError("文件中没有音频流")
+    raw = audio.get("duration") or (info.get("format") or {}).get("duration") or 0
+    try:
+        duration = float(raw or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return {
+        "duration_ms": int(round(duration * 1000)) if duration > 0 else 0,
+        "channels": int(audio.get("channels") or 1),
+        "has_audio": True,
     }
 
 
@@ -772,8 +813,45 @@ def _parse_srt_cues(path: Path) -> list[tuple[str, str, str]]:
     return cues
 
 
-def write_ass_from_srt(srt: Path, dest: Path, width: int, height: int) -> Path:
+def layout_with_style(width: int, height: int, style: dict[str, Any] | None = None) -> dict[str, Any]:
     layout = subtitle_burn_layout(width, height)
+    layout["font_name"] = "Droid Sans Fallback"
+    layout["primary_colour"] = "&H00FFFFFF"
+    layout["outline_colour"] = "&H00111111"
+    layout["alignment"] = 2
+    layout["margin_l"] = layout["margin_x"]
+    layout["margin_r"] = layout["margin_x"]
+    if style and style.get("method") != "default_safe" and style.get("aligned"):
+        if style.get("font_name"):
+            layout["font_name"] = str(style["font_name"])
+        if style.get("font_size"):
+            layout["font_size"] = int(style["font_size"])
+        if style.get("primary_colour"):
+            layout["primary_colour"] = str(style["primary_colour"])
+        if style.get("outline_colour"):
+            layout["outline_colour"] = str(style["outline_colour"])
+        if style.get("alignment"):
+            layout["alignment"] = int(style["alignment"])
+        if style.get("margin_v"):
+            layout["margin_v"] = int(style["margin_v"])
+        if style.get("margin_l") or style.get("margin_x"):
+            layout["margin_x"] = int(style.get("margin_l") or style.get("margin_x"))
+            layout["margin_l"] = layout["margin_x"]
+        if style.get("margin_r"):
+            layout["margin_r"] = int(style["margin_r"])
+        else:
+            layout["margin_r"] = layout["margin_l"]
+    return layout
+
+
+def write_ass_from_srt(
+    srt: Path,
+    dest: Path,
+    width: int,
+    height: int,
+    style: dict[str, Any] | None = None,
+) -> Path:
+    layout = layout_with_style(width, height, style)
     dest.parent.mkdir(parents=True, exist_ok=True)
     events = []
     for start, end, text in _parse_srt_cues(srt):
@@ -792,9 +870,12 @@ def write_ass_from_srt(srt: Path, dest: Path, width: int, height: int) -> Path:
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: Default,Droid Sans Fallback,"
-        f"{layout['font_size']},&H00FFFFFF,&H000000FF,&H00111111,&H80000000,"
-        f"0,0,0,0,100,100,0,0,1,2,1,2,{layout['margin_x']},{layout['margin_x']},"
+        f"Style: Default,{layout.get('font_name', 'Droid Sans Fallback')},"
+        f"{layout['font_size']},{layout.get('primary_colour', '&H00FFFFFF')},"
+        f"&H000000FF,{layout.get('outline_colour', '&H00111111')},&H80000000,"
+        f"0,0,0,0,100,100,0,0,1,2,1,{layout.get('alignment', 2)},"
+        f"{layout.get('margin_l', layout['margin_x'])},"
+        f"{layout.get('margin_r', layout['margin_x'])},"
         f"{layout['margin_v']},1\n"
         "\n"
         "[Events]\n"
@@ -806,12 +887,12 @@ def write_ass_from_srt(srt: Path, dest: Path, width: int, height: int) -> Path:
     return dest
 
 
-def burn_subtitles(video: Path, srt: Path, dest: Path) -> Path:
+def burn_subtitles(video: Path, srt: Path, dest: Path, style: dict[str, Any] | None = None) -> Path:
     font = default_font()
     fonts_dir = str(font.parent).replace("\\", "\\\\").replace(":", "\\:")
     info = probe(video)
     ass_path = dest.parent / f"{dest.stem}.ass"
-    write_ass_from_srt(srt, ass_path, info["width"], info["height"])
+    write_ass_from_srt(srt, ass_path, info["width"], info["height"], style)
     ass_arg = str(ass_path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     run_ffmpeg(
         [

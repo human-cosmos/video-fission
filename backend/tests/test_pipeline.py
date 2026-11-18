@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.helpers import finish_production
+
 import shutil
 from pathlib import Path
 
@@ -114,7 +116,7 @@ def test_intent_references_exist_and_full_run_writes_final(test_settings, client
 
     from video_fission import container
 
-    finished = container.productions.engine.run(production_id)
+    finished = finish_production(production_id, container.productions.engine.run(production_id))
     public = container.productions.get(production_id)
     assert finished["status"] == "completed"
     assert public["status"] == "completed"
@@ -376,12 +378,13 @@ def _create(client: TestClient, brief: str, policy=None) -> dict:
 def _run_wait(production_id: str, replace_policy=None, resume_from=None) -> dict:
     from video_fission import container
 
-    return container.productions.run(
+    result = container.productions.run(
         production_id,
         wait=True,
         replace_policy=replace_policy,
         resume_from=resume_from,
     )
+    return finish_production(production_id, result)
 
 
 def _assert_final(public: dict, source_tolerance_ms: int = 100) -> dict:
@@ -775,8 +778,10 @@ def test_seedance_without_base_url_does_not_silently_use_local(client: TestClien
     created = _create(client, "全部新生成，做一条香酥虾短视频")
     from video_fission import container
 
+    paused = container.productions.engine.run(created["id"])
+    assert paused["status"] == "awaiting_script_choice"
     with pytest.raises(ValueError, match="base_url"):
-        container.productions.engine.run(created["id"])
+        container.productions.select_script(created["id"], "script_a", wait=True)
     public = container.productions.get(created["id"])
     assert public["status"] == "failed"
     assert "base_url" in public["error"]

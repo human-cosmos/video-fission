@@ -176,6 +176,10 @@ class ProductionService:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] == "running":
             raise ProductionConflict("任务正在运行")
+        with self._lock:
+            active_thread = self._threads.get(production_id)
+        if active_thread and active_thread.is_alive():
+            raise ProductionConflict("任务正在停止，请稍后再试")
         updates: dict[str, Any] = {}
         if title is not None:
             title_text = title.strip()
@@ -255,6 +259,10 @@ class ProductionService:
             raise ProductionNotFound("创作任务不存在")
         if production["status"] == "running":
             raise ProductionConflict("任务正在运行")
+        with self._lock:
+            active_thread = self._threads.get(production_id)
+        if active_thread and active_thread.is_alive():
+            raise ProductionConflict("任务正在停止，请稍后再试")
         updates: dict[str, Any] = {}
         if replace_policy is not None:
             updates["replace_policy"] = normalize_replace_policy(replace_policy)
@@ -361,11 +369,9 @@ class ProductionService:
             event = self._cancels.get(production_id)
         if event:
             event.set()
-        if production["status"] != "running":
-            self.db.update_production(production_id, {"status": "cancelled"})
-        public = self.public(production_id, user_id=user_id)
+        self.db.update_production(production_id, {"status": "cancelled"})
         self.sync_conversation_cards(production_id)
-        return public
+        return self.public(production_id, user_id=user_id)
 
     def delete(self, production_id: str, user_id: str | None = None) -> None:
         production = self.db.get_production(production_id, user_id)
@@ -604,14 +610,17 @@ class ProductionService:
         return upload_id
 
     def _run_thread(self, production_id: str, cancel: threading.Event, resume_from: str | None = None) -> None:
+        thread = threading.current_thread()
         try:
             self.engine.run(production_id, cancel, resume_from=resume_from)
         except Exception:
             pass
         finally:
             with self._lock:
-                self._cancels.pop(production_id, None)
-                self._threads.pop(production_id, None)
+                if self._cancels.get(production_id) is cancel:
+                    self._cancels.pop(production_id, None)
+                if self._threads.get(production_id) is thread:
+                    self._threads.pop(production_id, None)
 
     def _to_public(self, production: dict[str, Any]) -> dict[str, Any]:
         production_id = production["id"]

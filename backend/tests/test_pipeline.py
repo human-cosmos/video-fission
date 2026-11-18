@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from tests.helpers import finish_production
-
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -17,6 +16,8 @@ from video_fission.replace import (
     resolve_replace_plan,
     strip_rewrite_instructions,
 )
+
+from tests.helpers import finish_production
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-reference.mp4"
 
@@ -195,6 +196,32 @@ def test_cancel_draft_and_running_conflict(client: TestClient):
     container.db.update_production(again["id"], {"status": "running"})
     conflict = client.post(f"/api/productions/{again['id']}/run")
     assert conflict.status_code == 409
+
+
+def test_cancel_running_production_updates_status_immediately(client: TestClient):
+    uploaded = _upload(client)
+    created = client.post(
+        "/api/productions",
+        json={"brief": "取消运行中的任务", "video_upload_id": uploaded["id"]},
+    ).json()
+    production_id = created["id"]
+
+    from video_fission import container
+
+    container.db.update_production(production_id, {"status": "running", "current_stage": "decompose"})
+    cancel = threading.Event()
+    with container.productions._lock:
+        container.productions._cancels[production_id] = cancel
+    try:
+        cancelled = client.post(f"/api/productions/{production_id}/cancel")
+    finally:
+        with container.productions._lock:
+            container.productions._cancels.pop(production_id, None)
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancel.wait(timeout=1)
+    assert container.db.get_production(production_id)["status"] == "cancelled"
 
 
 def test_failed_run_keeps_error(client: TestClient):

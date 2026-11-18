@@ -11,6 +11,7 @@ node_modules/
 frontend/dist/
 frontend/test-results/
 frontend/playwright-report/
+status/*.log
 data/*.db
 data/*.db-*
 data/auth_secret

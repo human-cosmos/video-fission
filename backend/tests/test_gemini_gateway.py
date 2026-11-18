@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -224,6 +226,44 @@ def test_invalid_video_response_falls_back_to_frames(monkeypatch, tmp_path: Path
     assert payload["video_lens"][0]["start_time"] == 0
     assert "video_path" in calls[0]
     assert "frames" in calls[1]
+
+
+def test_understand_request_returns_when_cancelled(monkeypatch, tmp_path: Path):
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"jpeg")
+    cancel = threading.Event()
+
+    def blocked_call(_self, _prompt, **_kwargs):
+        time.sleep(5)
+        return {"code": 0, "data": "{}"}
+
+    monkeypatch.setattr(GeminiGatewayClient, "call", blocked_call)
+    timer = threading.Timer(0.2, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        understand_service._call_understand(
+            "gemini_gateway",
+            {
+                "base_url": "https://gateway.example/chat",
+                "model": "gemini-3.8-flash",
+                "max_tokens": 12000,
+            },
+            "token",
+            "分析",
+            None,
+            [frame],
+            0.6,
+            cancel=cancel,
+        )
+    except Exception as exc:
+        assert exc.__class__.__name__ == "PipelineCancelled"
+    else:
+        raise AssertionError("cancelled request must not return normally")
+    finally:
+        timer.cancel()
+
+    assert time.monotonic() - started < 1.5
 
 
 def test_model_lens_coverage_is_checked_before_normalization():

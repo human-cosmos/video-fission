@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -44,6 +46,29 @@ def _raise_if_cancelled(cancel: Any) -> None:
         from video_fission.pipeline import PipelineCancelled
 
         raise PipelineCancelled("任务已取消")
+
+
+def _run_cancellable(work: Callable[[], Any], cancel: Any) -> Any:
+    """Run blocking model I/O without making cancellation wait for its timeout."""
+    _raise_if_cancelled(cancel)
+    results: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            results.put((True, work()))
+        except BaseException as exc:  # noqa: BLE001
+            results.put((False, exc))
+
+    threading.Thread(target=run, name="video-understand-request", daemon=True).start()
+    while True:
+        _raise_if_cancelled(cancel)
+        try:
+            ok, value = results.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        if ok:
+            return value
+        raise value
 
 
 def understand_settings(public: dict[str, Any]) -> dict[str, Any]:
@@ -386,7 +411,14 @@ def _remote_split(
         stamps = [int(duration_ms * ratio) for ratio in (0.08, 0.2, 0.35, 0.5, 0.65, 0.8, 0.92)]
         frames = media.extract_frames(src, stamps, artifact_dir / "tmp", "understand_frame")
     data, used_frames = _call_understand(
-        provider, mm, api_key, prompt, compressed if use_video else None, frames, temperature=0.6
+        provider,
+        mm,
+        api_key,
+        prompt,
+        compressed if use_video else None,
+        frames,
+        temperature=0.6,
+        cancel=cancel,
     )
     _raise_if_cancelled(cancel)
     if used_frames and not warning:
@@ -413,6 +445,7 @@ def _call_understand(
     temperature: float,
     timeout_seconds: int | None = None,
     max_tokens: int | None = None,
+    cancel: Any = None,
 ) -> tuple[Any, bool]:
     timeout = int(timeout_seconds or mm.get("timeout_seconds") or 120)
     output_tokens = int(max_tokens or mm.get("max_tokens") or 12000)
@@ -429,27 +462,43 @@ def _call_understand(
         )
         if video_path is not None and frames:
             try:
-                response = client.call(prompt, video_path=video_path, temperature=temperature)
+                response = _run_cancellable(
+                    lambda: client.call(prompt, video_path=video_path, temperature=temperature),
+                    cancel,
+                )
                 payload = client.extract_payload(response)
                 if payload is not None:
                     return payload, False
             except Exception:  # noqa: BLE001
-                pass
-            response = client.call(prompt, frames=frames, temperature=temperature)
+                if _cancel_requested(cancel):
+                    _raise_if_cancelled(cancel)
+            response = _run_cancellable(
+                lambda: client.call(prompt, frames=frames, temperature=temperature),
+                cancel,
+            )
             return client.extract_payload(response), True
         if video_path is not None:
-            response = client.call(prompt, video_path=video_path, temperature=temperature)
+            response = _run_cancellable(
+                lambda: client.call(prompt, video_path=video_path, temperature=temperature),
+                cancel,
+            )
             return client.extract_payload(response), False
-        response = client.call(prompt, frames=frames, temperature=temperature)
+        response = _run_cancellable(
+            lambda: client.call(prompt, frames=frames, temperature=temperature),
+            cancel,
+        )
         return client.extract_payload(response), True
 
     def _chat(content: list[dict[str, Any]]) -> Any:
-        raw = providers.chat_completions(
-            mm.get("base_url") or "",
-            api_key,
-            mm.get("model") or "",
-            [{"role": "user", "content": content}],
-            timeout,
+        raw = _run_cancellable(
+            lambda: providers.chat_completions(
+                mm.get("base_url") or "",
+                api_key,
+                mm.get("model") or "",
+                [{"role": "user", "content": content}],
+                timeout,
+            ),
+            cancel,
         )
         return providers.extract_json(raw) or extract_json(raw)
 
@@ -498,11 +547,22 @@ def _analyze_clips(
         frames = sorted(artifact_dir.glob(f"{segment['id']}_frame_*.jpg"))[:8]
         video = clip if clip.is_file() else None
         try:
-            data, _used = _call_understand(provider, mm, api_key, prompt, video, frames, temperature=0.4)
+            data, _used = _call_understand(
+                provider,
+                mm,
+                api_key,
+                prompt,
+                video,
+                frames,
+                temperature=0.4,
+                cancel=cancel,
+            )
             if not isinstance(data, dict):
                 raise RuntimeError("片段解析不是对象")
             return segment["id"], normalize_clip_result(data), ""
         except Exception as exc:  # noqa: BLE001
+            if _cancel_requested(cancel):
+                _raise_if_cancelled(cancel)
             return segment["id"], empty_lens_info(segment), f"{segment['id']} 片段解析失败：{exc.__class__.__name__}"
 
     _run_workers(
@@ -545,6 +605,7 @@ def _observe_clips(
                 frames,
                 temperature=0.2,
                 timeout_seconds=options["observe_timeout_seconds"],
+                cancel=cancel,
             )
             payload = data if isinstance(data, dict) else extract_observe_payload(data or {})
             if not isinstance(payload, dict):
@@ -559,6 +620,8 @@ def _observe_clips(
                 raise RuntimeError("observe 为空")
             return segment["id"], result, ""
         except Exception as exc:  # noqa: BLE001
+            if _cancel_requested(cancel):
+                _raise_if_cancelled(cancel)
             return segment["id"], empty_observe(), f"{segment['id']} observe 失败：{exc.__class__.__name__}"
 
     results = _run_workers(

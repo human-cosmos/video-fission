@@ -6,16 +6,8 @@ from pathlib import Path
 from typing import Any
 
 CATEGORY_HINTS: dict[str, tuple[str, ...]] = {
-    "五金工具": ("五金", "电焊", "激光", "修补枪", "工具", "焊"),
-    "健康护理": ("护眼", "老花镜", "假牙", "护理", "精华", "瘦身", "染发", "眼镜", "医疗"),
-    "厨房用品": ("厨房", "不粘锅", "铁锅", "锅", "煎"),
-    "园艺农用": ("园艺", "草籽", "除草", "肥料", "果树", "农"),
-    "家居建材": ("地坪", "自流平", "建材", "环氧", "油漆"),
-    "家居电器": ("电器", "空调", "手电筒", "取暖", "投影灯", "热水器", "净化"),
-    "智能数码": ("手表", "硬盘", "数码", "hud", "wifi", "充电宝", "眼镜", "智能"),
-    "服饰鞋帽": ("护膝", "内衣", "束腰", "服饰", "鞋", "帽"),
-    "汽车用品": ("汽车", "划痕", "镀膜", "车载", "除雪", "吸尘"),
-    "食品零食": ("虾", "蟹", "牛肉", "蓝莓", "零食", "糕", "葡萄干", "番薯", "食品", "美食", "吃"),
+    "除吹雪机": ("除雪", "吹雪", "除霜", "热能", "雪雾", "车窗"),
+    "吹风机": ("吹风", "风炮", "大风力", "落叶", "劈水", "池塘"),
 }
 
 
@@ -58,23 +50,24 @@ class ReferenceLibrary:
         brief_text = brief.strip() or "短视频创作"
         category = self._guess_category(brief_text, docs)
         same = [doc for doc in docs if doc.category == category]
-        ranked_same = self._rank(brief_text, same)[:limit_same]
-        # If the category has fewer than 3, fill from remaining same-category then others later.
-        if len(ranked_same) < limit_same:
-            leftover = [doc for doc in same if doc not in ranked_same]
-            ranked_same.extend(leftover[: limit_same - len(ranked_same)])
-        if len(ranked_same) < limit_same:
-            fillers = [doc for doc in self._rank(brief_text, docs) if doc not in ranked_same]
-            ranked_same.extend(fillers[: limit_same - len(ranked_same)])
-        others = [doc for doc in docs if doc.category != ranked_same[0].category]
-        ranked_cross = self._rank(brief_text, others)[:limit_cross]
-        if not ranked_cross and others:
-            ranked_cross = others[:limit_cross]
-        selected = ranked_same[:limit_same] + ranked_cross[:limit_cross]
+        other_docs = [doc for doc in docs if doc.category != category]
+        selected = self._rank(brief_text, same)[:limit_same]
+
+        # A small category may not have three same-category examples. Fill the
+        # primary slots with the best remaining documents without duplicates.
+        if len(selected) < limit_same:
+            for doc in self._rank(brief_text, other_docs):
+                if doc not in selected:
+                    selected.append(doc)
+                if len(selected) >= limit_same:
+                    break
+
+        cross = [doc for doc in self._rank(brief_text, other_docs) if doc not in selected][:limit_cross]
+        selected.extend(cross)
         results: list[dict[str, Any]] = []
-        for index, doc in enumerate(selected):
+        for doc in selected:
             excerpt = read_intent_excerpt(doc.absolute_path)
-            why = "同品类结构参考" if index < len(ranked_same[:limit_same]) else "跨品类借结构"
+            why = "同品类结构参考" if doc.category == category else "跨品类借结构"
             if excerpt.get("skeleton"):
                 why = f"{why}：{excerpt['skeleton'][:80]}"
             results.append(

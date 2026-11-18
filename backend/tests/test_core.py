@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 from video_fission.db import Database
+from video_fission.references import ReferenceLibrary
 from video_fission.service import RUNTIME_IDLE_SECONDS, CodexHub, ConversationBusy
 from video_fission.skills import SkillManager, SkillValidationError
 from video_fission.tools import build_registry
@@ -396,7 +397,7 @@ def test_ugc_skill_pipeline_is_bundled_and_shares_reference_library(test_setting
 
     reference_root = Path(bundled["video-references"]["path"]).parent / "references"
     scripts = sorted(path for path in reference_root.glob("*/*.md") if path.is_file())
-    assert len(scripts) == 630
+    assert len(scripts) == 13
 
     index = (reference_root / "index.md").read_text(encoding="utf-8")
     assert index.startswith("# Video References Catalog")
@@ -416,6 +417,17 @@ def test_ugc_skill_pipeline_is_bundled_and_shares_reference_library(test_setting
         assert text.count("\n---\n") >= 2
     for category, count in by_category.items():
         assert f"### 【{category}】（共 {count} 篇）" in index
+    assert by_category == {"吹风机": 2, "除吹雪机": 11}
+
+    library = ReferenceLibrary(test_settings.project_root)
+    blower_refs = library.retrieve("便携吹风机大风力吹落叶")
+    snow_refs = library.retrieve("手持热能吹雪机车窗除雪")
+    assert len(blower_refs) == 4
+    assert len({item["path"] for item in blower_refs}) == 4
+    assert [item["category"] for item in blower_refs[:2]] == ["吹风机", "吹风机"]
+    assert [item["category"] for item in snow_refs[:3]] == ["除吹雪机"] * 3
+    assert snow_refs[3]["category"] == "吹风机"
+    assert blower_refs[3]["category"] == "除吹雪机"
 
     db = Database(test_settings.database_path)
     tools = build_registry(db, test_settings.workspace, test_settings.artifacts_dir)

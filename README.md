@@ -16,7 +16,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 文件上传和附件上下文
 - SQLite 数据存储，默认启用 WAL
 - 项目内 Skill 目录、图形化创建/编辑/启停/删除
-- 参考视频意图、UGC 脚本生成和 630 篇参考脚本共享技能链
+- 参考视频意图、UGC 脚本生成和 13 篇吹风机/除吹雪机参考脚本共享技能链
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
 - 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频并下载可播放的 `final.mp4`
@@ -215,7 +215,7 @@ Tool 定义位于 `backend/video_fission/tools.py`。新增 Tool 时注册名称
 | `video-brief` | 通用短视频策划简报 |
 | `creative-intent-script-skeleton` | 理解创作说明和参考视频拆解，先收敛意图、概念和 Hook/Value/CTA 骨架 |
 | `universal-ugc-video-script-generation` | 在骨架确认后生成镜头级分镜、片段复用/生成计划和音视频合成要求 |
-| `video-references` | 10 个品类、630 篇 UGC 参考脚本；供上述两个创作 Skill 共享检索 |
+| `video-references` | 2 个品类、13 篇 UGC 参考脚本；供上述两个创作 Skill 共享检索 |
 
 参考脚本和全量索引导航位于 `skills/video-references/references/`。意图阶段读取首行骨架和注意项，完整脚本阶段读取至少 3 篇目标脚本全文。
 

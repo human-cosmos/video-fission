@@ -1602,3 +1602,7 @@ P2 SAR `2264:2265` 属实（出在 Ken Burns 生成段，复用段是 1:1 / 16:9
 ## 阻塞
 
 无
+
+## Grok 写回记录 · 2026-11-18 15:00 Asia/Shanghai
+
+在本机 `8a0ef5e`（含「Gemini video understanding pipeline」与「prune video reference library to blower categories」两个已推送提交）之上，只合入了共享盘的开头区间改动：`understand/opening.py`、提示词与 `service` 的模型结果后吸附、脚本/合成的 `shot_opening` 连续块、规划卡 `opening`/`duration_ms`，以及前端标注组件。未覆盖本机认证多用户、Gemini gateway 接线、精简后的参考素材库，也未回写已删除的参考文案。未 git 提交。

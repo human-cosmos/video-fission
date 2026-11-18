@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .understand.opening import expand_opening_plan, opening_block_generate
+
 ALLOWED_MODES = ("default", "all", "selected", "brief")
 ALLOWED_ROLES = ("hook", "value", "cta", "other")
 NO_HIT_MESSAGE = "没有命中任何片段"
@@ -216,6 +218,7 @@ def resolve_replace_plan(
     policy: Any,
     segments: list[dict[str, Any]] | None,
     brief: str = "",
+    opening: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy = normalize_replace_policy(policy)
     segments = list(segments or [])
@@ -272,11 +275,13 @@ def resolve_replace_plan(
                 if segment.get("role") in {"hook", "cta"}:
                     add(segment, "default_hook_cta")
 
-    return {
+    plan = {
         "policy": policy,
         "resolved_segment_ids": resolved,
         "reasons": reasons,
     }
+    expanded = expand_opening_plan(plan, opening, segments)
+    return expanded or plan
 
 
 def apply_replace_plan(script: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
@@ -284,10 +289,15 @@ def apply_replace_plan(script: dict[str, Any], production: dict[str, Any]) -> di
     resolved = set(plan.get("resolved_segment_ids") or [])
     if not plan:
         return script
+    opening = (production.get("decomposition") or {}).get("opening") or script.get("opening")
     shots = []
     for shot in script.get("shots") or []:
         segment_id = shot.get("source_segment_id")
-        action = "generate" if segment_id in resolved else "reuse"
+        is_opening = shot.get("source_kind") == "opening" or shot.get("id") == (script.get("opening") or {}).get("shot_id") or shot.get("id") == "shot_opening"
+        if is_opening:
+            action = "generate" if opening_block_generate(plan, opening) else "reuse"
+        else:
+            action = "generate" if segment_id in resolved else "reuse"
         item = dict(shot)
         item["action"] = action
         if action == "generate":

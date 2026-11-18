@@ -8,6 +8,7 @@ import {
 import { sourceVideoUrl } from '../utils/productionMedia'
 import { slotTrail, videoDescribe, videoTagsOf, visibleVideoTags } from '../utils/understandDisplay'
 import AspectVideo from './AspectVideo.vue'
+import VideoOpeningRange from './VideoOpeningRange.vue'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
@@ -40,6 +41,7 @@ const sourceUrl = computed(() => sourceVideoUrl(props.payload))
         {{ tag.values.join('、') }}
       </li>
     </ul>
+    <VideoOpeningRange :payload="payload" />
     <AspectVideo
       v-if="sourceUrl"
       :src="sourceUrl"

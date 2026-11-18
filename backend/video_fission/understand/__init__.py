@@ -8,6 +8,7 @@ from .normalize import (
     role_from_slot,
     validate_segments,
 )
+from .opening import parse_opening, snap_opening_end
 from .service import run_decompose, understand_settings
 
 __all__ = [
@@ -15,7 +16,9 @@ __all__ = [
     "coverage_ok_lenses",
     "extract_video_tags",
     "normalize_tags",
+    "parse_opening",
     "role_from_slot",
+    "snap_opening_end",
     "run_decompose",
     "understand_settings",
     "validate_segments",

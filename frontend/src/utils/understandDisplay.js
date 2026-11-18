@@ -1,3 +1,5 @@
+import { formatTimecode } from './format'
+
 export const VIDEO_TAG_LABELS = {
   product_name: '商品',
   environment_categories: '场景类型',
@@ -118,4 +120,96 @@ export function claimText(claim) {
   if (!claim) return ''
   if (typeof claim === 'string') return claim.trim()
   return String(claim.raw_claim || claim.text || claim.claim || '').trim()
+}
+
+export function openingOf(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  // Titles and model/estimate labels come only from decomposition.opening
+  // (or the same object already copied onto the card payload). Never use
+  // script.opening here: that field has no method and is only for shot identity.
+  return payload.opening || payload.decomposition?.opening || null
+}
+
+export function openingEndMs(opening) {
+  const end = Number(opening?.end_ms)
+  if (!Number.isFinite(end) || end <= 0) return 0
+  return Math.round(end)
+}
+
+export function shouldShowOpening(opening) {
+  return openingEndMs(opening) > 0
+}
+
+export function isModelOpening(opening) {
+  return shouldShowOpening(opening) && opening?.method === 'model'
+}
+
+export function isLocalOpeningEstimate(opening) {
+  return shouldShowOpening(opening) && opening?.method === 'local_fallback'
+}
+
+export function openingRangeText(opening) {
+  const end = openingEndMs(opening)
+  if (!end) return ''
+  return `${formatTimecode(0)}–${formatTimecode(end)}`
+}
+
+export function openingTitle(opening) {
+  const range = openingRangeText(opening)
+  if (!range) return ''
+  if (isModelOpening(opening)) return `开头 ${range}`
+  if (isLocalOpeningEstimate(opening)) return `本地暂估开头 ${range}`
+  return `开头区间 ${range}`
+}
+
+export function openingReason(opening) {
+  return String(opening?.reason || '').trim()
+}
+
+export function mediaDurationMs(payload, opening = openingOf(payload)) {
+  const candidates = [
+    payload?.source_video?.duration_ms,
+    payload?.duration_ms,
+    payload?.decomposition?.source_video?.duration_ms,
+  ]
+  for (const value of candidates) {
+    const n = Number(value)
+    if (Number.isFinite(n) && n > 0) return Math.round(n)
+  }
+  const segments = payload?.segments || payload?.decomposition?.segments || []
+  if (segments.length) {
+    const end = Math.max(0, ...segments.map((segment) => Number(segment?.end_ms) || 0))
+    if (end > 0) return Math.round(end)
+  }
+  return openingEndMs(opening)
+}
+
+export function openingTrack(opening, durationMs) {
+  const end = openingEndMs(opening)
+  const duration = Number(durationMs)
+  if (!end || !Number.isFinite(duration) || duration <= 0) return null
+  const widthPct = Math.min(100, Math.max(0, (end / duration) * 100))
+  return { startPct: 0, widthPct, endMs: end, durationMs: Math.round(duration) }
+}
+
+export function segmentInOpening(segment, opening) {
+  const end = openingEndMs(opening)
+  if (!end || !segment) return false
+  const start = Math.max(0, Number(segment.start_ms) || 0)
+  return start < end
+}
+
+export function isOpeningShot(shot, opening) {
+  if (!shot) return false
+  const shotId = shot.id || shot.shot_id || ''
+  if (shotId === 'shot_opening' || shot.source_kind === 'opening') return true
+  const expected = opening?.shot_id || ''
+  if (expected && shotId === expected) return true
+  if (!openingEndMs(opening)) return false
+  const start = Math.max(0, Number(shot.start_ms) || 0)
+  const explicitEnd = Number(shot.end_ms)
+  const end = Number.isFinite(explicitEnd) && explicitEnd > 0
+    ? explicitEnd
+    : start + (Number(shot.duration_ms) || 0)
+  return start === 0 && end === openingEndMs(opening)
 }

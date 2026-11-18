@@ -13,6 +13,7 @@ from .paths import production_artifact_dir
 from .references import ReferenceLibrary
 from .replace import apply_replace_plan, resolve_replace_plan, strip_rewrite_instructions
 from .settings_store import SettingsStore
+from .understand.opening import opening_block_generate
 
 logger = logging.getLogger(__name__)
 
@@ -186,8 +187,14 @@ class PipelineEngine:
 
     def _stage_intent(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
         production = self._get(production_id)
-        segments = (production.get("decomposition") or {}).get("segments") or []
-        plan = resolve_replace_plan(production.get("replace_policy"), segments, production.get("brief") or "")
+        decomposition = production.get("decomposition") or {}
+        segments = decomposition.get("segments") or []
+        plan = resolve_replace_plan(
+            production.get("replace_policy"),
+            segments,
+            production.get("brief") or "",
+            opening=decomposition.get("opening"),
+        )
         self.db.update_production(production_id, {"replace_plan": plan})
         production = self._get(production_id)
         refs = self.library.retrieve(production["brief"])
@@ -330,10 +337,10 @@ class PipelineEngine:
             dest = art / f"{shot['id']}.mp4"
             duration_ms = int(shot["duration_ms"])
             if shot["action"] == "reuse":
-                segment = segments.get(shot.get("source_segment_id") or "")
-                if not segment:
+                start_ms, end_ms, segment = _reuse_range(shot, segments, production)
+                if end_ms <= start_ms:
                     raise ValueError(f"{shot['id']} 缺少可复用源片段")
-                media.cut_segment(src, dest, int(segment["start_ms"]), int(segment["end_ms"]), width, height, fps, True)
+                media.cut_segment(src, dest, start_ms, end_ms, width, height, fps, True)
                 if not _has_audio(dest):
                     media.add_silence_audio(dest, dest.with_name(dest.stem + "_a.mp4"), duration_ms)
                     dest.with_name(dest.stem + "_a.mp4").replace(dest)
@@ -382,12 +389,12 @@ class PipelineEngine:
                     provider_name = "local_ffmpeg"
                 if not _has_audio(dest):
                     tmp = dest.with_name(dest.stem + "_a.mp4")
-                    segment = segments.get(shot.get("source_segment_id") or "")
-                    if segment and media.probe(src).get("has_audio"):
+                    start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
+                    if (segment or _is_opening_shot(shot, production.get("script") or {})) and media.probe(src).get("has_audio"):
                         media.mux_timeline_audio(
                             dest,
                             src,
-                            int(segment["start_ms"]),
+                            start_ms,
                             tmp,
                             duration_ms,
                         )
@@ -423,14 +430,11 @@ class PipelineEngine:
         shots = script.get("shots") or []
         source_info = production.get("source_video") or {}
         fps = float(source_info.get("fps") or 30)
+        opening_shot_id = str(((script.get("opening") or {}).get("shot_id") or ""))
         faded: list[Path] = []
         for index, item in enumerate(clips):
             path = Path(item["path"])
-            action = (shots[index]["action"] if index < len(shots) else "") or ""
-            prev_action = (shots[index - 1]["action"] if index > 0 and index - 1 < len(shots) else "")
-            next_action = (shots[index + 1]["action"] if index + 1 < len(shots) else "")
-            fade_in = bool(prev_action and prev_action != action)
-            fade_out = bool(next_action and next_action != action)
+            fade_in, fade_out = shot_edge_fades(index, shots, opening_shot_id)
             duration_ms = int((shots[index]["duration_ms"] if index < len(shots) else item.get("duration_ms")) or 1)
             if fade_in or fade_out:
                 faded_path = art / f"{item['shot_id']}_fade.mp4"
@@ -506,6 +510,52 @@ class PipelineEngine:
             raise PipelineCancelled("任务已取消")
 
 
+def _is_opening_shot(shot: dict[str, Any], script: dict[str, Any] | None = None) -> bool:
+    if shot.get("source_kind") == "opening":
+        return True
+    shot_id = str((script or {}).get("opening", {}).get("shot_id") or "shot_opening")
+    return str(shot.get("id") or "") == shot_id
+
+
+def _opening_from(production: dict[str, Any], script: dict[str, Any] | None = None) -> dict[str, Any]:
+    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
+    if script and script.get("opening"):
+        opening = {**opening, **(script.get("opening") or {})}
+    return opening
+
+
+def _reuse_range(
+    shot: dict[str, Any],
+    segments: dict[str, Any],
+    production: dict[str, Any],
+) -> tuple[int, int, dict[str, Any] | None]:
+    opening = _opening_from(production, production.get("script") or {})
+    if _is_opening_shot(shot, production.get("script") or {}) and int(opening.get("end_ms") or 0) > 0:
+        return 0, int(opening["end_ms"]), segments.get(shot.get("source_segment_id") or "") or None
+    segment = segments.get(shot.get("source_segment_id") or "")
+    if not segment:
+        return 0, 0, None
+    return int(segment["start_ms"]), int(segment["end_ms"]), segment
+
+
+def shot_edge_fades(index: int, shots: list[dict[str, Any]], opening_shot_id: str | None = None) -> tuple[bool, bool]:
+    """开头块内部不打淡化；只允许开头结束与后续镜头交界、以及后续镜头之间淡化。"""
+    if index < 0 or index >= len(shots):
+        return False, False
+    action = (shots[index].get("action") if index < len(shots) else "") or ""
+    prev_action = (shots[index - 1].get("action") if index > 0 else "") or ""
+    next_action = (shots[index + 1].get("action") if index + 1 < len(shots) else "") or ""
+    fade_in = bool(prev_action and prev_action != action)
+    fade_out = bool(next_action and next_action != action)
+    current_id = str(shots[index].get("id") or "")
+    is_opening = current_id == (opening_shot_id or "") or shots[index].get("source_kind") == "opening"
+    if is_opening:
+        fade_in = False
+    return fade_in, fade_out
+
+
+
+
 def plan_segments(
     duration_ms: int,
     cuts: list[int],
@@ -517,28 +567,38 @@ def plan_segments(
     hook_target = window
     cta_target = max(duration_ms - window, window)
 
-    def snap(target: int, low: int, high: int) -> int:
+    def snap(target: int, low: int, high: int, invent: bool) -> int | None:
         if has_audio and silence:
             nearby = [point for point in silence if low <= point <= high and abs(point - target) <= 200]
             if nearby:
                 return min(nearby, key=lambda point: abs(point - target))
-        # Prefer a real scene cut anywhere in the legal hook/cta window,
-        # not only one within 400ms of the nominal 15% target.
         nearby = [point for point in cuts if low <= point <= high]
         if nearby:
             return min(nearby, key=lambda point: abs(point - target))
-        return min(max(target, low), high)
+        if invent:
+            return min(max(target, low), high)
+        return None
 
-    hook_end = snap(hook_target, 800, max(duration_ms - 1200, 801))
-    cta_start = snap(cta_target, hook_end + 400, max(duration_ms - 400, hook_end + 400))
-    mid_cuts = [cut for cut in cuts if hook_end + 400 < cut < cta_start - 400]
-    if len(cuts) < 2:
-        mid_cuts = []
-        cursor = hook_end + 4000
-        while cursor < cta_start - 800:
-            mid_cuts.append(cursor)
-            cursor += 4000
-    bounds = [0, hook_end, *mid_cuts, cta_start, duration_ms]
+    hook_high = max(duration_ms - 1200, 801)
+    hook_end = snap(hook_target, 800, hook_high, invent=False)
+    if hook_end is None:
+        later = [point for point in list(cuts) + (list(silence) if has_audio else []) if 800 <= point <= duration_ms - 400]
+        hook_end = min(later) if later else None
+    hook_for_cta = hook_end if hook_end is not None else 0
+    cta_start = snap(cta_target, hook_for_cta + 400, max(duration_ms - 400, hook_for_cta + 400), invent=True)
+    assert cta_start is not None
+    if hook_end is not None:
+        mid_cuts = [cut for cut in cuts if hook_end + 400 < cut < cta_start - 400]
+        if len(cuts) < 2:
+            mid_cuts = []
+            cursor = hook_end + 4000
+            while cursor < cta_start - 800:
+                mid_cuts.append(cursor)
+                cursor += 4000
+        bounds = [0, hook_end, *mid_cuts, cta_start, duration_ms]
+    else:
+        mid_cuts = [cut for cut in cuts if 400 < cut < cta_start - 400]
+        bounds = [0, *mid_cuts, cta_start, duration_ms]
     unique: list[int] = []
     for value in sorted(bounds):
         value = min(max(value, 0), duration_ms)
@@ -721,63 +781,112 @@ def shot_on_screen_text(segment: dict[str, Any], voiceover: str) -> str:
 def local_script(production: dict[str, Any]) -> dict[str, Any]:
     brief = production.get("brief") or ""
     segments = (production.get("decomposition") or {}).get("segments") or []
+    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
     skeleton = production.get("skeleton") or {}
     plan = production.get("replace_plan") or {}
-    resolved = set(plan.get("resolved_segment_ids") or [])
     generate_all = bool(re.search(r"全部新生成|全部生成|all generate|generate all", brief, re.I))
     reuse_most = bool(re.search(r"尽量复用|复用原片|reuse", brief, re.I))
-    shots: list[dict[str, Any]] = []
-    value_cursor = 0
     width = int((production.get("source_video") or {}).get("width") or 1080)
     height = int((production.get("source_video") or {}).get("height") or 1920)
     aspect = "9:16" if height > width else "16:9"
-    for index, segment in enumerate(segments, start=1):
+    opening_end = int(opening.get("end_ms") or 0)
+    opening_ids = set(opening.get("segment_ids") or [])
+    if opening_end > 0 and not opening_ids:
+        opening_ids = {str(seg.get("id") or "") for seg in segments if int(seg.get("start_ms") or 0) < opening_end}
+
+    def segment_action(segment: dict[str, Any], in_opening: bool) -> str:
+        if in_opening:
+            if generate_all:
+                return "generate"
+            if plan:
+                return "generate" if opening_block_generate(plan, opening, generate_all) else "reuse"
+            return "reuse"
         role = segment.get("role") or "other"
-        duration_ms = max(int(segment["end_ms"]) - int(segment["start_ms"]), 1)
         if plan:
-            action = "generate" if segment.get("id") in resolved else "reuse"
-        elif generate_all:
-            action = "generate"
-        elif reuse_most:
-            action = "reuse" if role == "value" else "generate"
-        else:
-            action = "generate" if role in {"hook", "cta"} else "reuse"
-        if action == "reuse":
-            source_id = segment["id"]
-        else:
-            source_id = segment["id"]
+            return "generate" if segment.get("id") in set(plan.get("resolved_segment_ids") or []) else "reuse"
+        if generate_all:
+            return "generate"
+        if reuse_most:
+            return "reuse" if role == "value" else "generate"
+        return "generate" if role in {"hook", "cta"} else "reuse"
+
+    def build_shot(index: int, segment: dict[str, Any], action: str, duration_ms: int | None = None, shot_id: str | None = None, source_kind: str = "", value_index: int = 0) -> dict[str, Any]:
+        role = segment.get("role") or "other"
+        duration_ms = max(int(duration_ms if duration_ms is not None else int(segment["end_ms"]) - int(segment["start_ms"])), 1)
         visual = segment.get("visual") or f"{role} 镜头"
-        value_index = value_cursor
-        if role == "value":
-            value_cursor += 1
         text = shot_voiceover(segment, skeleton, duration_ms, brief=brief, value_index=value_index)
         prompt = (
             f"{visual}. {text}. Slow camera move, {duration_ms}ms, {width}x{height} {aspect}, "
             "natural lighting, no logos, product-focused."
         )
-        shots.append(
-            {
-                "id": f"shot_{index:02d}",
-                "role": role if role in {"hook", "value", "cta", "other"} else "other",
-                "duration_ms": duration_ms,
-                "action": action,
-                "source_segment_id": source_id if action == "reuse" or True else None,
-                "visual": visual,
-                "voiceover": text if role != "other" else "",
-                "on_screen_text": shot_on_screen_text(segment, text) if role != "other" else "",
-                "prompt": prompt if action == "generate" else "",
-            }
-        )
-        if action == "reuse":
-            shots[-1]["source_segment_id"] = segment["id"]
-        # generate shots still record the related segment for keyframes
-        if action == "generate":
-            shots[-1]["source_segment_id"] = segment["id"]
-            if not shots[-1]["prompt"]:
-                shots[-1]["prompt"] = prompt
-    # Contract: reuse must have source_segment_id; generate must have prompt.
+        item = {
+            "id": shot_id or f"shot_{index:02d}",
+            "role": role if role in {"hook", "value", "cta", "other"} else "other",
+            "duration_ms": duration_ms,
+            "action": action,
+            "source_segment_id": segment.get("id") or "",
+            "visual": visual,
+            "voiceover": text if role != "other" else "",
+            "on_screen_text": shot_on_screen_text(segment, text) if role != "other" else "",
+            "prompt": prompt if action == "generate" else "",
+        }
+        if source_kind:
+            item["source_kind"] = source_kind
+        return item
+
+    shots: list[dict[str, Any]] = []
+    value_cursor = 0
+    if opening_end > 0:
+        in_opening = [seg for seg in segments if str(seg.get("id") or "") in opening_ids or int(seg.get("start_ms") or 0) < opening_end]
+        after = [seg for seg in segments if int(seg.get("start_ms") or 0) >= opening_end]
+        head = in_opening[0] if in_opening else {
+            "id": "",
+            "role": "hook",
+            "start_ms": 0,
+            "end_ms": opening_end,
+            "summary": "",
+            "visual": "开头连续镜头",
+            "on_screen_text": "",
+        }
+        # Keep hook copy as voiceover lead, then append later opening summaries.
+        parts: list[str] = []
+        for item in in_opening or [head]:
+            role = item.get("role") or "other"
+            value_index = value_cursor
+            if role == "value":
+                value_cursor += 1
+            span = max(int(item.get("end_ms") or 0) - int(item.get("start_ms") or 0), 1)
+            line = shot_voiceover(item, skeleton, span, brief=brief, value_index=value_index)
+            if line and line not in parts:
+                parts.append(line)
+        head = {
+            **head,
+            "visual": "开头连续镜头",
+            "summary": " ".join(parts) or (head.get("summary") or "开场连续块"),
+        }
+        action = segment_action(head, True)
+        opening_shot = build_shot(1, head, action, duration_ms=opening_end, shot_id="shot_opening", source_kind="opening")
+        opening_shot["role"] = "hook"
+        opening_shot["voiceover"] = " ".join(parts) or opening_shot.get("voiceover") or ""
+        opening_shot["on_screen_text"] = shot_on_screen_text(head, opening_shot["voiceover"])
+        if action == "generate" and not opening_shot.get("prompt"):
+            opening_shot["prompt"] = opening_shot["visual"]
+        shots.append(opening_shot)
+        for offset, segment in enumerate(after, start=2):
+            role = segment.get("role") or "other"
+            value_index = value_cursor
+            if role == "value":
+                value_cursor += 1
+            shots.append(build_shot(offset, segment, segment_action(segment, False), value_index=value_index))
+    else:
+        for index, segment in enumerate(segments, start=1):
+            role = segment.get("role") or "other"
+            value_index = value_cursor
+            if role == "value":
+                value_cursor += 1
+            shots.append(build_shot(index, segment, segment_action(segment, False), value_index=value_index))
     total = sum(int(shot["duration_ms"]) for shot in shots)
-    return {
+    script = {
         "total_duration_ms": total,
         "shots": shots,
         "audio_plan": {
@@ -786,7 +895,13 @@ def local_script(production: dict[str, Any]) -> dict[str, Any]:
             "subtitles": True,
         },
     }
-
+    if opening_end > 0:
+        script["opening"] = {
+            "start_ms": 0,
+            "end_ms": opening_end,
+            "shot_id": "shot_opening",
+        }
+    return script
 
 def normalize_script(data: dict[str, Any], production: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
     shots_in = data.get("shots") or fallback.get("shots") or []
@@ -803,21 +918,22 @@ def normalize_script(data: dict[str, Any], production: dict[str, Any], fallback:
         prompt = str(raw.get("prompt") or "")
         if action == "generate" and not prompt:
             prompt = str(raw.get("visual") or production.get("brief") or "Generate a short product shot")
-        shots.append(
-            {
-                "id": str(raw.get("id") or f"shot_{index:02d}"),
-                "role": raw.get("role") if raw.get("role") in {"hook", "value", "cta", "other"} else "other",
-                "duration_ms": duration_ms,
-                "action": action,
-                "source_segment_id": source_id or next(iter(segments), ""),
-                "visual": str(raw.get("visual") or ""),
-                "voiceover": str(raw.get("voiceover") or ""),
-                "on_screen_text": str(raw.get("on_screen_text") or ""),
-                "prompt": prompt if action == "generate" else "",
-            }
-        )
+        item = {
+            "id": str(raw.get("id") or f"shot_{index:02d}"),
+            "role": raw.get("role") if raw.get("role") in {"hook", "value", "cta", "other"} else "other",
+            "duration_ms": duration_ms,
+            "action": action,
+            "source_segment_id": source_id or next(iter(segments), ""),
+            "visual": str(raw.get("visual") or ""),
+            "voiceover": str(raw.get("voiceover") or ""),
+            "on_screen_text": str(raw.get("on_screen_text") or ""),
+            "prompt": prompt if action == "generate" else "",
+        }
+        if raw.get("source_kind"):
+            item["source_kind"] = raw.get("source_kind")
+        shots.append(item)
     audio = data.get("audio_plan") or fallback.get("audio_plan") or {}
-    return {
+    script = {
         "total_duration_ms": int(data.get("total_duration_ms") or sum(s["duration_ms"] for s in shots)),
         "shots": shots,
         "audio_plan": {
@@ -825,6 +941,76 @@ def normalize_script(data: dict[str, Any], production: dict[str, Any], fallback:
             "bgm": audio.get("bgm") or "reuse_reference",
             "subtitles": bool(audio["subtitles"]) if "subtitles" in audio else True,
         },
+    }
+    if data.get("opening"):
+        script["opening"] = data.get("opening")
+    return merge_opening_script(script, production)
+
+
+def merge_opening_script(script: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    opening = dict(((production.get("decomposition") or {}).get("opening") or {}))
+    end_ms = int(opening.get("end_ms") or 0)
+    if end_ms <= 0:
+        return script
+    shots = list(script.get("shots") or [])
+    already = [shot for shot in shots if _is_opening_shot(shot, script) or shot.get("id") == "shot_opening"]
+    if already:
+        already[0]["id"] = "shot_opening"
+        already[0]["source_kind"] = "opening"
+        already[0]["duration_ms"] = end_ms
+        if opening_block_generate(production.get("replace_plan") or {}, opening):
+            already[0]["action"] = "generate"
+            if not already[0].get("prompt"):
+                already[0]["prompt"] = already[0].get("visual") or production.get("brief") or "Generate opening block"
+        script = {
+            **script,
+            "opening": {"start_ms": 0, "end_ms": end_ms, "shot_id": "shot_opening"},
+            "shots": shots,
+            "total_duration_ms": sum(int(item["duration_ms"]) for item in shots),
+        }
+        return script
+    cursor = 0
+    in_shots: list[dict[str, Any]] = []
+    after: list[dict[str, Any]] = []
+    for shot in shots:
+        start = cursor
+        cursor += int(shot.get("duration_ms") or 0)
+        if start < end_ms:
+            in_shots.append(shot)
+        else:
+            after.append(shot)
+    if not in_shots:
+        return {
+            **script,
+            "opening": {"start_ms": 0, "end_ms": end_ms, "shot_id": "shot_opening"},
+        }
+    head = dict(in_shots[0])
+    head["id"] = "shot_opening"
+    head["source_kind"] = "opening"
+    head["role"] = "hook"
+    head["duration_ms"] = end_ms
+    voices = [str(item.get("voiceover") or "").strip() for item in in_shots if str(item.get("voiceover") or "").strip()]
+    screens = [str(item.get("on_screen_text") or "").strip() for item in in_shots if str(item.get("on_screen_text") or "").strip()]
+    if voices:
+        head["voiceover"] = " ".join(voices)
+    if screens:
+        head["on_screen_text"] = screens[0]
+    head["visual"] = head.get("visual") or "开头连续镜头"
+    plan = production.get("replace_plan") or {}
+    generate_all = bool(re.search(r"全部新生成|全部生成|all generate|generate all", str(production.get("brief") or ""), re.I))
+    if generate_all or opening_block_generate(plan, opening, generate_all):
+        head["action"] = "generate"
+        if not head.get("prompt"):
+            head["prompt"] = head.get("visual") or production.get("brief") or "Generate opening block"
+    else:
+        head["action"] = "reuse"
+        head["prompt"] = ""
+    merged = [head, *after]
+    return {
+        **script,
+        "opening": {"start_ms": 0, "end_ms": end_ms, "shot_id": "shot_opening"},
+        "shots": merged,
+        "total_duration_ms": sum(int(item["duration_ms"]) for item in merged),
     }
 
 

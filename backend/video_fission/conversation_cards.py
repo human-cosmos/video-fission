@@ -64,22 +64,47 @@ def understanding_payload(public: dict[str, Any]) -> dict[str, Any] | None:
         "model": decomposition.get("model") or "",
         "video_tags": tags,
         "segments": list(decomposition.get("segments") or []),
+        "opening": decomposition.get("opening"),
         "source_video": source,
         "source_video_url": source_url,
     }
 
 
+def _media_duration_ms(public: dict[str, Any]) -> int:
+    source = public.get("source_video") or {}
+    try:
+        duration = int(source.get("duration_ms") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if duration > 0:
+        return duration
+    segments = (public.get("decomposition") or {}).get("segments") or []
+    ends = []
+    for segment in segments:
+        try:
+            ends.append(int(segment.get("end_ms") or 0))
+        except (TypeError, ValueError):
+            continue
+    return max(ends) if ends else 0
+
+
 def plan_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     if not any(public.get(key) for key in ("intent", "skeleton", "script", "replace_plan")):
         return None
-    return {
+    decomposition = public.get("decomposition") or {}
+    duration_ms = _media_duration_ms(public)
+    payload = {
         "production_id": public["id"],
         "intent": public.get("intent"),
         "skeleton": public.get("skeleton"),
         "script": public.get("script"),
         "replace_policy": public.get("replace_policy"),
         "replace_plan": public.get("replace_plan"),
+        "opening": decomposition.get("opening") if isinstance(decomposition, dict) else None,
     }
+    if duration_ms > 0:
+        payload["duration_ms"] = duration_ms
+    return payload
 
 
 def _segment_action(segment_id: str, public: dict[str, Any]) -> str:
@@ -134,6 +159,7 @@ def segments_payload(public: dict[str, Any], artifact_dir: Path | None = None) -
         "updated_at": public.get("updated_at"),
         "segments": items,
         "clips": clips,
+        "opening": decomposition.get("opening"),
         "replace_plan": public.get("replace_plan"),
         "replace_policy": public.get("replace_policy"),
     }

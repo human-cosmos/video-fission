@@ -11,8 +11,9 @@ import {
   segmentFrameNames,
 } from '../utils/format'
 import { clipMediaUrl, frameMediaUrl } from '../utils/productionMedia'
-import { slotTrail } from '../utils/understandDisplay'
+import { openingOf, segmentInOpening, slotTrail } from '../utils/understandDisplay'
 import AspectVideo from './AspectVideo.vue'
+import VideoOpeningRange from './VideoOpeningRange.vue'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
@@ -33,6 +34,7 @@ const segments = computed(
 const shots = computed(() => props.payload?.shots || props.payload?.script?.shots || [])
 const clips = computed(() => props.payload?.clips || [])
 const replacePlan = computed(() => props.payload?.replace_plan || null)
+const opening = computed(() => openingOf(props.payload))
 const selectedIds = computed(() =>
   segments.value.map((segment) => segment.id).filter((id) => regenSelected.value[id]),
 )
@@ -84,11 +86,13 @@ function segmentClipUrl(segment) {
     <p v-if="replacePlan" class="page-muted" data-testid="video-replace-plan">
       本轮新生成：{{ (replacePlan.resolved_segment_ids || []).join('、') || '无' }}
     </p>
+    <VideoOpeningRange :payload="payload" />
     <ol v-if="segments.length" class="segment-list">
       <li
         v-for="segment in segments"
         :key="segment.id"
         class="segment-item"
+        :class="{ 'segment-item--in-opening': segmentInOpening(segment, opening) }"
         :data-testid="`video-segment-${segment.id}`"
       >
         <header>

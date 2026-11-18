@@ -27,6 +27,7 @@ from .normalize import (
     validate_segments,
 )
 from .observe import empty_observe, extract_observe_payload, normalize_observe_response, observe_prompt, probe_has_audio
+from .opening import estimate_local_opening, finalize_opening, parse_opening, snap_opening_end
 from .transitions import TransitionDetector, TransitionInfo, detection_available
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,7 @@ def run_decompose(
     used_provider = "local_ffmpeg"
     model_name = ""
     remote_lenses: list[dict[str, Any]] | None = None
+    model_opening: dict[str, Any] | None = None
 
     remote_ready = (
         provider in {"openai_compatible", "gemini_gateway"}
@@ -140,7 +142,7 @@ def run_decompose(
     _emit("stage_started", {"stage": "decompose", "step": "understand"})
     if remote_ready:
         try:
-            remote_lenses, video_tags, used_provider, model_name, remote_warning = _remote_split(
+            remote_lenses, video_tags, used_provider, model_name, remote_warning, model_opening = _remote_split(
                 src,
                 artifact_dir,
                 duration_s,
@@ -154,6 +156,10 @@ def run_decompose(
             if remote_warning:
                 warnings.append(remote_warning)
                 _emit("warning", {"stage": "decompose", "step": "understand", "message": remote_warning})
+            if remote_lenses is not None and model_opening is None:
+                message = "模型未给出有效开头区间，已改用本地暂估，不能当作模型开头"
+                warnings.append(message)
+                _emit("warning", {"stage": "decompose", "step": "understand", "message": message})
         except Exception as exc:  # noqa: BLE001
             from video_fission.pipeline import PipelineCancelled
 
@@ -165,6 +171,7 @@ def run_decompose(
             remote_lenses = None
             used_provider = "local_ffmpeg"
             video_tags = empty_video_tags()
+            model_opening = None
     _emit("stage_completed", {"stage": "decompose", "step": "understand"})
     _check()
 
@@ -188,14 +195,30 @@ def run_decompose(
             segments = to_production_segments(local_lenses, duration_ms, production_id)
             used_provider = "local_ffmpeg"
             video_tags = empty_video_tags()
+            model_opening = None
     else:
         segments = to_production_segments(local_lenses, duration_ms, production_id)
 
     _fill_local_fields(segments, info, cuts)
     ensure_segment_summaries(segments, fallback=f"参考视频 {duration_ms}ms")
 
+    if model_opening:
+        bounds = [int(item["end_ms"]) for item in segments if 0 < int(item["end_ms"]) < duration_ms]
+        end_ms = snap_opening_end(
+            int(model_opening["end_ms"]),
+            duration_ms=duration_ms,
+            cuts_ms=cuts,
+            silence_ms=silence,
+            segment_bounds_ms=bounds,
+        )
+        opening = {**model_opening, "end_ms": end_ms, "method": "model", "start_ms": 0}
+    else:
+        opening = estimate_local_opening(duration_ms, cuts, silence)
+    opening = finalize_opening(opening, segments, duration_ms, production_id)
+
     _emit("stage_started", {"stage": "decompose", "step": "clip_analysis"})
     _cut_and_frame(src, artifact_dir, segments, info, production_id, cancel, _check)
+    _cut_opening_clip(src, artifact_dir, opening, info, production_id)
     if remote_ready and used_provider != "local_ffmpeg" and options["clip_analysis"]:
         _analyze_clips(
             segments,
@@ -243,6 +266,7 @@ def run_decompose(
         "model": model_name,
         "video_tags": video_tags,
         "segments": segments,
+        "opening": opening,
     }
 
 
@@ -307,6 +331,39 @@ def _cut_and_frame(
             logger.info("抽帧失败 %s: %s", seg_id, exc)
 
 
+
+def _cut_opening_clip(
+    src: Path,
+    artifact_dir: Path,
+    opening: dict[str, Any],
+    info: dict[str, Any],
+    production_id: str,
+) -> None:
+    end_ms = int(opening.get("end_ms") or 0)
+    if end_ms <= 0:
+        opening.pop("clip_path", None)
+        opening.pop("clip_url", None)
+        return
+    dest = artifact_dir / "clips" / "opening.mp4"
+    try:
+        cut_playback_clip(
+            src,
+            dest,
+            0,
+            end_ms,
+            int(info["width"]),
+            int(info["height"]),
+            float(info["fps"] or 25),
+            bool(info["has_audio"]),
+        )
+        opening["clip_path"] = "clips/opening.mp4"
+        opening["clip_url"] = f"/api/productions/{production_id}/artifacts/clips/opening.mp4"
+    except Exception as exc:  # noqa: BLE001
+        logger.info("开头连续块切片失败: %s", exc)
+        opening.pop("clip_path", None)
+        opening.pop("clip_url", None)
+
+
 def _remote_split(
     src: Path,
     artifact_dir: Path,
@@ -317,7 +374,7 @@ def _remote_split(
     options: dict[str, Any],
     transition_info: TransitionInfo,
     cancel: Any,
-) -> tuple[list[dict[str, Any]], dict[str, Any], str, str, str]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], str, str, str, dict[str, Any] | None]:
     _raise_if_cancelled(cancel)
     prompt = build_split_prompt(duration_s)
     compressed, warning = ensure_under_size(src, artifact_dir / "tmp", options["gemini_max_size_mb"])
@@ -342,7 +399,8 @@ def _remote_split(
     if not coverage_ok_lenses(lenses, duration_s):
         raise RuntimeError("模型切片未覆盖全片或存在明显空隙")
     tags = extract_video_tags(data)
-    return lenses, tags, provider, str(mm.get("model") or ""), warning
+    opening = parse_opening(data, int(duration_s * 1000))
+    return lenses, tags, provider, str(mm.get("model") or ""), warning, opening
 
 
 def _call_understand(

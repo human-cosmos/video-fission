@@ -1,6 +1,8 @@
 <script setup>
 import { computed } from 'vue'
-import { cleanDisplayText, referenceLabel } from '../utils/format'
+import { cleanDisplayText, formatDuration, referenceLabel } from '../utils/format'
+import { isOpeningShot, openingOf } from '../utils/understandDisplay'
+import VideoOpeningRange from './VideoOpeningRange.vue'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
@@ -11,11 +13,37 @@ const skeleton = computed(() => props.payload?.skeleton || {})
 const references = computed(() => intent.value?.references || props.payload?.references || [])
 const replacePlan = computed(() => props.payload?.replace_plan || null)
 const resolved = computed(() => replacePlan.value?.resolved_segment_ids || [])
+const opening = computed(() => openingOf(props.payload))
+const shots = computed(() => props.payload?.script?.shots || props.payload?.shots || [])
+
+function shotDuration(shot) {
+  const explicit = Number(shot?.duration_ms)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  const start = Math.max(0, Number(shot?.start_ms) || 0)
+  const end = Number(shot?.end_ms)
+  if (Number.isFinite(end) && end > start) return end - start
+  return 0
+}
+
 </script>
 
 <template>
   <section class="video-card studio-card" data-testid="video-plan-card">
     <h3>任务规划</h3>
+    <VideoOpeningRange :payload="payload" />
+    <ol v-if="shots.length" class="opening-shot-list" data-testid="video-plan-shots">
+      <li
+        v-for="shot in shots"
+        :key="shot.id || shot.shot_id"
+        class="opening-shot-item"
+        :class="{ 'opening-shot-item--block': isOpeningShot(shot, opening) }"
+        :data-testid="isOpeningShot(shot, opening) ? 'video-plan-opening-shot' : `video-plan-shot-${shot.id || shot.shot_id}`"
+      >
+        <strong>{{ isOpeningShot(shot, opening) ? '开头连续块' : (shot.id || shot.shot_id) }}</strong>
+        <span v-if="shotDuration(shot)">{{ formatDuration(shotDuration(shot)) }}</span>
+        <em v-if="shot.action">{{ shot.action }}</em>
+      </li>
+    </ol>
     <dl v-if="intent.goal || intent.audience || intent.promise" class="intent-grid">
       <div v-if="intent.goal">
         <dt>目标</dt>

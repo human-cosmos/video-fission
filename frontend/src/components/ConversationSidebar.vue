@@ -14,7 +14,7 @@ import {
   Settings2,
   X,
 } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   compactTitle,
   conversationStateLabel,
@@ -26,7 +26,6 @@ const props = defineProps({
   currentUser: { type: Object, required: true },
   conversations: { type: Array, default: () => [] },
   currentId: { type: String, default: '' },
-  showArchived: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   mobileOpen: { type: Boolean, default: false },
   collapsed: { type: Boolean, default: false },
@@ -44,7 +43,6 @@ const emit = defineEmits([
   'select',
   'archive',
   'unarchive',
-  'toggle-archived',
   'close-mobile',
   'toggle-collapse',
   'resize-start',
@@ -69,6 +67,16 @@ function closeAccountMenu() {
   if (accountMenu.value) accountMenu.value.open = false
 }
 
+function handleDocumentPointerDown(event) {
+  if (accountMenu.value?.open && !accountMenu.value.contains(event.target)) {
+    closeAccountMenu()
+  }
+}
+
+function handleDocumentKeyDown(event) {
+  if (event.key === 'Escape') closeAccountMenu()
+}
+
 function openSettings() {
   closeAccountMenu()
   emit('open-settings')
@@ -78,6 +86,16 @@ function logout() {
   closeAccountMenu()
   emit('logout')
 }
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+  document.addEventListener('keydown', handleDocumentKeyDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  document.removeEventListener('keydown', handleDocumentKeyDown)
+})
 </script>
 
 <template>
@@ -126,7 +144,7 @@ function logout() {
     </label>
 
     <div class="sidebar-section-label">
-      <span>{{ showArchived ? '归档对话' : '最近对话' }}</span>
+      <span>最近对话</span>
       <LoaderCircle v-if="loading" class="spin" :size="14" />
       <span v-else>{{ conversations.length }}</span>
     </div>
@@ -233,10 +251,6 @@ function logout() {
     </section>
 
     <footer class="sidebar-footer">
-      <button class="archive-toggle" @click="$emit('toggle-archived')">
-        <Archive :size="14" />
-        {{ showArchived ? '返回最近对话' : '查看归档' }}
-      </button>
       <div class="sidebar-utility-group" data-testid="sidebar-account-group">
         <details ref="accountMenu" class="sidebar-account-menu">
           <summary

@@ -54,7 +54,6 @@ const rerunning = ref(false)
 const selectingScript = ref(false)
 const cancelling = ref(false)
 const videoInput = ref(null)
-const showArchived = ref(false)
 const conversationQuery = ref('')
 const nextConversationCursor = ref('')
 const hasMoreConversations = ref(false)
@@ -172,11 +171,6 @@ const effortOptions = computed(() =>
     detail: effortDetails[effort] || '',
   })),
 )
-const visibleConversations = computed(() =>
-  conversations.value.filter((item) =>
-    showArchived.value ? item.is_archived : !item.is_archived,
-  ),
-)
 const hasConversation = computed(() => Boolean(currentConversation.value?.id))
 const isArchived = computed(() => Boolean(currentConversation.value?.is_archived))
 const productionVideo = computed(() => attachments.value.find((file) => isVideoFile(file)))
@@ -260,23 +254,15 @@ async function runBootstrap() {
     ])
     if (
       workspaceMode.value === 'chat' &&
-      visibleConversations.value.length &&
+      conversations.value.length &&
       !currentConversation.value
     ) {
       const savedId = window.localStorage.getItem('video-fission.activeConversation')
       const savedExists = conversations.value.some((item) => item.id === savedId)
       await selectConversation(
         (savedExists ? savedId : null) ||
-          conversations.value.find((item) => !item.is_archived)?.id ||
           conversations.value[0].id,
       )
-    } else if (workspaceMode.value === 'chat' && !visibleConversations.value.length) {
-      const archived = await api.conversations({ archived: true, limit: 1 })
-      if (archived.items?.length) {
-        showArchived.value = true
-        await loadConversations({ reset: true })
-        await selectConversation(visibleConversations.value[0].id)
-      }
     }
   } catch (error) {
     setBootError(error)
@@ -304,7 +290,6 @@ async function loadConversations({
   }
   try {
     const payload = await api.conversations({
-      archived: showArchived.value,
       cursor,
       query: conversationQuery.value,
       limit: CONVERSATION_PAGE_SIZE,
@@ -520,21 +505,12 @@ function startDraftConversation() {
 
 async function newConversation() {
   await waitForAppReady()
-  if (showArchived.value) {
-    showArchived.value = false
-    conversationQuery.value = ''
-    await loadConversations({ reset: true })
-  }
   startDraftConversation()
 }
 
 async function createConversationTask() {
   workspaceMode.value = 'chat'
   try {
-    if (showArchived.value) {
-      showArchived.value = false
-      conversationQuery.value = ''
-    }
     const model = currentConversation.value?.model || models.value[0]?.id || null
     const effort =
       models.value.find((item) => item.id === model)?.default_reasoning_effort || 'high'
@@ -628,22 +604,15 @@ async function loadMoreConversations() {
 
 async function alignCurrentConversationWithView() {
   const currentId = currentConversation.value?.id
-  if (currentId && visibleConversations.value.some((item) => item.id === currentId)) {
+  if (currentId && conversations.value.some((item) => item.id === currentId)) {
     return
   }
-  const next = visibleConversations.value[0]
+  const next = conversations.value[0]
   if (next) {
     await selectConversation(next.id)
     return
   }
   startDraftConversation()
-}
-
-async function toggleArchivedView() {
-  showArchived.value = !showArchived.value
-  conversationQuery.value = ''
-  await loadConversations({ reset: true })
-  await alignCurrentConversationWithView()
 }
 
 async function pollConversations() {
@@ -1076,9 +1045,8 @@ onBeforeUnmount(() => {
   >
     <ConversationSidebar
       :current-user="currentUser"
-      :conversations="visibleConversations"
+      :conversations="conversations"
       :current-id="currentConversation?.id || ''"
-      :show-archived="showArchived"
       :loading="loading || listLoading"
       :mobile-open="mobileSidebar"
       :collapsed="sidebarCollapsed"
@@ -1093,7 +1061,6 @@ onBeforeUnmount(() => {
       @select="selectConversation"
       @archive="archiveConversation"
       @unarchive="unarchiveConversation"
-      @toggle-archived="toggleArchivedView"
       @search="handleConversationSearch"
       @load-more="loadMoreConversations"
       @close-mobile="mobileSidebar = false"

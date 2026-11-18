@@ -180,7 +180,7 @@ test('creates the conversation only when the first message is sent', async ({ pa
   expect((await after.json()).items.length).toBe(beforeCount)
 })
 
-test('searches conversations and keeps archive navigation aligned', async ({ page, request }) => {
+test('searches conversations and keeps archived items out of the sidebar', async ({ page, request }) => {
   const marker = `VF_E2E_LIST_${Date.now()}`
   const active = await request.post('/api/conversations', {
     data: { title: `${marker}_ACTIVE` },
@@ -199,12 +199,9 @@ test('searches conversations and keeps archive navigation aligned', async ({ pag
   await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` })).toHaveCount(0)
 
   await search.fill('')
-  await page.getByRole('button', { name: '查看归档' }).click()
-  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` })).toBeVisible()
-  await page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` }).click()
-
-  await page.getByRole('button', { name: '返回最近对话' }).click()
   await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ACTIVE` })).toBeVisible()
+  await expect(page.locator('.conversation-row').filter({ hasText: `${marker}_ARCHIVED` })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '查看归档' })).toHaveCount(0)
   await request.delete(`/api/conversations/${activeId}`)
   await request.delete(`/api/conversations/${archivedId}`)
 })

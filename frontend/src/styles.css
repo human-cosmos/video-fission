@@ -693,22 +693,6 @@ body.is-resizing-sidebar {
   user-select: none;
 }
 
-.archive-toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 3px;
-  color: var(--sidebar-muted);
-  font-size: 11px;
-  cursor: pointer;
-  background: transparent;
-  border: 0;
-}
-
-.archive-toggle:hover {
-  color: var(--sidebar-ink);
-}
-
 .workspace {
   position: relative;
   display: grid;
@@ -2771,7 +2755,6 @@ a.button.primary {
   .sidebar.is-collapsed .conversation-search,
   .sidebar.is-collapsed .sidebar-section-label,
   .sidebar.is-collapsed .conversation-list,
-  .sidebar.is-collapsed .archive-toggle,
   .sidebar.is-collapsed .sidebar-resize-handle {
     display: none;
   }

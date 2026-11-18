@@ -1,27 +1,17 @@
 <script setup>
 import {
   Activity,
-  Archive,
   ArrowUp,
   Check,
   Clapperboard,
-  GitBranch,
-  LogOut,
   Menu,
-  MoreHorizontal,
   Paperclip,
-  PanelRight,
-  RefreshCw,
-  Settings2,
   Square,
-  Trash2,
   X,
   Zap,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, eventUrl } from './api'
-import BrandLockup from './components/BrandLockup.vue'
-import CapabilityPanel from './components/CapabilityPanel.vue'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
@@ -45,14 +35,11 @@ defineEmits(['logout'])
 const conversations = ref([])
 const currentConversation = ref(null)
 const models = ref([])
-const skills = ref([])
-const tools = ref([])
 const loading = ref(true)
 const listLoading = ref(false)
 const bootError = ref('')
 const composer = ref('')
 const attachments = ref([])
-const skillMentions = ref([])
 const uploading = ref(false)
 const sending = ref(false)
 const policyMode = ref('brief')
@@ -62,7 +49,6 @@ const cancelling = ref(false)
 const videoInput = ref(null)
 const showArchived = ref(false)
 const mobileSidebar = ref(false)
-const mobileCapabilities = ref(false)
 const toast = ref('')
 const streamConnected = ref(false)
 const timeline = ref(null)
@@ -93,7 +79,6 @@ watch(workspaceMode, (mode) => {
   window.localStorage.setItem(MODE_STORAGE_KEY, mode)
   if (mode !== 'chat') {
     mobileSidebar.value = false
-    mobileCapabilities.value = false
   }
 })
 
@@ -230,12 +215,7 @@ async function runBootstrap() {
   loading.value = true
   bootError.value = ''
   try {
-    const [capabilityPayload, modelPayload] = await Promise.all([
-      api.capabilities(),
-      api.models().catch(() => ({ items: [] })),
-    ])
-    skills.value = capabilityPayload.skills || []
-    tools.value = capabilityPayload.tools || []
+    const modelPayload = await api.models().catch(() => ({ items: [] }))
     models.value = modelPayload.items || []
     await Promise.all([loadConversations(), loadProductions()])
     if (conversations.value.length && !currentConversation.value) {
@@ -252,12 +232,6 @@ async function runBootstrap() {
   } finally {
     loading.value = false
   }
-}
-
-async function loadCapabilities() {
-  const payload = await api.capabilities()
-  skills.value = payload.skills || []
-  tools.value = payload.tools || []
 }
 
 async function loadConversations() {
@@ -377,7 +351,6 @@ async function selectConversationTask(id) {
     uploadGeneration += 1
     uploading.value = false
     clearAttachments()
-    skillMentions.value = []
     mobileSidebar.value = false
     connectStream(id, detail.latest_event_id || 0)
     await loadConversations()
@@ -597,21 +570,6 @@ async function removeAttachment(id) {
   }
 }
 
-function useSkill(skill) {
-  if (!skillMentions.value.some((item) => item.path === `skill://${skill.slug}`)) {
-    skillMentions.value.push({
-      name: skill.name,
-      path: `skill://${skill.slug}`,
-    })
-  }
-  mobileCapabilities.value = false
-  composerInput.value?.focus()
-}
-
-function removeMention(path) {
-  skillMentions.value = skillMentions.value.filter((item) => item.path !== path)
-}
-
 async function send() {
   if (!canSend.value) return
   if (isArchived.value) {
@@ -621,7 +579,6 @@ async function send() {
   sending.value = true
   const text = composer.value.trim()
   const files = [...attachments.value]
-  const mentions = [...skillMentions.value]
   try {
     let conversation = currentConversation.value
     if (!conversation?.id) {
@@ -635,7 +592,7 @@ async function send() {
         const { previewUrl, ...rest } = file
         return isVideoFile(file) ? toProductionVideoFile(rest) : rest
       }),
-      mentions,
+      mentions: [],
     }
     if (productionVideo.value) {
       payload.replace_policy = { mode: policyMode.value || 'brief' }
@@ -647,7 +604,6 @@ async function send() {
     }
     composer.value = ''
     clearAttachments()
-    skillMentions.value = []
     await refreshCurrent()
     await loadProductions()
     timeline.value?.scrollToBottom()
@@ -792,56 +748,6 @@ async function unarchiveConversation(id) {
   }
 }
 
-async function forkConversation() {
-  if (!currentConversation.value?.id) return
-  try {
-    const forked = await api.fork(currentConversation.value.id)
-    await loadConversations()
-    await selectConversation(forked.id)
-    notify('已从当前上下文创建分叉')
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
-async function compactConversation() {
-  if (!currentConversation.value?.id) return
-  try {
-    await api.compact(currentConversation.value.id)
-    notify('已开始压缩上下文')
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
-async function syncConversation() {
-  if (!currentConversation.value?.id) return
-  try {
-    const result = await api.sync(currentConversation.value.id)
-    await refreshCurrent()
-    notify(`已同步 ${result.synced} 条运行时记录`)
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
-async function deleteConversation() {
-  if (!currentConversation.value?.id) return
-  if (!window.confirm('永久删除这个对话及其本地记录？')) return
-  try {
-    await api.deleteConversation(currentConversation.value.id)
-    window.localStorage.removeItem('video-fission.activeConversation')
-    closeStream()
-    currentConversation.value = null
-    await loadConversations()
-    const next = conversations.value.find((item) => !item.is_archived)
-    if (next) await selectConversation(next.id)
-    notify('对话已删除')
-  } catch (error) {
-    notify(error.message)
-  }
-}
-
 async function copyReply(text) {
   try {
     await navigator.clipboard.writeText(text)
@@ -866,7 +772,6 @@ function insertLineBreak(event) {
 function handleShortcut(event) {
   if (event.key === 'Escape') {
     mobileSidebar.value = false
-    mobileCapabilities.value = false
     return
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
@@ -905,6 +810,7 @@ onBeforeUnmount(() => {
     :style="{ '--sidebar-width': `${sidebarGridWidth}px` }"
   >
     <ConversationSidebar
+      :current-user="currentUser"
       :conversations="visibleConversations"
       :current-id="currentConversation?.id || ''"
       :show-archived="showArchived"
@@ -927,6 +833,7 @@ onBeforeUnmount(() => {
       @resize-reset="resetSidebarWidth"
       @bind-unbound="bindUnboundProduction"
       @open-settings="openSettings"
+      @logout="$emit('logout')"
     />
 
     <main class="workspace" :class="{ 'page-mode': !isChatMode }">
@@ -993,44 +900,6 @@ onBeforeUnmount(() => {
             </template>
           </TopbarSelect>
 
-          <details v-if="isChatMode && currentConversation" class="more-menu">
-            <summary class="icon-button" aria-label="更多操作"><MoreHorizontal :size="19" /></summary>
-            <div class="menu-popover">
-              <button @click="syncConversation"><RefreshCw :size="14" /> 同步历史</button>
-              <button @click="forkConversation"><GitBranch :size="14" /> 创建分叉</button>
-              <button @click="compactConversation"><Settings2 :size="14" /> 压缩上下文</button>
-              <button
-                v-if="!currentConversation.is_archived"
-                @click="archiveConversation(currentConversation.id)"
-              >
-                <Archive :size="14" /> 归档
-              </button>
-              <button class="danger" @click="deleteConversation">
-                <Trash2 :size="14" /> 永久删除
-              </button>
-            </div>
-          </details>
-          <details class="account-menu">
-            <summary class="account-button" :title="currentUser.display_name || currentUser.username">
-              <span>{{ (currentUser.display_name || currentUser.username || 'U')[0].toUpperCase() }}</span>
-              <b>{{ currentUser.display_name || currentUser.username }}</b>
-            </summary>
-            <div class="menu-popover account-popover">
-              <div class="account-summary">
-                <strong>{{ currentUser.display_name || currentUser.username }}</strong>
-                <span>@{{ currentUser.username }} · {{ currentUser.role === 'admin' ? '管理员' : '成员' }}</span>
-              </div>
-              <button @click="$emit('logout')"><LogOut :size="14" /> 退出登录</button>
-            </div>
-          </details>
-          <button
-            v-if="isChatMode"
-            class="icon-button mobile-only capability-toggle"
-            aria-label="打开能力台"
-            @click="mobileCapabilities = true"
-          >
-            <PanelRight :size="19" />
-          </button>
         </div>
       </header>
 
@@ -1111,17 +980,7 @@ onBeforeUnmount(() => {
               </label>
             </div>
           </fieldset>
-          <div v-if="skillMentions.length || otherAttachments.length" class="composer-context">
-            <span
-              v-for="mention in skillMentions"
-              :key="mention.path"
-              class="context-chip skill-chip"
-            >
-              @{{ mention.name }}
-              <button aria-label="移除 Skill" @click="removeMention(mention.path)">
-                <X :size="11" />
-              </button>
-            </span>
+          <div v-if="otherAttachments.length" class="composer-context">
             <span v-for="file in otherAttachments" :key="file.id" class="context-chip">
               {{ file.name }}
               <button :aria-label="`移除 ${file.name}`" @click="removeAttachment(file.id)">
@@ -1169,14 +1028,6 @@ onBeforeUnmount(() => {
                   @change="uploadComposerVideo"
                 />
               </label>
-              <button
-                class="capability-trigger"
-                type="button"
-                @click="mobileCapabilities = true"
-              >
-                <Zap :size="13" />
-                {{ skills.length + tools.length }} 项能力
-              </button>
               <span v-if="uploading" class="uploading-label">上传中…</span>
             </div>
             <div class="send-actions">
@@ -1215,18 +1066,8 @@ onBeforeUnmount(() => {
         v-else-if="workspaceMode === 'settings'"
         :current-user="currentUser"
         @notify="notify"
-        @capabilities-changed="loadCapabilities"
       />
     </main>
-
-    <CapabilityPanel
-      v-if="isChatMode"
-      :skills="skills"
-      :mobile-open="mobileCapabilities"
-      @use-skill="useSkill"
-      @open-settings="openSettings"
-      @close-mobile="mobileCapabilities = false"
-    />
 
     <Transition name="toast">
       <div v-if="toast" class="toast-message" role="status">

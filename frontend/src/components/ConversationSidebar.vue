@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Clapperboard,
   LoaderCircle,
+  LogOut,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -18,6 +19,7 @@ import { compactTitle, formatRelativeTime } from '../utils/events'
 import BrandLockup from './BrandLockup.vue'
 
 const props = defineProps({
+  currentUser: { type: Object, required: true },
   conversations: { type: Array, default: () => [] },
   currentId: { type: String, default: '' },
   showArchived: { type: Boolean, default: false },
@@ -43,10 +45,12 @@ const emit = defineEmits([
   'resize-reset',
   'bind-unbound',
   'open-settings',
+  'logout',
 ])
 
 const query = ref('')
 const unboundOpen = ref(true)
+const accountMenu = ref(null)
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()
   if (!needle) return props.conversations
@@ -54,6 +58,25 @@ const filtered = computed(() => {
     `${item.title} ${item.last_error || ''}`.toLowerCase().includes(needle),
   )
 })
+const accountName = computed(
+  () => props.currentUser.display_name || props.currentUser.username || '用户',
+)
+const accountInitial = computed(() => accountName.value.slice(0, 1).toUpperCase())
+const accountRole = computed(() => (props.currentUser.role === 'admin' ? '管理员' : '成员'))
+
+function closeAccountMenu() {
+  if (accountMenu.value) accountMenu.value.open = false
+}
+
+function openSettings() {
+  closeAccountMenu()
+  emit('open-settings')
+}
+
+function logout() {
+  closeAccountMenu()
+  emit('logout')
+}
 </script>
 
 <template>
@@ -187,19 +210,38 @@ const filtered = computed(() => {
         <Archive :size="14" />
         {{ showArchived ? '返回最近对话' : '查看归档' }}
       </button>
-      <button
-        class="sidebar-settings-button"
-        type="button"
-        data-testid="mode-settings"
-        :class="{ active: settingsActive }"
-        :aria-pressed="settingsActive"
-        aria-label="系统设置"
-        title="系统设置"
-        @click="$emit('open-settings')"
-      >
-        <Settings2 :size="15" />
-        <span>系统设置</span>
-      </button>
+      <div class="sidebar-utility-group" data-testid="sidebar-account-group">
+        <details ref="accountMenu" class="sidebar-account-menu">
+          <summary
+            class="sidebar-account-button"
+            data-testid="sidebar-user-menu"
+            :title="accountName"
+          >
+            <span class="sidebar-account-avatar">{{ accountInitial }}</span>
+            <span class="sidebar-account-copy">
+              <strong>{{ accountName }}</strong>
+              <small>@{{ currentUser.username }} · {{ accountRole }}</small>
+            </span>
+            <ChevronRight class="sidebar-account-chevron" :size="14" />
+          </summary>
+          <div class="sidebar-account-popover">
+            <button
+              type="button"
+              data-testid="mode-settings"
+              :class="{ active: settingsActive }"
+              :aria-pressed="settingsActive"
+              @click="openSettings"
+            >
+              <Settings2 :size="14" />
+              系统设置
+            </button>
+            <button type="button" class="danger" @click="logout">
+              <LogOut :size="14" />
+              退出登录
+            </button>
+          </div>
+        </details>
+      </div>
     </footer>
 
     <div

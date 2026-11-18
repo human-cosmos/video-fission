@@ -63,6 +63,7 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
     timeout: 120_000,
   })
 
+  await page.getByTestId('sidebar-user-menu').click()
   await page.getByTestId('mode-settings').click()
   await page.getByTestId('settings-create-skill').click()
   const editor = page.getByTestId('skill-editor')
@@ -104,7 +105,7 @@ test('creates a persistent Codex conversation, invokes a tool, and creates a ski
   })
 })
 
-test('keeps the conversation and capability controls reachable on mobile', async ({
+test('keeps the conversation and account controls reachable on mobile', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
@@ -113,10 +114,12 @@ test('keeps the conversation and capability controls reachable on mobile', async
 
   await page.getByRole('button', { name: '打开会话列表' }).click()
   await expect(page.getByTestId('new-conversation')).toBeInViewport()
+  await page.getByTestId('sidebar-user-menu').click()
+  await expect(page.getByTestId('mode-settings')).toBeInViewport()
+  await expect(page.getByRole('button', { name: '退出登录' })).toBeInViewport()
+  await expect(page.getByTestId('sidebar-account-group')).toBeInViewport()
+  await expect(page.getByRole('button', { name: '打开能力台' })).toHaveCount(0)
   await page.getByRole('button', { name: '关闭会话列表' }).click()
-
-  await page.getByRole('button', { name: '打开能力台' }).click()
-  await expect(page.getByRole('heading', { name: '能力台' })).toBeInViewport()
   await page.waitForTimeout(300)
   await page.screenshot({
     path: testInfo.outputPath('video-fission-mobile.png'),

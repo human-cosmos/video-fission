@@ -1,4 +1,8 @@
 const TOOL_LABELS = {
+  prepare_video_production: '准备视频创作',
+  run_video_production: '提交视频创作',
+  workspace_snapshot: '查看工作区',
+  read_workspace_file: '读取工作区文件',
   ingest_reference_video: '接入参考视频',
   understand_reference_video: '理解参考视频',
   extract_landing_points: '抽取落地页卖点',
@@ -55,52 +59,71 @@ export function skillLabel(name) {
 }
 
 export function agentTraceItems(payload) {
-  return agentTraceOf(payload).flatMap((item, index) => {
-    if (item.type === 'plan') {
-      const tools = agentPlanTools(item)
-      return [{
-        key: `plan-${index}`,
-        kind: 'plan',
-        label: '编排计划',
-        detail: tools.length ? tools.map(toolLabel).join(' → ') : '尚未列出步骤',
-        skills: agentPlanSkills(item).map((name) => ({ name, label: skillLabel(name) })),
-        tools,
-        state: 'plan',
-      }]
-    }
-    if (item.type === 'skill') {
-      const name = String(item.name || '').trim()
-      if (!name) return []
-      return [{
-        key: `skill-${index}-${name}`,
-        kind: 'skill',
-        name,
-        label: skillLabel(name),
-        detail: name,
-        state: 'loaded',
-      }]
-    }
-    if (item.type === 'tool') {
-      const name = String(item.name || '').trim()
-      if (!name) return []
-      const failed = item.success === false
-      return [{
-        key: `tool-${index}-${name}`,
+  const trace = agentTraceOf(payload)
+  const rows = []
+  const planIndex = trace.findLastIndex((item) => item.type === 'plan')
+
+  if (planIndex >= 0) {
+    const plan = trace[planIndex]
+    const tools = agentPlanTools(plan)
+    rows.push({
+      key: `plan-${planIndex}`,
+      kind: 'plan',
+      label: '编排计划',
+      detail: tools.length ? tools.map(toolLabel).join(' → ') : '尚未列出步骤',
+      skills: agentPlanSkills(plan).map((name) => ({ name, label: skillLabel(name) })),
+      tools,
+      state: 'plan',
+    })
+  }
+
+  const seenSkills = new Set()
+  for (const item of trace) {
+    if (item.type !== 'skill') continue
+    const name = String(item.name || '').trim()
+    if (!name || seenSkills.has(name)) continue
+    seenSkills.add(name)
+    rows.push({
+      key: `skill-${name}`,
+      kind: 'skill',
+      name,
+      label: skillLabel(name),
+      detail: name,
+      state: 'loaded',
+    })
+  }
+
+  const latestTools = new Map()
+  trace.forEach((item, index) => {
+    if (item.type !== 'tool') return
+    const name = String(item.name || '').trim()
+    if (!name) return
+    const failed = item.success === false
+    latestTools.set(name, {
+      order: index,
+      row: {
+        key: `tool-${name}`,
         kind: 'tool',
         name,
         label: toolLabel(name),
         detail: name,
         state: failed ? 'failed' : 'done',
         success: !failed,
-      }]
-    }
-    return []
+      },
+    })
   })
+  rows.push(
+    ...[...latestTools.values()]
+      .sort((left, right) => left.order - right.order)
+      .map((entry) => entry.row),
+  )
+
+  return rows
 }
 
 export function nextPlannedTool(payload) {
   const planned = agentPlanTools(latestAgentPlan(payload))
-  const done = agentTraceOf(payload).filter((item) => item.type === 'tool')
+  const done = agentTraceItems(payload).filter((item) => item.kind === 'tool')
   const last = done.at(-1)
   if (last && last.success === false) return String(last.name || '').trim()
   if (done.length >= planned.length) return ''

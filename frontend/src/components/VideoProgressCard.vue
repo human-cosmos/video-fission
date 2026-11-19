@@ -2,12 +2,7 @@
 import { Check, ChevronRight, LoaderCircle, X } from '@lucide/vue'
 import { computed } from 'vue'
 import { STAGE_LABELS, STAGE_ORDER, STATUS_LABELS } from '../utils/format'
-import {
-  agentTraceItems,
-  agentTraceSummary,
-  currentAgentActionText,
-  hasAgentTrace,
-} from '../utils/agentTraceDisplay'
+import { currentAgentActionText } from '../utils/agentTraceDisplay'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
@@ -21,10 +16,42 @@ const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
 const awaitingCreativeContext = computed(() => status.value === 'awaiting_creative_context')
 const awaitingScript = computed(() => status.value === 'awaiting_script_choice')
+const latestActivityStage = computed(() => {
+  const items = props.payload?.activity || []
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const stage = items[index]?.stage
+    if (STAGE_ORDER.includes(stage)) return stage
+  }
+  return ''
+})
+const effectiveStage = computed(() => {
+  if (status.value !== 'running') return currentStage.value || latestActivityStage.value
+  const currentIndex = STAGE_ORDER.indexOf(currentStage.value)
+  const activityIndex = STAGE_ORDER.indexOf(latestActivityStage.value)
+  if (activityIndex > currentIndex && activityIndex < STAGE_ORDER.indexOf('done')) {
+    return latestActivityStage.value
+  }
+  return currentStage.value || latestActivityStage.value
+})
 const stages = computed(() => {
   const provided = props.payload?.stages
-  if (Array.isArray(provided) && provided.length) return provided
-  const active = currentStage.value
+  if (Array.isArray(provided) && provided.length) {
+    if (status.value !== 'running') return provided
+    const activeIndex = STAGE_ORDER.indexOf(effectiveStage.value)
+    return provided.map((stage) => {
+      const index = STAGE_ORDER.indexOf(stage.id)
+      return {
+        ...stage,
+        state:
+          index < activeIndex
+            ? 'done'
+            : index === activeIndex
+              ? 'active'
+              : 'pending',
+      }
+    })
+  }
+  const active = effectiveStage.value
   const activeIndex = STAGE_ORDER.indexOf(active)
   return STAGE_ORDER.map((id, index) => ({
     id,
@@ -62,14 +89,11 @@ const allStagesDone = computed(
     pipelineStages.value.length > 0 &&
     pipelineStages.value.every((stage) => stage.state === 'done'),
 )
-const showAgentTrace = computed(() => hasAgentTrace(props.payload))
-const traceItems = computed(() => agentTraceItems(props.payload))
-const traceSummary = computed(() => agentTraceSummary(props.payload))
 const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
   if (awaitingScript.value) return '等待选择创意脚本'
-  if (showAgentTrace.value && agentActionText.value) {
+  if (agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value
     if (status.value === 'running') return agentActionText.value
   }
@@ -87,10 +111,9 @@ const statusTitle = computed(() => {
     script: '正在生成创意脚本',
     generate: '正在生成视频片段',
     compose: '正在合成最终成片',
-  }[currentStage.value] || '正在推进视频任务'
+  }[effectiveStage.value] || '正在推进视频任务'
 })
 const stageProgressText = computed(() => {
-  if (showAgentTrace.value && traceSummary.value) return traceSummary.value
   if (allStagesDone.value) return `${pipelineStages.value.length} 个阶段已完成`
   if (!activeStage.value) return STATUS_LABELS[status.value] || '等待下一阶段'
   return `${activeStage.value.label} · ${activeStageIndex.value}/${pipelineStages.value.length}`
@@ -101,9 +124,20 @@ const futureStagePath = computed(() =>
 const currentActivity = computed(() => {
   if (!isRunning.value) return null
   const items = (props.payload?.activity || []).filter(
-    (item) => item?.stage === currentStage.value,
+    (item) => item?.stage === effectiveStage.value,
   )
   return items[items.length - 1] || null
+})
+const currentOperationText = computed(() => {
+  if (!currentActivity.value) return ''
+  if (currentActivity.value.kind === 'tool_started') {
+    return agentActionText.value || 'Agent 正在调用工具'
+  }
+  return currentActivity.value.text || agentActionText.value || statusTitle.value
+})
+const currentOperationDetail = computed(() => {
+  const detail = currentActivity.value?.detail
+  return detail && detail !== currentOperationText.value ? detail : ''
 })
 const warnings = computed(() => {
   const value = props.payload?.warnings || props.payload?.warning
@@ -174,32 +208,9 @@ function formatClock(value) {
       data-testid="video-current-operation"
     >
       <LoaderCircle class="is-spinning" :size="15" />
-      <span>{{ currentActivity.text }}</span>
-      <small v-if="currentActivity.detail">{{ currentActivity.detail }}</small>
+      <span>{{ currentOperationText }}</span>
+      <small v-if="currentOperationDetail">{{ currentOperationDetail }}</small>
     </div>
-    <section v-if="showAgentTrace" class="agent-trace" data-testid="video-progress-agent-trace">
-      <header class="agent-trace-head">
-        <strong>执行轨迹</strong>
-        <span v-if="traceSummary">{{ traceSummary }}</span>
-      </header>
-      <ol class="agent-trace-list">
-        <li
-          v-for="item in traceItems"
-          :key="item.key"
-          :class="`agent-trace-item agent-trace-item--${item.kind} is-${item.state}`"
-          :data-testid="item.kind === 'plan' ? 'video-progress-agent-plan' : `video-progress-agent-${item.kind}-${item.name}`"
-        >
-          <span class="agent-trace-kind">{{ item.kind === 'plan' ? '计划' : (item.kind === 'skill' ? 'Skill' : '工具') }}</span>
-          <strong>{{ item.label }}</strong>
-          <small v-if="item.kind === 'plan'">{{ item.detail }}</small>
-          <code v-else-if="item.detail">{{ item.detail }}</code>
-          <em v-if="item.state === 'failed'">失败</em>
-          <em v-else-if="item.state === 'loaded'">已加载</em>
-          <em v-else-if="item.state === 'done'">完成</em>
-        </li>
-      </ol>
-    </section>
-
     <details v-if="allStagesDone" class="production-completed-summary">
       <summary>
         <span class="production-completed-check"><Check :size="13" /></span>
@@ -240,26 +251,6 @@ function formatClock(value) {
                   <dd>{{ row.value }}</dd>
                 </div>
               </dl>
-              <details v-if="stage.activities?.length" class="production-step-log">
-                <summary>
-                  <ChevronRight :size="13" />
-                  执行记录
-                  <small>{{ stage.activities.length }}</small>
-                </summary>
-                <ol>
-                  <li
-                    v-for="activity in stage.activities"
-                    :key="`${activity.id}-${activity.created_at}`"
-                    :class="`tone-${activity.tone}`"
-                  >
-                    <time>{{ formatClock(activity.created_at) }}</time>
-                    <div>
-                      <span>{{ activity.text }}</span>
-                      <small v-if="activity.detail">{{ activity.detail }}</small>
-                    </div>
-                  </li>
-                </ol>
-              </details>
             </div>
           </details>
         </li>
@@ -297,26 +288,6 @@ function formatClock(value) {
                 <dd>{{ row.value }}</dd>
               </div>
             </dl>
-            <details v-if="stage.activities?.length" class="production-step-log">
-              <summary>
-                <ChevronRight :size="13" />
-                执行记录
-                <small>{{ stage.activities.length }}</small>
-              </summary>
-              <ol>
-                <li
-                  v-for="activity in stage.activities"
-                  :key="`${activity.id}-${activity.created_at}`"
-                  :class="`tone-${activity.tone}`"
-                >
-                  <time>{{ formatClock(activity.created_at) }}</time>
-                  <div>
-                    <span>{{ activity.text }}</span>
-                    <small v-if="activity.detail">{{ activity.detail }}</small>
-                  </div>
-                </li>
-              </ol>
-            </details>
           </div>
         </details>
       </li>
@@ -359,26 +330,6 @@ function formatClock(value) {
               <dd>{{ row.value }}</dd>
             </div>
           </dl>
-          <details v-if="activeStage.activities?.length" class="production-step-log">
-            <summary>
-              <ChevronRight :size="13" />
-              执行记录
-              <small>{{ activeStage.activities.length }}</small>
-            </summary>
-            <ol>
-              <li
-                v-for="activity in activeStage.activities"
-                :key="`${activity.id}-${activity.created_at}`"
-                :class="`tone-${activity.tone}`"
-              >
-                <time>{{ formatClock(activity.created_at) }}</time>
-                <div>
-                  <span>{{ activity.text }}</span>
-                  <small v-if="activity.detail">{{ activity.detail }}</small>
-                </div>
-              </li>
-            </ol>
-          </details>
         </div>
       </li>
 

@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, Callable
 
 from . import media
 from .logging_utils import prompt_preview, safe_url, summarize_messages
@@ -176,8 +176,13 @@ def generate_remote_video(
     resolution: str = "720p",
     cancel: Event | None = None,
     input_contents: list[dict[str, Any]] | None = None,
+    on_submitted: Callable[[str], None] | None = None,
+    external_task_id: str | None = None,
 ) -> Path:
+    _raise_if_cancelled(cancel)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if external_task_id:
+        return resume_remote_video(provider, base_url, api_key, external_task_id, timeout, dest, cancel)
     started = time.perf_counter()
     logger.info(
         "video.generate_request_started provider=%s endpoint=%s model=%s duration_ms=%s "
@@ -210,6 +215,7 @@ def generate_remote_video(
             resolution=resolution,
             cancel=cancel,
             input_contents=input_contents,
+            on_submitted=on_submitted,
         )
     payload = {
         "model": model,
@@ -277,10 +283,14 @@ def generate_remote_video(
         job_id or "-",
         safe_url(str(video_url or "")),
     )
+    if job_id and on_submitted:
+        on_submitted(str(job_id))
+    _raise_if_cancelled(cancel)
     if job_id and not video_url:
         video_url = _poll_job(base_url, api_key, job_id, timeout, cancel)
     if not video_url:
         raise ProviderError("视频生成响应缺少 url")
+    _raise_if_cancelled(cancel)
     _download(video_url, dest, api_key, timeout, base_url)
     logger.info(
         "video.generate_request_completed provider=%s output=%s size=%s elapsed_ms=%.1f",
@@ -368,8 +378,12 @@ def generate_seedance_video(
     resolution: str = "720p",
     cancel: Event | None = None,
     input_contents: list[dict[str, Any]] | None = None,
+    on_submitted: Callable[[str], None] | None = None,
+    external_task_id: str | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel)
+    if external_task_id:
+        return resume_remote_video("seedance", base_url, api_key, external_task_id, timeout, dest, cancel)
     started = time.perf_counter()
     if not base_url:
         raise ProviderError("Seedance 未配置 base_url")
@@ -411,6 +425,24 @@ def generate_seedance_video(
     if not task_id:
         raise ProviderError(f"Seedance 提交响应缺少 task_id：{_provider_message(response)}")
     logger.info("video.seedance_task_created task_id=%s", task_id)
+    if on_submitted:
+        on_submitted(task_id)
+    return resume_remote_video("seedance", base_url, api_key, task_id, timeout, dest, cancel)
+
+
+def resume_remote_video(
+    provider: str, base_url: str, api_key: str, task_id: str,
+    timeout: int, dest: Path, cancel: Event | None = None,
+) -> Path:
+    """Poll/download a known task. This function never submits a generation request."""
+    _raise_if_cancelled(cancel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if provider != "seedance":
+        url = _poll_job(base_url, api_key, task_id, timeout, cancel)
+        _raise_if_cancelled(cancel)
+        _download(url, dest, api_key, timeout, base_url)
+        return dest
+    started = time.perf_counter()
     # The submit response currently returns a gateway-local /api/v1/tasks path
     # that is not exposed on api.giikin.com. The documented /acore route is the
     # stable task query endpoint.
@@ -426,7 +458,7 @@ def generate_seedance_video(
         if not isinstance(task_data, dict):
             message = _provider_message(task)
             if "不存在" in message:
-                time.sleep(1)
+                cancel.wait(1) if cancel is not None else time.sleep(1)
                 continue
             raise ProviderError(f"Seedance 任务查询失败：{message}")
         status = str(task_data.get("status") or "").strip().lower()
@@ -444,6 +476,7 @@ def generate_seedance_video(
                 safe_url(video_url),
                 (time.perf_counter() - started) * 1000,
             )
+            _raise_if_cancelled(cancel)
             _download_seedance_video(video_url, dest, api_key, timeout, base_url)
             logger.info(
                 "video.seedance_download_completed task_id=%s output=%s size=%s",

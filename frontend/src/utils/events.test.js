@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  agentMessagePhase,
+  agentMessageStatusText,
+  canShowTraceOutput,
   compactTitle,
   conversationStateLabel,
   groupExecutionItems,
+  hasVideoPlanContent,
+  isAgentCommentary,
   isConversationListEvent,
   isProductionRefreshEvent,
   isRefreshEvent,
@@ -30,6 +35,32 @@ describe('conversation event helpers', () => {
     expect(toolCallName({ payload: { tool: 'create_video_brief' } })).toBe(
       'create_video_brief',
     )
+  })
+
+  it('distinguishes agent progress updates from final answers', () => {
+    const progress = {
+      item_type: 'agentMessage',
+      status: 'completed',
+      payload: { phase: 'commentary', text: '正在处理' },
+    }
+    const final = {
+      item_type: 'agentMessage',
+      status: 'completed',
+      payload: { phase: 'final_answer', text: '处理完成' },
+    }
+
+    expect(agentMessagePhase(progress)).toBe('commentary')
+    expect(isAgentCommentary(progress)).toBe(true)
+    expect(agentMessageStatusText(progress)).toBe('进度更新')
+    expect(isAgentCommentary(final)).toBe(false)
+    expect(agentMessageStatusText(final)).toBe('已完成')
+    expect(agentMessageStatusText({ ...progress, status: 'inProgress' })).toBe('执行中')
+  })
+
+  it('keeps command output out of the visible trace', () => {
+    expect(canShowTraceOutput({ item_type: 'commandExecution' })).toBe(false)
+    expect(canShowTraceOutput({ item_type: 'functionCallOutput' })).toBe(false)
+    expect(canShowTraceOutput({ item_type: 'reasoning' })).toBe(true)
   })
 
   it('selects refresh events without waking on heartbeats', () => {
@@ -74,12 +105,15 @@ describe('conversation event helpers', () => {
   })
 
   it('groups adjacent execution events while preserving messages', () => {
-    const rows = groupExecutionItems([
-      { id: 'r1', item_type: 'reasoning', status: 'completed' },
-      { id: 'c1', item_type: 'commandExecution', status: 'completed' },
-      { id: 'a1', item_type: 'agentMessage', status: 'completed' },
-      { id: 't1', item_type: 'dynamicToolCall', status: 'inProgress' },
-    ])
+    const rows = groupExecutionItems(
+      [
+        { id: 'r1', item_type: 'reasoning', status: 'completed' },
+        { id: 'c1', item_type: 'commandExecution', status: 'completed' },
+        { id: 'a1', item_type: 'agentMessage', status: 'completed' },
+        { id: 't1', item_type: 'dynamicToolCall', status: 'inProgress' },
+      ],
+      { includeTrace: true },
+    )
 
     expect(rows).toHaveLength(3)
     expect(rows[0]).toMatchObject({
@@ -91,13 +125,46 @@ describe('conversation event helpers', () => {
     expect(rows[2]).toMatchObject({ id: 't1', status: 'inProgress' })
   })
 
+  it('hides an empty duplicate plan card until real planning content exists', () => {
+    const emptyPlan = {
+      id: 'p1',
+      item_type: 'video_plan',
+      payload: { agent_trace: [{ type: 'plan', steps: ['ingest_reference_video'] }] },
+    }
+    expect(hasVideoPlanContent(emptyPlan)).toBe(false)
+    expect(groupExecutionItems([emptyPlan])).toEqual([])
+
+    const planWithOpening = {
+      ...emptyPlan,
+      payload: { ...emptyPlan.payload, opening: { start_ms: 0, end_ms: 2700 } },
+    }
+    expect(hasVideoPlanContent(planWithOpening)).toBe(true)
+    expect(groupExecutionItems([planWithOpening])).toHaveLength(1)
+  })
+
   it('marks grouped execution as failed when a step failed', () => {
-    const [group] = groupExecutionItems([
-      { id: 'r1', item_type: 'reasoning', status: 'completed' },
-      { id: 'c1', item_type: 'commandExecution', status: 'failed' },
-    ])
+    const [group] = groupExecutionItems(
+      [
+        { id: 'r1', item_type: 'reasoning', status: 'completed' },
+        { id: 'c1', item_type: 'commandExecution', status: 'failed' },
+      ],
+      { includeTrace: true },
+    )
 
     expect(group.status).toBe('failed')
+  })
+
+  it('removes reasoning and execution traces from the visible conversation', () => {
+    const rows = groupExecutionItems([
+      { id: 'u1', item_type: 'userMessage', status: 'completed' },
+      { id: 'r1', item_type: 'reasoning', status: 'completed' },
+      { id: 'c1', item_type: 'commandExecution', status: 'completed' },
+      { id: 'f1', item_type: 'functionCallOutput', status: 'completed' },
+      { id: 't1', item_type: 'dynamicToolCall', status: 'completed' },
+      { id: 'a1', item_type: 'agentMessage', status: 'completed' },
+    ])
+
+    expect(rows.map((item) => item.id)).toEqual(['u1', 'a1'])
   })
 })
 

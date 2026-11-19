@@ -1,10 +1,19 @@
 <script setup>
 import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from '@lucide/vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { groupExecutionItems, itemLabel, payloadText, toolCallName } from '../utils/events'
+import {
+  agentMessageStatusText,
+  canShowTraceOutput,
+  groupExecutionItems,
+  isAgentCommentary,
+  itemLabel,
+  payloadText,
+  toolCallName,
+} from '../utils/events'
 import { isVideoFile } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { mediaUrl } from '../utils/productionMedia'
+import { toolLabel } from '../utils/agentTraceDisplay'
 import AspectVideo from './AspectVideo.vue'
 import VideoObserveCard from './VideoObserveCard.vue'
 import VideoOutputCard from './VideoOutputCard.vue'
@@ -129,7 +138,7 @@ function traceStatusText(item) {
 }
 
 function executionNames(item) {
-  return [...new Set(item.items.map((step) => toolCallName(step)).filter(Boolean))]
+  return [...new Set(item.items.map((step) => toolLabel(toolCallName(step))).filter(Boolean))]
 }
 
 function stepStatusText(status) {
@@ -245,8 +254,21 @@ defineExpose({ scrollToBottom })
         </template>
 
         <template v-else-if="item.item_type === 'agentMessage'">
-          <div class="agent-message">
-            <div class="memo-head">
+          <div
+            class="agent-message"
+            :class="{
+              'agent-message--commentary': isAgentCommentary(item),
+              'agent-message--final': !isAgentCommentary(item),
+            }"
+          >
+            <div v-if="isAgentCommentary(item)" class="agent-progress-head">
+              <span class="agent-progress-label">处理进度</span>
+              <span
+                class="memo-status"
+                :class="{ live: item.status === 'inProgress' }"
+              >{{ agentMessageStatusText(item) }}</span>
+            </div>
+            <div v-else class="memo-head">
               <span class="memo-agent-mark">VF</span>
               <span class="memo-agent-copy">
                 <strong>Video Fission</strong>
@@ -255,11 +277,15 @@ defineExpose({ scrollToBottom })
               <span
                 class="memo-status"
                 :class="{ live: item.status === 'inProgress' }"
-              >{{ item.status === 'inProgress' ? '执行中' : '已完成' }}</span>
+              >{{ agentMessageStatusText(item) }}</span>
             </div>
             <div class="markdown-body" v-html="renderMarkdown(payloadText(item))"></div>
             <span v-if="item.status === 'inProgress'" class="typing-caret"></span>
-            <footer v-if="payloadText(item)" class="memo-foot">
+            <footer
+              v-if="payloadText(item)"
+              class="memo-foot"
+              :class="{ 'memo-foot--commentary': isAgentCommentary(item) }"
+            >
               <button
                 class="memo-action"
                 type="button"
@@ -299,10 +325,10 @@ defineExpose({ scrollToBottom })
                   <Terminal v-if="step.item_type === 'commandExecution'" :size="13" />
                   <Wrench v-else :size="13" />
                   <span>{{ itemLabel(step.item_type) }}</span>
-                  <code>{{ toolCallName(step) }}</code>
+                  <code>{{ toolLabel(toolCallName(step)) }}</code>
                   <small>{{ stepStatusText(step.status) }}</small>
                 </summary>
-                <pre v-if="structuredText(step)">{{ structuredText(step) }}</pre>
+                <pre v-if="canShowTraceOutput(step) && structuredText(step)">{{ structuredText(step) }}</pre>
                 <p v-else-if="step.item_type === 'reasoning'">{{ payloadText(step) }}</p>
               </details>
             </div>
@@ -368,17 +394,17 @@ defineExpose({ scrollToBottom })
         </template>
 
         <template
-          v-else-if="['commandExecution', 'dynamicToolCall', 'mcpToolCall', 'webSearch', 'fileChange'].includes(item.item_type)"
+          v-else-if="['commandExecution', 'functionCallOutput', 'dynamicToolCall', 'mcpToolCall', 'webSearch', 'fileChange'].includes(item.item_type)"
         >
           <details class="trace-block" :open="item.status === 'inProgress'">
             <summary>
               <Terminal v-if="item.item_type === 'commandExecution'" :size="14" />
               <Wrench v-else :size="14" />
               <span>{{ itemLabel(item.item_type) }}</span>
-              <code>{{ toolCallName(item) }}</code>
-              <small>{{ item.status }}</small>
+              <code>{{ toolLabel(toolCallName(item)) }}</code>
+              <small>{{ traceStatusText(item) }}</small>
             </summary>
-            <pre v-if="structuredText(item)">{{ structuredText(item) }}</pre>
+            <pre v-if="canShowTraceOutput(item) && structuredText(item)">{{ structuredText(item) }}</pre>
           </details>
         </template>
 
@@ -387,7 +413,7 @@ defineExpose({ scrollToBottom })
             <summary>
               <Wrench :size="14" />
               <span>{{ itemLabel(item.item_type) }}</span>
-              <small>{{ item.status }}</small>
+              <small>{{ traceStatusText(item) }}</small>
             </summary>
             <pre>{{ JSON.stringify(item.payload, null, 2) }}</pre>
           </details>

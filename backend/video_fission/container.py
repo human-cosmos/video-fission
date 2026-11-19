@@ -45,6 +45,7 @@ def configure(runtime_settings: Settings | None = None) -> None:
         engine=productions.engine,
     )
     hub = CodexHub(settings, db, skills, tools, productions=productions)
+    productions.recover_orphaned_runs()
 
 
 configure()

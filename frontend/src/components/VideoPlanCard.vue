@@ -1,4 +1,5 @@
 <script setup>
+import { ChevronRight } from '@lucide/vue'
 import { computed } from 'vue'
 import { cleanDisplayText, formatDuration, referenceLabel } from '../utils/format'
 import { isOpeningShot, openingOf } from '../utils/understandDisplay'
@@ -76,11 +77,18 @@ function regenVideo() {
 <template>
   <section class="video-card studio-card" data-testid="video-plan-card">
     <h3>任务规划</h3>
-    <section v-if="showAgentPlan" class="agent-trace" data-testid="video-plan-agent-trace">
-      <header class="agent-trace-head">
-        <strong>编排计划</strong>
-        <span v-if="planTools.length">{{ planTools.length }} 个工具步骤</span>
-      </header>
+    <details
+      v-if="showAgentPlan"
+      class="agent-trace agent-trace--collapsible"
+      data-testid="video-plan-agent-trace"
+    >
+      <summary class="agent-trace-summary">
+        <span class="agent-trace-summary-copy">
+          <strong>编排计划</strong>
+          <small v-if="planTools.length">{{ planTools.length }} 个工具步骤</small>
+        </span>
+        <ChevronRight :size="14" />
+      </summary>
       <p v-if="planSkills.length" class="agent-trace-skills" data-testid="video-plan-agent-skills">
         Skill：{{ planSkills.map((item) => item.label).join('、') }}
       </p>
@@ -91,7 +99,7 @@ function regenVideo() {
           <code>{{ step.name }}</code>
         </li>
       </ol>
-    </section>
+    </details>
     <section
       v-if="landingVisible"
       class="landing-summary"

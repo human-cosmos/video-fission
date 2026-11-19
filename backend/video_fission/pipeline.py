@@ -191,11 +191,7 @@ class PipelineEngine:
         generate_shots = [shot for shot in script.get("shots") or [] if shot.get("action") == "generate"]
         if generate_shots and not vg.get("base_url"):
             raise ValueError(f"视频生成 Provider {provider} 未配置 base_url")
-        input_contents = (
-            self._seedance_input_contents(production_id, public, secrets, warnings)
-            if provider == "seedance"
-            else []
-        )
+        input_contents: list[dict[str, Any]] | None = None
         logger.info(
             "pipeline.generate_config provider=%s model=%s target=%sx%s "
             "fps=%.3f reference_inputs=%s shots=%s generated=%s",
@@ -204,14 +200,18 @@ class PipelineEngine:
             width,
             height,
             fps,
-            ",".join(str(item.get("role") or item.get("type") or "?") for item in input_contents) or "-",
+            ",".join(str(item.get("role") or item.get("type") or "?") for item in (input_contents or [])) or "-",
             len(script.get("shots") or []),
             len(generate_shots),
         )
+        from .jobs import JobRunner, revision
+
+        runner = JobRunner(self.db, production_id, cancel)
+        generation_revision = revision(self._get(production_id))
         clips: list[dict[str, Any]] = []
         for shot in script.get("shots") or []:
             self._raise_if_cancelled(cancel)
-            dest = art / f"{shot['id']}.mp4"
+            dest = art / f"{shot['id']}-{generation_revision[:16]}.mp4"
             duration_ms = int(shot["duration_ms"])
             action_label = "复用原片" if shot["action"] == "reuse" else "生成新镜头"
             logger.info(
@@ -231,99 +231,125 @@ class PipelineEngine:
                     "details": {"duration_ms": duration_ms},
                 },
             )
-            start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
-            if shot["action"] == "reuse":
-                if _end_ms <= start_ms:
-                    raise ValueError(f"{shot['id']} 缺少可复用源片段")
-                media.cut_segment(src, dest, start_ms, _end_ms, width, height, fps, True)
-                provider_name = "reference_reuse"
-                logger.info(
-                    "generate.shot_reused shot_id=%s source_range=%s-%sms output=%s",
-                    shot["id"],
-                    start_ms,
-                    _end_ms,
-                    file_summary(dest),
-                )
-            else:
-                provider_name = provider
-                try:
-                    providers.generate_remote_video(
-                        provider_name,
-                        vg.get("base_url") or "",
-                        secrets.get("video_generator") or "",
-                        vg.get("model") or "",
-                        self._shot_generate_prompt(shot, production),
-                        duration_ms,
-                        width,
-                        height,
-                        fps,
-                        int(vg.get("timeout_seconds") or 600),
-                        dest,
-                        source=vg.get("source") or "",
-                        resolution=vg.get("resolution") or "720p",
-                        cancel=cancel,
-                        input_contents=input_contents,
-                    )
-                    self._raise_if_cancelled(cancel)
-                    if not dest.is_file() or dest.stat().st_size <= 0:
-                        raise providers.ProviderError("远端 Provider 返回了空文件")
+            def execute_shot(job):
+                nonlocal input_contents
+                start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
+                if shot["action"] == "reuse":
+                    if _end_ms <= start_ms:
+                        raise ValueError(f"{shot['id']} 缺少可复用源片段")
+                    media.cut_segment(src, dest, start_ms, _end_ms, width, height, fps, True)
+                    provider_name = "reference_reuse"
                     logger.info(
-                        "generate.remote_completed shot_id=%s provider=%s raw_output=%s",
+                        "generate.shot_reused shot_id=%s source_range=%s-%sms output=%s",
                         shot["id"],
-                        provider_name,
+                        start_ms,
+                        _end_ms,
                         file_summary(dest),
                     )
-                    normalized = dest.with_name(dest.stem + "_normalized.mp4")
-                    media.normalize_video_clip(
-                        dest,
-                        normalized,
-                        duration_ms,
-                        width,
-                        height,
-                        fps,
-                    )
-                    normalized.replace(dest)
-                    logger.info(
-                        "generate.remote_normalized shot_id=%s provider=%s output=%s",
-                        shot["id"],
-                        provider_name,
-                        file_summary(dest),
-                    )
-                    self._raise_if_cancelled(cancel)
-                except providers.ProviderCancelled as exc:
-                    raise PipelineCancelled("任务已取消") from exc
-                except Exception as exc:
-                    if cancel.is_set():
+                else:
+                    provider_name = provider
+                    if input_contents is None and not job.get("external_task_id") and provider == "seedance":
+                        input_contents = self._seedance_input_contents(production_id, public, secrets, warnings)
+                    try:
+                        providers.generate_remote_video(
+                            provider_name,
+                            vg.get("base_url") or "",
+                            secrets.get("video_generator") or "",
+                            vg.get("model") or "",
+                            self._shot_generate_prompt(shot, production),
+                            duration_ms,
+                            width,
+                            height,
+                            fps,
+                            int(vg.get("timeout_seconds") or 600),
+                            dest,
+                            source=vg.get("source") or "",
+                            resolution=vg.get("resolution") or "720p",
+                            cancel=cancel,
+                            input_contents=input_contents if not job.get("external_task_id") else [],
+                            external_task_id=job.get("external_task_id"),
+                            on_submitted=lambda task_id: self.db.update_production_job(
+                                job["id"], {"external_task_id": task_id}),
+                        )
+                        self._raise_if_cancelled(cancel)
+                        if not dest.is_file() or dest.stat().st_size <= 0:
+                            raise providers.ProviderError("远端 Provider 返回了空文件")
+                        logger.info(
+                            "generate.remote_completed shot_id=%s provider=%s raw_output=%s",
+                            shot["id"],
+                            provider_name,
+                            file_summary(dest),
+                        )
+                        normalized = dest.with_name(dest.stem + "_normalized.mp4")
+                        media.normalize_video_clip(
+                            dest,
+                            normalized,
+                            duration_ms,
+                            width,
+                            height,
+                            fps,
+                        )
+                        normalized.replace(dest)
+                        logger.info(
+                            "generate.remote_normalized shot_id=%s provider=%s output=%s",
+                            shot["id"],
+                            provider_name,
+                            file_summary(dest),
+                        )
+                        self._raise_if_cancelled(cancel)
+                    except providers.ProviderCancelled as exc:
                         raise PipelineCancelled("任务已取消") from exc
-                    logger.error(
-                        "generate.remote_failed shot_id=%s provider=%s fallback=disabled",
-                        shot["id"],
-                        provider_name,
-                        exc_info=True,
-                    )
-                    raise RuntimeError(
-                        f"{shot['id']} 视频模型生成失败，未回退本地：{exc}"
-                    ) from exc
-            info = media.probe(dest)
-            if info["duration_ms"] <= 0 or abs(info["duration_ms"] - duration_ms) > 150:
-                raise RuntimeError(
-                    f"{shot['id']} 片段时长异常：期望 {duration_ms}ms，实际 {info['duration_ms']}ms"
-                )
-            if dest.stat().st_size < 1000:
-                raise RuntimeError(f"{shot['id']} 生成了空文件")
-            if shot["action"] == "generate" and not info.get("has_audio"):
-                raise RuntimeError(f"{shot['id']} 视频模型输出缺少音轨")
-            if shot["action"] == "reuse" and not info.get("has_audio"):
-                with_audio = dest.with_name(dest.stem + "_with_audio.mp4")
-                media.add_silence_audio(dest, with_audio, duration_ms)
-                with_audio.replace(dest)
+                    except Exception as exc:
+                        if cancel.is_set():
+                            raise PipelineCancelled("任务已取消") from exc
+                        logger.error(
+                            "generate.remote_failed shot_id=%s provider=%s fallback=disabled",
+                            shot["id"],
+                            provider_name,
+                            exc_info=True,
+                        )
+                        raise RuntimeError(
+                            f"{shot['id']} 视频模型生成失败，未回退本地：{exc}"
+                        ) from exc
                 info = media.probe(dest)
-                logger.info(
-                    "generate.reuse_audio_added shot_id=%s duration_ms=%s output=%s",
-                    shot["id"],
-                    duration_ms,
-                    file_summary(dest),
-                )
+                if info["duration_ms"] <= 0 or abs(info["duration_ms"] - duration_ms) > 150:
+                    raise RuntimeError(
+                        f"{shot['id']} 片段时长异常：期望 {duration_ms}ms，实际 {info['duration_ms']}ms"
+                    )
+                if dest.stat().st_size < 1000:
+                    raise RuntimeError(f"{shot['id']} 生成了空文件")
+                if shot["action"] == "generate" and not info.get("has_audio"):
+                    raise RuntimeError(f"{shot['id']} 视频模型输出缺少音轨")
+                if shot["action"] == "reuse" and not info.get("has_audio"):
+                    with_audio = dest.with_name(dest.stem + "_with_audio.mp4")
+                    media.add_silence_audio(dest, with_audio, duration_ms)
+                    with_audio.replace(dest)
+                    info = media.probe(dest)
+                    logger.info(
+                        "generate.reuse_audio_added shot_id=%s duration_ms=%s output=%s",
+                        shot["id"],
+                        duration_ms,
+                        file_summary(dest),
+                    )
+                return {"shot_id": shot["id"], "path": str(dest),
+                        "url": self.artifact_url(production_id, dest.name),
+                        "provider": provider_name, "duration_ms": info["duration_ms"]}
+
+            def valid_clip(result):
+                path = Path(result.get("path") or "")
+                if not path.is_file() or path.stat().st_size < 1000:
+                    return False
+                try:
+                    info = media.probe(path)
+                    return (info["duration_ms"] > 0 and abs(info["duration_ms"] - duration_ms) <= 150
+                            and (shot["action"] != "generate" or bool(info.get("has_audio"))))
+                except Exception:
+                    return False
+
+            clip = runner.run("generate_video_shots", {"revision": generation_revision, "shot": shot},
+                              execute_shot, shot_id=shot["id"], validate=valid_clip)
+            provider_name = clip["provider"]
+            info = {"duration_ms": clip["duration_ms"], "has_audio": True}
             logger.info(
                 "generate.shot_completed shot_id=%s provider=%s duration_ms=%s size=%s audio=%s",
                 shot["id"],

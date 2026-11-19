@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any, Protocol
 
 from .config import Settings
 from .db import Database
 from .logging_utils import clip_text
+from .jobs import revision
 from .production_tools import (
     CAPABILITY_TOOLS,
     FORBIDDEN_CLAIMS,
@@ -164,8 +166,28 @@ class ProductionAgent:
                 "script_candidates": production.get("script_candidates") or [],
             },
         }
+        recovered_steps: list[str] = []
         try:
-            plan = self.runtime.plan(context)
+            if resume_from == "recover":
+                trace = list(production.get("agent_trace") or [])
+                index = next((i for i in range(len(trace) - 1, -1, -1) if trace[i].get("type") == "plan"), None)
+                if index is None:
+                    if not production.get("selected_script_id"):
+                        raise ProductionAgentError("中断任务缺少可恢复计划")
+                    plan = DeterministicPlanner().plan({**context, "resume_from": "generate"})
+                else:
+                    saved = trace[index]
+                    plan = {"steps": [{"tool": name} for name in saved["steps"]], "skills": saved.get("skills")}
+                    prepare_only = bool(saved.get("prepare_only"))
+                    recovered_steps = list(saved.get("completed_steps") or [])
+                    for entry in trace[index + 1:]:
+                        if entry.get("type") == "tool" and entry.get("success"):
+                            recovered_steps.append(entry["name"])
+                    names = saved["steps"]
+                    if recovered_steps != names[:len(recovered_steps)]:
+                        raise ProductionAgentError("中断计划的成功步骤不是连续前缀，无法安全恢复")
+            else:
+                plan = self.runtime.plan(context)
         except ProductionAgentError as exc:
             self._fail(production_id, str(exc))
             raise
@@ -179,7 +201,7 @@ class ProductionAgent:
         trace = list(production.get("agent_trace") or [])
         needs_scripts = any(
             str(step.get("tool") or step.get("name") or "") == "write_intent_and_scripts"
-            for step in steps
+            for step in steps[len(recovered_steps):]
         )
         candidates = plan.get("script_candidates") or production.get("script_candidates") or []
         if needs_scripts and len(candidates) != 3:
@@ -192,6 +214,8 @@ class ProductionAgent:
                 "skills": skills,
                 "steps": [step.get("tool") for step in steps],
                 "resume_from": resume_from,
+                "prepare_only": prepare_only,
+                "completed_steps": recovered_steps.copy(),
             }
         )
         self._emit(production_id, "agent_plan", {"skills": skills, "steps": [step.get("tool") for step in steps]})
@@ -205,8 +229,10 @@ class ProductionAgent:
             "cancel": cancel,
             "conversation_id": production.get("conversation_id"),
         }
-        for raw_step in steps:
+        completed_steps = recovered_steps.copy()
+        for raw_step in steps[len(recovered_steps):]:
             if cancel.is_set():
+                self.db.cancel_production_jobs(production_id)
                 self.db.update_production(production_id, {"status": "cancelled"})
                 self._emit(production_id, "error", {"stage": "cancelled", "message": "已取消"})
                 return self.db.get_production(production_id) or production
@@ -250,10 +276,15 @@ class ProductionAgent:
             )
             trace.append({"type": "tool", "name": name, "success": success})
             self._save_trace(production_id, trace)
+            if cancel.is_set() or (self.db.get_production(production_id) or {}).get("status") == "cancelled":
+                self.db.cancel_production_jobs(production_id)
+                self.db.update_production(production_id, {"status": "cancelled"})
+                return self.db.get_production(production_id)
             if not success:
                 message = text or f"工具 {name} 执行失败"
                 self._fail(production_id, message)
                 raise ProductionAgentError(message)
+            completed_steps.append(name)
             current = self.db.get_production(production_id) or {}
             if current.get("status") == "awaiting_script_choice":
                 self._emit(production_id, "awaiting_script_choice", {"message": "请选择创意脚本"})
@@ -279,20 +310,48 @@ class ProductionAgent:
                 {"message": "参考视频拆解与脚本检索已完成，等待创意内容"},
             )
             return self.db.get_production(production_id) or current
-        if current.get("status") == "running":
-            # A plan that ends without compose should not pretend the film is done.
-            if (current.get("output") or {}).get("video_path"):
-                self.db.update_production(
-                    production_id,
-                    {"status": "completed", "current_stage": "done", "error": None},
-                )
-                self._emit(production_id, "completed", {"stage": "done"})
-            else:
-                self.db.update_production(production_id, {"status": "failed", "error": "编排计划已结束但还没有成片"})
-                self._emit(production_id, "error", {"message": "编排计划已结束但还没有成片"})
-        elif current.get("status") == "completed":
-            self._emit(production_id, "completed", {"stage": "done"})
+        self._finalize(production_id, steps, completed_steps, cancel)
         return self.db.get_production(production_id) or current
+
+    def _finalize(self, production_id, steps, completed_steps, cancel):
+        current = self.db.get_production(production_id) or {}
+        if cancel.is_set() or current.get("status") == "cancelled":
+            self.db.cancel_production_jobs(production_id)
+            self.db.update_production(production_id, {"status": "cancelled"})
+            return
+        expected = [str(step.get("tool") or step.get("name") or "") for step in steps]
+        output = current.get("output") or {}
+        path = Path(output.get("video_path") or "")
+        jobs = [job for job in self.db.list_production_jobs(production_id)
+                if job["input_json"].get("revision") == revision(current)]
+        error = None
+        if completed_steps != expected or not any(name in expected for name in ("compose_timeline", "burn_subtitles")):
+            error = "编排计划必做步骤未全部成功，不能使用旧成片"
+        elif any(job["status"] != "succeeded" for job in jobs):
+            if any(job["status"] == "cancelled" for job in jobs):
+                self.db.update_production(production_id, {"status": "cancelled"})
+                return
+            error = "编排计划仍有未完成或失败的相关作业"
+        elif not path.is_file() or path.stat().st_size <= 0:
+            error = "编排计划已结束但最终成片不存在或为空"
+        elif "burn_subtitles" in expected and not any(
+            job["tool"] == "burn_subtitles" and job["status"] == "succeeded"
+            and job["result_json"].get("video_path") == str(path)
+            and output.get("subtitled_video_path") == str(path) for job in jobs
+        ):
+            error = "计划要求烧字幕，但最终成片不是已成功烧录的产物"
+        elif not any(job["result_json"].get("video_path") == str(path) for job in jobs):
+            error = "最终成片未关联本次计划的成功作业，不能使用旧成片"
+        if error:
+            self._fail(production_id, error)
+            return
+        with self.db.transaction() as connection:
+            updated = connection.execute(
+                "UPDATE productions SET status='completed',current_stage='done',error=NULL WHERE id=? AND status='running'",
+                (production_id,),
+            ).rowcount
+        if updated:
+            self._emit(production_id, "completed", {"stage": "done"})
 
     def _save_trace(self, production_id: str, trace: list[dict[str, Any]]) -> None:
         self.db.update_production(production_id, {"agent_trace": trace})
@@ -301,8 +360,13 @@ class ProductionAgent:
         clean = message
         for phrase in FORBIDDEN_CLAIMS:
             clean = clean.replace(phrase, "未完成还原")
-        self.db.update_production(production_id, {"status": "failed", "error": clean})
-        self._emit(production_id, "error", {"message": clean})
+        with self.db.transaction() as connection:
+            updated = connection.execute(
+                "UPDATE productions SET status='failed',error=? WHERE id=? AND status!='cancelled'",
+                (clean, production_id),
+            ).rowcount
+        if updated:
+            self._emit(production_id, "error", {"message": clean})
 
     def _emit(self, production_id: str, kind: str, payload: dict[str, Any]) -> None:
         if self.engine is not None:

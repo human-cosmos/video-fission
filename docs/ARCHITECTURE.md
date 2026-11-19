@@ -49,11 +49,21 @@
 | `update_production_progress` | 更新进度或状态 |
 | `generate_video_shots` | 仅在已选定脚本后生成；通道只允许 `seedance` / `openai_compatible` / `generic_http`。存在 generate 镜头但缺少 `base_url` 或 API Key 时明确失败，不使用本地关键帧伪生成 |
 | `separate_audio` | 分离参考人声/BGM；结果记录 `applied_to_output` |
-| `compose_timeline` | FFmpeg 拼接时间线，并把可用参考 BGM 以低音量混入最终音轨 |
-| `burn_subtitles` | 按镜头文案写 SRT 并硬烧；未对齐时使用安全默认位置并注明 |
+| `compose_timeline` | FFmpeg 拼接时间线，并把可用参考 BGM 以低音量混入最终音轨。内部写入 `production_jobs`；成功后只保存合成产物，不得把任务标为 completed |
+| `burn_subtitles` | 按镜头文案写 SRT 并硬烧到独立文件（如 `final-burned-*.mp4`），不覆盖合成成片。内部写入 `production_jobs`；计划含此步骤时，最终 `output.video_path` 必须指向烧录后文件。本工具自身也不把任务标为 completed |
 | `handle_production_followup` | 同一 `production_id` 上处理追问。含糊的「再改一下 / 不满意」会停下来澄清，不会从 ingest 重来 |
 
 会话入口为 `prepare_video_production` 和 `run_video_production`。旧 `start_video_production` 仅保留后端兼容，不再下发给对话 Codex。
+
+## 持久化作业、恢复与完成门禁
+
+`generate_video_shots`、`compose_timeline`、`burn_subtitles` 在 Tool 内部落库到 SQLite 表 `production_jobs`。作业不是对话可见 Tool，不新增 `get_job` 轮询。幂等键为 `production_id + tool + shot_id + 脚本/镜头内容哈希`；重选脚本不得复用旧成功作业。
+
+远端生成先提交再轮询：拿到远端 `job_id` 后立刻写入 `external_task_id`，然后才轮询/下载。进程崩溃后，若任务仍为 `running` 且作业带有可续取的远端 ID，启动恢复时只续取同一任务，不得向 Seedance 重新提交。本地 FFmpeg 类作业（复用裁剪、标准化、合成、烧字幕）不能在已死进程内续跑，按可重试处理，不得假装已成功。
+
+`ProductionService.cancel` 在现有取消事件之外，把该生产任务未完成作业标为 `cancelled`；轮询看到取消后停止且不得下载。启动恢复由 `container.configure` 调用 `ProductionService.recover_orphaned_runs`：继续轮询可恢复的远端任务，再从中断步骤续跑确定性计划，而不是从 ingest 重来；不得把带可续取 `external_task_id` 的作业标为失败。
+
+唯一可以把生产任务标为 `completed` 的入口是计划结束后的 `ProductionAgent._finalize`。必须同时满足：本计划必做步骤全部成功（`prepare_only` 与 `awaiting_script_choice` 暂停除外）；若计划含 `burn_subtitles`，最终成片路径必须是烧录后文件；成片存在且非空；该生产任务没有未完成或失败的相关作业。合成已有但计划中的烧字幕未跑或失败时，保持 `running` 或标 `failed`，不得 completed。
 
 ## 必须守住的不变量
 
@@ -66,6 +76,9 @@
 - 无 Key、Tool 失败、占位或没有真实视频模型调用时，不得出现「已还原」「已按参考对齐」「已还原参考」这类表述
 - 追问留在同一条 `production_id`
 - `select-script` 只记录选择；生成需再进入后台执行器，不得在选定前偷偷开始生成
+- `compose_timeline` / `burn_subtitles` 不得把生产任务标为 completed；完成只发生在计划结束门禁
+- 计划含 `burn_subtitles` 时，最终 `output.video_path` 必须是烧录后文件，不能是烧录前的合成文件
+- 远端生成的 `external_task_id` 必须在提交后立刻落库；崩溃恢复只续取，不重提
 
 ## 状态、事件与前端衔接
 
@@ -77,10 +90,11 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `backend/video_fission/production_agent.py` | 确定性执行器、计划生成与测试用 Fake Runtime |
+| `backend/video_fission/production_agent.py` | 确定性执行器、计划生成、完成门禁与测试用 Fake Runtime |
+| `backend/video_fission/jobs.py` | 内部作业执行器：幂等、取消检查与产物校验 |
 | `backend/video_fission/production_tools.py` | 出片 Tool 与不变量校验 |
-| `backend/video_fission/productions.py` | HTTP / 会话入口、创意内容持久化与后台执行 |
-| `backend/video_fission/pipeline.py` | 能力实现；`run` 不再作为编排入口 |
+| `backend/video_fission/productions.py` | HTTP / 会话入口、创意内容持久化、取消作业与启动恢复 |
+| `backend/video_fission/pipeline.py` | 能力实现；生成镜头在提交后立即持久化远端任务 ID；`run` 不再作为编排入口 |
 | `backend/video_fission/tools.py` | 对话 Tool 与出片 Tool 的注册 |
 | `backend/video_fission/app_server.py` | Codex app-server JSON-RPC |
 | `backend/video_fission/conversation_cards.py` | 现有出片卡片的附加 `agent_trace` |
@@ -88,7 +102,7 @@
 
 ## 测试与范围
 
-本轮测试在 `backend/tests/test_production_agent.py` 与 `test_production_tools.py`。官方夹具 `backend/tests/fixtures/sample-reference.mp4` 从历史提交恢复，仅供 FFmpeg 相关 Tool 使用；`725ecc9` 删除的整套历史测试没有整包恢复。
+本轮测试在 `backend/tests/test_production_agent.py`、`test_production_tools.py` 与 `test_production_jobs.py`。官方夹具 `backend/tests/fixtures/sample-reference.mp4` 从历史提交恢复，仅供 FFmpeg 相关 Tool 使用；`725ecc9` 删除的整套历史测试没有整包恢复。
 
 命令：
 

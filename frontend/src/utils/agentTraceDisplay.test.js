@@ -44,6 +44,7 @@ describe('agent trace display', () => {
       'write_intent_and_scripts',
     ])
     expect(skillLabel('production-orchestration')).toBe('出片编排')
+    expect(toolLabel('prepare_video_production')).toBe('准备视频创作')
     expect(toolLabel('lock_timeline_opening')).toBe('锁定开场连续块')
   })
 
@@ -88,5 +89,42 @@ describe('agent trace display', () => {
     expect(hasAgentTrace({})).toBe(false)
     expect(agentTraceItems({ agent_trace: [null, { type: 'mystery' }, { type: 'tool' }] })).toEqual([])
     expect(toolLabel('custom_tool')).toBe('custom_tool')
+  })
+
+  it('normalizes recovered plans and duplicate trace entries', () => {
+    const recovered = {
+      status: 'running',
+      agent_trace: [
+        ...trace,
+        { type: 'plan', skills: trace[0].skills, steps: trace[0].steps, resume_from: 'recover' },
+        { type: 'skill', name: 'production-orchestration' },
+        { type: 'skill', name: 'video-references' },
+        { type: 'tool', name: 'ingest_reference_video', success: true },
+      ],
+    }
+
+    const items = agentTraceItems(recovered)
+    expect(items.filter((item) => item.kind === 'plan')).toHaveLength(1)
+    expect(items.filter((item) => item.kind === 'skill')).toHaveLength(2)
+    expect(items.filter((item) => item.kind === 'tool')).toHaveLength(2)
+    expect(agentTraceSummary(recovered)).toBe(
+      '已制定编排计划 · 已加载 2 个 Skill · 已执行 2 个工具',
+    )
+    expect(nextPlannedTool(recovered)).toBe('lock_timeline_opening')
+  })
+
+  it('keeps the latest state for a repeated tool', () => {
+    const items = agentTraceItems({
+      agent_trace: [
+        ...trace,
+        { type: 'tool', name: 'understand_reference_video', success: false },
+      ],
+    })
+    const understand = items.find((item) => item.name === 'understand_reference_video')
+    expect(understand).toMatchObject({ state: 'failed', success: false })
+    expect(currentAgentActionText({
+      status: 'failed',
+      agent_trace: [{ type: 'tool', name: 'understand_reference_video', success: false }],
+    })).toBe('理解参考视频失败')
   })
 })

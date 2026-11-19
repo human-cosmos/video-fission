@@ -263,6 +263,25 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_productions_upload
                     ON productions(video_upload_id);
 
+                CREATE TABLE IF NOT EXISTS production_jobs (
+                    id TEXT PRIMARY KEY,
+                    production_id TEXT NOT NULL REFERENCES productions(id) ON DELETE CASCADE,
+                    tool TEXT NOT NULL,
+                    shot_id TEXT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
+                    external_task_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    input_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_production_jobs_production ON production_jobs(production_id);
+
                 CREATE TABLE IF NOT EXISTS production_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     production_id TEXT NOT NULL REFERENCES productions(id) ON DELETE CASCADE,
@@ -1192,6 +1211,69 @@ class Database:
     def delete_video_upload(self, upload_id: str) -> None:
         with self.transaction() as connection:
             connection.execute("DELETE FROM video_uploads WHERE id = ?", (upload_id,))
+
+    def create_production_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Get-or-create by idempotency key. Callers supply only non-secret inputs."""
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """INSERT INTO production_jobs
+                (id,production_id,tool,shot_id,idempotency_key,status,input_json,created_at,updated_at)
+                VALUES (?,?,?,?,?,'pending',?,?,?) ON CONFLICT(idempotency_key) DO NOTHING""",
+                (payload.get("id") or f"job_{uuid.uuid4().hex}", payload["production_id"],
+                 payload["tool"], payload.get("shot_id"), payload["idempotency_key"],
+                 _json(payload.get("input_json") or {}), now, now),
+            )
+            row = connection.execute("SELECT * FROM production_jobs WHERE idempotency_key=?",
+                                     (payload["idempotency_key"],)).fetchone()
+        return self._job_from_row(row)
+
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        for field in ("input_json", "result_json"):
+            result[field] = _load(result[field], {})
+        return result
+
+    def get_production_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.query_one("SELECT * FROM production_jobs WHERE id=?", (job_id,))
+        return self._job_from_row(row) if row else None
+
+    def list_production_jobs(self, production_id: str) -> list[dict[str, Any]]:
+        return [self._job_from_row(row) for row in self.query(
+            "SELECT * FROM production_jobs WHERE production_id=? ORDER BY created_at,id", (production_id,))]
+
+    def update_production_job(self, job_id: str, fields: dict[str, Any]) -> None:
+        allowed = {"status", "external_task_id", "attempt_count", "error", "input_json", "result_json",
+                   "started_at", "finished_at"}
+        updates = {key: (_json(value) if key.endswith("_json") else value)
+                   for key, value in fields.items() if key in allowed}
+        updates["updated_at"] = utc_now()
+        # Cancellation wins over late provider/ffmpeg results. Keep an ID returned during cancellation.
+        with self.transaction() as connection:
+            row = connection.execute("SELECT status FROM production_jobs WHERE id=?", (job_id,)).fetchone()
+            if row and row["status"] == "cancelled":
+                updates = {key: value for key, value in updates.items()
+                           if key in {"external_task_id", "updated_at"}}
+            connection.execute("UPDATE production_jobs SET " + ",".join(f"{key}=?" for key in updates)
+                               + " WHERE id=?", (*updates.values(), job_id))
+
+    def cancel_production_jobs(self, production_id: str) -> None:
+        with self.transaction() as connection:
+            connection.execute("""UPDATE production_jobs SET status='cancelled',finished_at=?,updated_at=?,
+                error='本地已取消；Provider 无可用取消接口，远端任务可能继续运行'
+                WHERE production_id=? AND status IN ('pending','running')""",
+                (utc_now(), utc_now(), production_id))
+
+    def recover_production_jobs(self) -> list[str]:
+        """Leave remote IDs intact; local processes cannot survive a restart."""
+        with self.transaction() as connection:
+            rows = connection.execute("SELECT id FROM productions WHERE status='running'").fetchall()
+            ids = [row["id"] for row in rows]
+            for pid in ids:
+                connection.execute("""UPDATE production_jobs SET status='pending',updated_at=?
+                    WHERE production_id=? AND status='running' AND external_task_id IS NULL""", (utc_now(), pid))
+        return ids
 
     def create_production(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
 
 from . import media
+from .jobs import JobRunner, digest, revision
 from .audio_separate import separate_reference_audio
 from .pipeline import REMOTE_VIDEO_PROVIDERS, PipelineEngine, local_script
 from .references import ReferenceLibrary
@@ -341,6 +343,8 @@ class ProductionToolHost:
                 "progress",
                 {"message": str(arguments.get("message") or ""), "stage": arguments.get("current_stage")},
             )
+        if updates.get("status") == "completed" or updates.get("current_stage") == "done":
+            raise ProductionToolError("只有计划完成门禁可以宣布完成")
         if updates:
             self.db.update_production(production_id, updates)
         production = self._production(production_id)
@@ -402,13 +406,13 @@ class ProductionToolHost:
         assert_no_forbidden_claim(result)
         return {"production_id": production_id, **result}
 
-    def burn_subtitles(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    def _burn_subtitles(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         production_id = self._pid(arguments, context)
         production = self._production(production_id)
         art = self.engine.artifact_dir(production_id)
         source = Path((production.get("source_video") or {}).get("path") or "")
         output = production.get("output") or {}
-        video = Path(output.get("video_path") or (art / "final.mp4"))
+        video = Path(output.get("composed_video_path") or output.get("video_path") or (art / "final.mp4"))
         if not video.is_file():
             raise ProductionToolError("还没有成片，无法硬烧字幕")
         style = detect_subtitle_style(source, art) if source.is_file() else {"method": "default_safe", "aligned": False}
@@ -416,14 +420,14 @@ class ProductionToolHost:
             style = {**style, "aligned": False, "method": style.get("method") or "default_safe"}
         srt = art / "final.srt"
         write_shot_srt(srt, list((production.get("script") or {}).get("shots") or []))
-        burned = art / "final-burned.mp4"
+        burned = art / f"final-burned-{digest([str(video), production.get("script")])[:16]}.mp4"
         media.burn_subtitles(video, srt, burned, style)
-        burned.replace(video)
         output = {
             **output,
-            "video_path": str(video),
+            "video_path": str(burned),
+            "subtitled_video_path": str(burned),
             "srt_path": str(srt),
-            "video_url": self.engine.artifact_url(production_id, "final.mp4"),
+            "video_url": self.engine.artifact_url(production_id, burned.name),
             "srt_url": self.engine.artifact_url(production_id, "final.srt"),
         }
         self.db.update_production(production_id, {"output": output, "subtitle_style": style})
@@ -432,36 +436,53 @@ class ProductionToolHost:
             "method": style.get("method"),
             "aligned": bool(style.get("aligned")),
             "srt_path": str(srt),
-            "video_path": str(video),
+            "video_path": str(burned),
+            "output": output,
+            "subtitle_style": style,
         }
         if not result["aligned"] or result["method"] == "default_safe":
             result["note"] = "字幕使用安全默认位置，未按参考对齐。"
         assert_no_forbidden_claim(result)
         return result
 
+    def burn_subtitles(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        production_id = self._pid(arguments, context)
+        production = self._production(production_id)
+        output = production.get("output") or {}
+        runner = JobRunner(self.db, production_id, self._cancel(context))
+        inputs = {"revision": revision(production),
+                  "video_path": output.get("composed_video_path") or output.get("video_path")}
+        result = runner.run("burn_subtitles", inputs, lambda job: self._burn_subtitles(arguments, context))
+        runner.check_cancelled()
+        self.db.update_production(production_id, {"output": result["output"], "subtitle_style": result["subtitle_style"]})
+        return result
+
     def compose_timeline(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         production_id = self._pid(arguments, context)
         production = self._production(production_id)
-        warnings = self._warnings(production)
-        self.engine._stage_compose(production_id, self._cancel(context), warnings)
-        production = self._production(production_id)
-        output = production.get("output") or {}
-        self.db.update_production(
-            production_id,
-            {
-                "status": "running",
-                "current_stage": "compose",
-                "error": None,
-                "warnings": production.get("warnings") or warnings,
-            },
-        )
-        result = {
-            "production_id": production_id,
-            "status": "running",
-            "video_path": output.get("video_path"),
-            "video_url": output.get("video_url") or self.engine.artifact_url(production_id, "final.mp4"),
-        }
-        assert_no_forbidden_claim(result)
+        runner = JobRunner(self.db, production_id, self._cancel(context))
+        inputs = {"revision": revision(production), "clips": production.get("clips"),
+                  "audio_separation": {key: (production.get("audio_separation") or {}).get(key)
+                                       for key in ("usable", "bgm_path", "bgm_volume")}}
+
+        def compose(job):
+            self.engine._stage_compose(production_id, self._cancel(context), self._warnings(production))
+            runner.check_cancelled()
+            output = dict(self._production(production_id).get("output") or {})
+            source = Path(output.get("video_path") or "")
+            if not source.is_file() or source.stat().st_size <= 0:
+                raise ProductionToolError("合成结束但成片文件缺失或为空")
+            dest = self.engine.artifact_dir(production_id) / f"composed-{job['id']}.mp4"
+            shutil.copyfile(source, dest)
+            output.update({"video_path": str(dest), "composed_video_path": str(dest),
+                           "video_url": self.engine.artifact_url(production_id, dest.name)})
+            output.pop("subtitled_video_path", None)
+            return {"production_id": production_id, "status": "running", "video_path": str(dest),
+                    "video_url": output["video_url"], "output": output}
+
+        result = runner.run("compose_timeline", inputs, compose)
+        runner.check_cancelled()
+        self.db.update_production(production_id, {"output": result["output"]})
         return result
 
     def handle_production_followup(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:

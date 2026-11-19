@@ -186,6 +186,7 @@ def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):
     seed_clips_from_fixture(app_env, pid)
     composed = _payload(_execute(app_env, "compose_timeline", pid))
     assert composed["status"] == "running"
+    assert app_env.db.get_production(pid)["status"] == "running"
     assert composed.get("video_path")
     production = app_env.db.get_production(pid)
     assert production["audio_separation"]["applied_to_output"] is True
@@ -200,9 +201,10 @@ def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):
     state = _payload(_execute(app_env, "get_production_state", pid))
     assert state["artifacts"]["video_path"]
     progressed = _payload(
-        _execute(app_env, "update_production_progress", pid, message="合成完成", current_stage="done")
+        _execute(app_env, "update_production_progress", pid, message="合成完成", current_stage="compose")
     )
-    assert progressed["current_stage"] == "done"
+    assert progressed["current_stage"] == "compose"
+    assert not _execute(app_env, "update_production_progress", pid, status="completed")["success"]
 
 
 def test_pipeline_engine_run_is_no_longer_an_entry(app_env):

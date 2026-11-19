@@ -453,6 +453,7 @@ class ProductionService:
         if event:
             event.set()
         self.db.update_production(production_id, {"status": "cancelled"})
+        self.db.cancel_production_jobs(production_id)
         self.sync_conversation_cards(production_id)
         return self.public(production_id, user_id=user_id)
 
@@ -720,6 +721,28 @@ class ProductionService:
         if agent is None:
             raise RuntimeError("后台创作执行器尚未就绪，无法出片")
         return agent
+
+    def recover_orphaned_runs(self, *, wait: bool = False) -> list[str]:
+        """Called after agent wiring; resume saved plans, never re-ingest generated tasks."""
+        recovered = []
+        for production_id in self.db.recover_production_jobs():
+            with self._lock:
+                if production_id in self._cancels:
+                    continue
+                cancel = threading.Event()
+                self._cancels[production_id] = cancel
+                thread = threading.Thread(target=self._run_thread,
+                                          args=(production_id, cancel, "recover"),
+                                          name=f"production-recover-{production_id}", daemon=True)
+                self._threads[production_id] = thread
+            recovered.append(production_id)
+            if wait:
+                self._run_thread(production_id, cancel, "recover")
+                with self._lock:
+                    self._threads.pop(production_id, None)
+            else:
+                thread.start()
+        return recovered
 
     def _run_thread(self, production_id: str, cancel: threading.Event, resume_from: str | None = None) -> None:
         thread = threading.current_thread()

@@ -26,11 +26,14 @@ const TYPE_LABELS = {
 const TRACE_ITEM_TYPES = new Set([
   'reasoning',
   'commandExecution',
+  'functionCallOutput',
   'dynamicToolCall',
   'mcpToolCall',
   'webSearch',
   'fileChange',
 ])
+
+const HIDDEN_CHAT_ITEM_TYPES = new Set(TRACE_ITEM_TYPES)
 
 export function itemLabel(itemType) {
   return TYPE_LABELS[itemType] || itemType || '运行事件'
@@ -59,7 +62,53 @@ export function toolCallName(item) {
   )
 }
 
-export function groupExecutionItems(items = []) {
+export function agentMessagePhase(item) {
+  return String(item?.payload?.phase || '').trim()
+}
+
+export function isAgentCommentary(item) {
+  return item?.item_type === 'agentMessage' && agentMessagePhase(item) === 'commentary'
+}
+
+export function agentMessageStatusText(item) {
+  if (item?.status === 'inProgress') return '执行中'
+  if (item?.status === 'failed') return '未完成'
+  if (isAgentCommentary(item)) return '进度更新'
+  return '已完成'
+}
+
+export function canShowTraceOutput(item) {
+  return !['commandExecution', 'functionCallOutput'].includes(item?.item_type)
+}
+
+export function hasVideoPlanContent(item) {
+  if (item?.item_type !== 'video_plan') return true
+  const payload = item.payload || {}
+  if (Array.isArray(payload.script_candidates) && payload.script_candidates.length) return true
+  return [
+    payload.intent,
+    payload.skeleton,
+    payload.script,
+    payload.replace_plan,
+    payload.opening,
+    payload.landing_page,
+  ].some((value) => {
+    if (!value) return false
+    if (Array.isArray(value)) return value.length > 0
+    if (typeof value === 'object') return Object.keys(value).length > 0
+    return true
+  })
+}
+
+export function groupExecutionItems(items = [], { includeTrace = false } = {}) {
+  if (!includeTrace) {
+    return items.filter(
+      (item) =>
+        !HIDDEN_CHAT_ITEM_TYPES.has(item.item_type) &&
+        !(item.item_type === 'video_plan' && !hasVideoPlanContent(item)),
+    )
+  }
+
   const rows = []
   let traceItems = []
 
@@ -85,6 +134,7 @@ export function groupExecutionItems(items = []) {
   }
 
   for (const item of items) {
+    if (item.item_type === 'video_plan' && !hasVideoPlanContent(item)) continue
     if (TRACE_ITEM_TYPES.has(item.item_type)) {
       traceItems.push(item)
     } else {

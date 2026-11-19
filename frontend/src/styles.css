@@ -6301,7 +6301,7 @@ a.button.primary {
   margin-top: 2px;
   color: #7c8da3;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10.5px;
   line-height: 1.45;
 }
 
@@ -6815,5 +6815,147 @@ a.button.primary {
   .production-step--active .is-spinning,
   .production-current-operation .is-spinning {
     animation: none;
+  }
+}
+
+/* Agent progress stays readable without turning every update into a full card. */
+.app-shell.mode-chat .agent-message--commentary {
+  width: min(880px, 100%);
+  padding: 12px 16px 10px 18px;
+  background: rgba(248, 250, 252, 0.72);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--vf-accent-line);
+  border-radius: 0 8px 8px 0;
+  box-shadow: none;
+}
+
+.app-shell.mode-chat .agent-message--commentary::before {
+  display: none;
+}
+
+.agent-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.agent-progress-label {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-progress-head .memo-status {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.app-shell.mode-chat .agent-message--commentary .markdown-body {
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.app-shell.mode-chat .agent-message--final .markdown-body {
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.app-shell.mode-chat .memo-foot--commentary {
+  margin-top: 8px;
+  padding-top: 7px;
+}
+
+.app-shell.mode-chat .memo-foot--commentary .memo-action {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.app-shell.mode-chat .agent-message--commentary:hover .memo-foot--commentary .memo-action,
+.app-shell.mode-chat .agent-message--commentary:focus-within .memo-foot--commentary .memo-action {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .app-shell.mode-chat .memo-foot--commentary .memo-action {
+    opacity: 1;
+  }
+}
+
+/* One compact run inspector replaces duplicate plan and trace blocks. */
+.app-shell.mode-chat .agent-trace.agent-trace--collapsible {
+  padding: 0;
+  overflow: hidden;
+}
+
+.agent-trace-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-trace-summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-trace-summary-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-trace-summary-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-trace-summary-copy small {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-trace-summary > svg {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  transition: transform 150ms ease;
+}
+
+.agent-trace--collapsible[open] .agent-trace-summary > svg {
+  transform: rotate(90deg);
+}
+
+.agent-trace--collapsible .agent-trace-list {
+  padding: 0 12px 12px;
+}
+
+.agent-trace--collapsible .agent-trace-skills {
+  margin: 0;
+  padding: 0 12px 8px;
+}
+
+.app-shell.mode-chat .production-status-running .production-step--upcoming {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .app-shell.mode-chat .agent-message--commentary {
+    width: 100%;
+  }
+
+  .agent-trace-summary-copy small {
+    white-space: normal;
   }
 }

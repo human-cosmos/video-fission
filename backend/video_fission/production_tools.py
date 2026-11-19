@@ -395,7 +395,11 @@ class ProductionToolHost:
         if generate_shots and not vg.get("base_url"):
             raise ProductionToolError(f"视频生成 Provider {provider} 未配置 base_url，无法出片")
         if generate_shots and not (secrets.get("video_generator") or ""):
-            raise ProductionToolError(f"视频生成 Provider {provider} 未配置 API Key，无法出片")
+            raise ProductionToolError(
+                f"视频生成 Provider {provider} 未配置 API Key，无法出片。"
+                "请在系统设置填写视频生成 Key，或先运行 npx dksk auth <key>，"
+                "也可设置 VF_SEEDANCE_API_KEY。"
+            )
         return public, secrets, provider
 
     def generate_candidate_videos(

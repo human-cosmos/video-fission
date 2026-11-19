@@ -87,7 +87,12 @@ class TransitionDetector:
         try:
             _, cnn_scores = self.transnet.predict_video(str(video_path), total_frames)
         except Exception as exc:  # noqa: BLE001
-            cnn_warning = f"TransNetV2 不可用，仅使用 PySceneDetect：{exc.__class__.__name__}"
+            if isinstance(exc, ModuleNotFoundError):
+                dependency = exc.name or "torch"
+                detail = f"缺少 Python 依赖 {dependency}"
+            else:
+                detail = str(exc or "").strip() or exc.__class__.__name__
+            cnn_warning = f"TransNetV2 不可用，仅使用 PySceneDetect：{detail}"
             logger.warning("transition.transnet_failed fallback=pyscenedetect", exc_info=True)
         logger.info(
             "transition.analysis_completed total_frames=%s frame_scores=%s cnn_scores=%s elapsed_ms=%.1f warning=%s",

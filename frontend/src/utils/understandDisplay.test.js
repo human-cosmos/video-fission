@@ -89,7 +89,7 @@ const fixture = {
       role: 'cta',
       start_ms: 5400,
       end_ms: 8100,
-      error: '片段观察失败：网关超时',
+      error: '深度观察失败：网关超时',
       observe: {},
     },
   ],

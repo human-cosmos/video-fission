@@ -57,7 +57,7 @@ function speechOf(segment) {
     <details class="studio-disclosure" data-testid="video-observe-disclosure">
       <summary class="studio-disclosure-summary">
         <span>
-          <strong>片段观察</strong>
+          <strong>深度观察</strong>
           <small>{{ rows.length }} 段视听事实</small>
         </span>
         <ChevronRight :size="15" />

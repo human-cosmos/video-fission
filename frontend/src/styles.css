@@ -6085,9 +6085,9 @@ a.button.primary {
 }
 
 .app-shell.mode-chat .stop-button {
-  width: 46px;
-  min-width: 46px;
-  height: 46px;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
   padding: 0;
   border-radius: 50%;
 }
@@ -6105,9 +6105,6 @@ a.button.primary {
 }
 
 .app-shell.mode-chat .stop-button {
-  min-width: 44px;
-  width: 44px;
-  padding: 0;
   color: #b45309;
   background: #fffbeb;
   border: 1px solid rgba(245, 158, 11, 0.3);
@@ -6328,6 +6325,12 @@ a.button.primary {
   }
 
   .app-shell.mode-chat .send-button {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+  }
+
+  .app-shell.mode-chat .stop-button {
     width: 40px;
     min-width: 40px;
     height: 40px;

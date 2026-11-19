@@ -12,6 +12,7 @@ from typing import Any
 from .settings_store import SettingsStore
 from .understand.gateway import GeminiGatewayClient
 from .understand.normalize import extract_json
+from .understand.observe import OBSERVE_CARD_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ def _text(value: Any, limit: int = 1200) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _quote_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _text_list(value: Any, limit: int = 8, item_limit: int = 240) -> list[str]:
     if isinstance(value, str):
         value = re.split(r"[，,、;；\n]", value)
@@ -38,6 +43,84 @@ def _text_list(value: Any, limit: int = 8, item_limit: int = 240) -> list[str]:
             result.append(text)
         if len(result) >= limit:
             break
+    return result
+
+
+def _observe_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cards: list[dict[str, str]] = []
+    for card in value.get("shot_observation_card") or []:
+        if not isinstance(card, dict):
+            continue
+        compact: dict[str, str] = {}
+        for key in OBSERVE_CARD_FIELDS:
+            text = _text(card.get(key), 800)
+            if text:
+                compact[key] = text
+        if compact:
+            cards.append(compact)
+
+    claims: list[dict[str, Any]] = []
+    for claim in value.get("raw_claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        text = _quote_text(claim.get("raw_claim"))
+        if not text:
+            continue
+        claims.append(
+            {
+                "raw_claim_id": _text(claim.get("raw_claim_id"), 80),
+                "raw_claim": text,
+                "source_type": _text(claim.get("source_type"), 80),
+                "scope": _text(claim.get("scope"), 80),
+                "language": _text(claim.get("language"), 32),
+                "start_time": claim.get("start_time"),
+                "end_time": claim.get("end_time"),
+            }
+        )
+        if len(claims) >= 8:
+            break
+
+    speech: dict[str, Any] = {}
+    evidence = value.get("speech_evidence")
+    if isinstance(evidence, dict):
+        segments = []
+        for item in evidence.get("segments") or []:
+            if not isinstance(item, dict):
+                continue
+            text = _quote_text(item.get("text"))
+            if not text:
+                continue
+            segments.append(
+                {
+                    "start": item.get("start"),
+                    "end": item.get("end"),
+                    "text": text,
+                }
+            )
+            if len(segments) >= 16:
+                break
+        speech = {
+            key: value
+            for key, value in (
+                ("status", _text(evidence.get("status"), 32)),
+                ("source", _text(evidence.get("source"), 80)),
+                ("language", _text(evidence.get("language"), 32)),
+                ("notes", _text(evidence.get("notes"), 300)),
+            )
+            if value
+        }
+        if segments:
+            speech["segments"] = segments
+
+    result: dict[str, Any] = {}
+    if cards:
+        result["shot_observation_card"] = cards
+    if claims:
+        result["raw_claims"] = claims
+    if speech.get("segments") or speech.get("notes"):
+        result["speech_evidence"] = speech
     return result
 
 
@@ -99,7 +182,7 @@ def _prompt(production: dict[str, Any], refs: list[dict[str, Any]]) -> str:
                 "end_ms": segment.get("end_ms"),
                 "summary": _text(segment.get("summary"), 500),
                 "visual": _text(segment.get("visual"), 500),
-                "observe": segment.get("observe") if isinstance(segment.get("observe"), dict) else {},
+                "observe": _observe_context(segment.get("observe")),
             }
         )
     reference_paths = [

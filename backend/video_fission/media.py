@@ -239,6 +239,62 @@ def probe(path: Path) -> dict[str, Any]:
     return info_result
 
 
+def validate_video_decode(path: Path, timeout: int = 180) -> None:
+    """Decode the complete primary audio/video streams before publishing a file."""
+    if not path.is_file():
+        raise MediaError("视频文件不存在")
+    started = time.perf_counter()
+    logger.info("media.decode_validation_started file=%s timeout_s=%s", path.name, timeout)
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_bin(),
+                "-hide_banner",
+                "-v",
+                "error",
+                "-xerror",
+                "-nostdin",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "media.decode_validation_timeout file=%s timeout_s=%s elapsed_ms=%.1f",
+            path.name,
+            timeout,
+            (time.perf_counter() - started) * 1000,
+        )
+        raise
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        tail = detail[-2000:] if detail else "unknown decode error"
+        logger.error(
+            "media.decode_validation_failed file=%s returncode=%s elapsed_ms=%.1f stderr=%s",
+            path.name,
+            result.returncode,
+            (time.perf_counter() - started) * 1000,
+            clip_text(tail, 2000),
+        )
+        raise MediaError(f"视频解码校验失败: {tail}")
+    logger.info(
+        "media.decode_validation_completed file=%s elapsed_ms=%.1f",
+        path.name,
+        (time.perf_counter() - started) * 1000,
+    )
+
+
 def probe_audio(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise MediaError("音频文件不存在")
@@ -771,6 +827,7 @@ def normalize_video_clip(
     width: int,
     height: int,
     fps: float,
+    attempts: int = 2,
 ) -> Path:
     """Normalize a remote clip to the project's exact visual contract."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -816,9 +873,51 @@ def normalize_video_clip(
     else:
         args.append("-an")
     args.append(str(dest))
-    run_ffmpeg(args, timeout=180)
-    logger.info("media.normalize_clip_completed output=%s size=%s", dest.name, dest.stat().st_size)
-    return dest
+    last_error: Exception | None = None
+    max_attempts = max(1, attempts)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            run_ffmpeg(args, timeout=180)
+            validate_video_decode(dest, timeout=180)
+            logger.info(
+                "media.normalize_clip_completed output=%s size=%s attempt=%s",
+                dest.name,
+                dest.stat().st_size,
+                attempt,
+            )
+            return dest
+        except MediaError as exc:
+            last_error = exc
+            if dest.resolve() != path.resolve():
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "media.normalize_clip_cleanup_failed output=%s",
+                        dest.name,
+                        exc_info=True,
+                    )
+            if attempt >= max_attempts:
+                break
+            logger.warning(
+                "media.normalize_clip_retry output=%s attempt=%s/%s error=%s",
+                dest.name,
+                attempt,
+                max_attempts,
+                exc,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if dest.resolve() != path.resolve():
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "media.normalize_clip_cleanup_failed output=%s",
+                        dest.name,
+                        exc_info=True,
+                    )
+            raise MediaError(f"视频归一化超时: {exc}") from exc
+    raise MediaError(f"视频归一化连续 {max_attempts} 次失败: {last_error}") from last_error
 
 
 def concat_clips(clips: list[Path], dest: Path) -> Path:

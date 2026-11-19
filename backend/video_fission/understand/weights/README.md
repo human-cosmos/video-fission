@@ -4,7 +4,7 @@
 
 来源：从本工作区只读参考实现 `/workspace/video_slot/videosplit/models/transnetv2-pytorch-weights.pth` 拷入。上游为 [TransNetV2](https://github.com/soCzech/TransNetV2)。
 
-这是可选依赖 `shot-detect` 的推理权重，缺权重或缺 extra 时转场检测自动退化，不得让创作管线失败。
+这是 TransNetV2 的推理权重。`torch` 已列入基础依赖；权重或运行时异常时转场检测仍会自动退化，不得让创作管线失败。
 
 SHA-256：
 

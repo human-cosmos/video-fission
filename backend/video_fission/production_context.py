@@ -94,7 +94,6 @@ def _timeline_markdown(context: dict[str, Any]) -> str:
         summary = _cell(
             segment.get("summary")
             or segment.get("description")
-            or (segment.get("observe") or {}).get("summary")
             or ""
         )
         lines.append(

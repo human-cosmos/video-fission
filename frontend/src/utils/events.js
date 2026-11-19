@@ -19,7 +19,7 @@ const TYPE_LABELS = {
   video_understanding: '视频理解',
   video_plan: '任务规划',
   video_segments: '片段',
-  video_observe: '观察',
+  video_observe: '深度观察',
   video_output: '成片',
 }
 

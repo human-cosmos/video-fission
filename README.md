@@ -20,7 +20,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
 - 单 Codex 编排出片：当前对话负责生成创意意图、骨架和三份脚本，Python 后台自动生成并合成三条候选视频，用户选定一条后执行最终合成；不再启动额外的 Production Codex 子进程，也不走 `PipelineEngine` 固定阶段循环
-- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘。生产拆解仍要求真实 Gemini；出片 Tool 在无 Key 时可以做诚实的本地切分，但必须标明这是降级结果，不能写成模型理解
+- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片理解与深度观察；Gemini 每次整片理解响应单独落盘。生产拆解仍要求真实 Gemini；出片 Tool 在无 Key 时可以做诚实的本地切分，但必须标明这是降级结果，不能写成模型理解
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
 
@@ -40,7 +40,7 @@ codex login
 ## 启动
 
 ```bash
-uv sync --extra dev --extra shot-detect
+uv sync --extra dev
 npm install --prefix frontend
 ./scripts/dev.sh
 ```
@@ -49,15 +49,15 @@ npm install --prefix frontend
 
 工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 
-运行日志默认同时写入终端和 `status/video-fission.log`，单文件 20MB、保留 10 份。显式配置 `VF_LOG_FILE` 会覆盖测试进程继承的环境判定，避免服务进程误关文件日志；`GET /api/health` 的 `logging` 字段只报告是否启用和日志文件名，不暴露绝对路径。日志带 `request_id` / `production_id` / `stage` 等关联字段，覆盖 API 请求、外部模型与视频 Provider、Codex RPC、转场/切片、片段理解、镜头生成和 FFmpeg 合成。用 `VF_LOG_LEVEL=DEBUG` 可查看更细的媒体探测和 FFmpeg 命令；提示词默认只记录长度与摘要，调试时可临时设置 `VF_LOG_PROMPTS=1` 输出截断预览。
+运行日志默认同时写入终端和 `status/video-fission.log`，单文件 20MB、保留 10 份。显式配置 `VF_LOG_FILE` 会覆盖测试进程继承的环境判定，避免服务进程误关文件日志；`GET /api/health` 的 `logging` 字段只报告是否启用和日志文件名，不暴露绝对路径。日志带 `request_id` / `production_id` / `stage` 等关联字段，覆盖 API 请求、外部模型与视频 Provider、Codex RPC、转场/切片、深度观察、镜头生成和 FFmpeg 合成。用 `VF_LOG_LEVEL=DEBUG` 可查看更细的媒体探测和 FFmpeg 命令；提示词默认只记录长度与摘要，调试时可临时设置 `VF_LOG_PROMPTS=1` 输出截断预览。
 
 ### 视频创作
 
-在对话中上传参考视频（最大 500MB）并填写创作说明后发送。当前对话 Codex 先调用 `prepare_video_production`，由后台完成接入、拆解、落地页提取和参考脚本检索，并把完整 `creative_context` 返回给当前对话；Codex 再基于这些真实结果生成 `intent`、`skeleton` 和恰好 3 个 `script_candidates`，通过 `run_video_production` 提交，设置 `resume_from=script`。后台只运行细粒度 Tool，不再创建第二个 Codex 进程。时间线会展示理解、规划、片段和成片卡片。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；无 Key 时理解 Tool 可以诚实降级为本地切分，并明确标注不是模型结果。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。音频分离结果会作为参考 BGM 以低音量混入最终音轨；合成之后可以用 `burn_subtitles` Tool 写 SRT 并硬烧字幕；未对齐时使用安全默认位置，不会写成「已按参考对齐」。
+在对话中上传参考视频（最大 500MB）并填写创作说明后发送。当前对话 Codex 先调用 `prepare_video_production`，由后台完成接入、拆解、落地页提取和参考脚本检索，并把完整 `creative_context` 返回给当前对话；Codex 再基于这些真实结果生成 `intent`、`skeleton` 和恰好 3 个 `script_candidates`，通过 `run_video_production` 提交，设置 `resume_from=script`。后台只运行细粒度 Tool，不再创建第二个 Codex 进程。时间线会展示理解、规划、片段和成片卡片。生产模式下整片视频理解、镜头拆分和深度观察必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；无 Key 时理解 Tool 可以诚实降级为本地切分，并明确标注不是模型结果。深度观察只保留画面主体、动作、场景道具、机位、字幕文字、信息呈现、口播、声音、序列作用、主张与不确定性，不再输出未被链路消费的复查、时间原点和证据覆盖元数据。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。音频分离结果会作为参考 BGM 以低音量混入最终音轨；合成之后可以用 `burn_subtitles` Tool 写 SRT 并硬烧字幕；未对齐时使用安全默认位置，不会写成「已按参考对齐」。
 
 完整片段时间轴与摘要会落到用户工作区的 `productions/{production_id}/creative-context.json` 和 `timeline-summary.md`，供当前对话直接读取，不需要查询数据库。Codex app-server 的只读查询和执行审批由后端自动允许，前端不再展示人工审批卡。
 
-「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，Gemini 请求与观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，Gemini 请求与观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识、输出 Token 上限和输入 Token 预算；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。视频生成 Key 还支持读取 `VF_SEEDANCE_API_KEY` 或 `npx dksk auth <key>` 写入的 `~/.acore/auth.json`，不会把机器级凭据复制进数据库。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
 视频生成支持 `seedance` 内网 Provider。默认地址为 `https://api.giikin.com`，Seedance 2.0 Flash 对应的协议模型名为 `seedance-2-0-fast`（也兼容输入 `seedance-2.0-flash`）。提交走 `/acore/model/v1/task/generate/video`，状态查询走 `/acore/model/v1/task/video/{taskId}`；下载后会统一转成项目要求的分辨率、帧率和精确时长。也可以使用 `npx dksk auth <key>` 登录后，在系统设置中保存同一认证 Key。
 
@@ -69,7 +69,7 @@ Seedance 只接收文本提示词，不接收参考视频、参考音频或 `inp
 uv sync --extra dev
 ```
 
-基础依赖包含 `opencv-python`、`numpy` 和 `scenedetect`，因此默认环境直接使用 PySceneDetect。PySceneDetect 本身固定依赖 `opencv-python`，不要再额外安装 `opencv-python-headless`，避免两套 OpenCV 同时进入环境。包内另有约 30MB 的 TransNetV2 权重；需要 CNN 加分时可额外安装 `uv sync --extra shot-detect` 获取 CPU 版 `torch`。PySceneDetect 失败时才退化为 ffmpeg 场景切分，并在任务事件和日志中写明异常详情。
+基础依赖包含 `opencv-python`、`numpy`、`scenedetect` 和 CPU 版 `torch`。包内另带约 30MB 的 TransNetV2 权重，因此默认环境会同时使用 PySceneDetect 与 CNN 转场分数，不再因缺少 `torch` 静默降级。PySceneDetect 失败时才退化为 ffmpeg 场景切分，并在任务事件和日志中写明异常详情。
 
 如果旧环境曾同时安装两套 OpenCV，升级时执行一次
 `uv sync --extra dev --reinstall-package opencv-python`，避免卸载 headless 包时一起移除共享的 `cv2` 文件。
@@ -205,7 +205,7 @@ SQLite 保存以下数据：
 
 `VF_ALLOW_LOCAL_COPY_FALLBACK=1` 仅用于测试，不应在部署环境启用。
 
-配置 `gemini_gateway` 后，整片理解与片段分析的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/` 和 `gemini_api_calls/clip_analysis/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
+配置 `gemini_gateway` 后，整片理解的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
 
 远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。视频生成失败会直接失败，不回退本地关键帧。存在 generate 镜头但未配置 `base_url` 或 API Key 时，生成 Tool 必须明确失败，且不得出现「已还原」「已按参考对齐」这类表述。语音、音乐和环境音由视频模型直接生成并随片段音轨返回；缺少音轨的生成片段视为失败。合成之后可用 `burn_subtitles` 生成 SRT 并硬烧字幕。
 

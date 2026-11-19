@@ -1,4 +1,4 @@
-"""decompose 增强：转场检测、整片理解、切片、片段解析与 observe。"""
+"""decompose 增强：转场检测、整片理解、切片与深度观察。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import Any
 from video_fission import media, providers
 from video_fission.logging_utils import clip_text, file_summary, safe_url
 
-from .clips import build_lens_prompt, cut_playback_clip, empty_lens_info, ensure_under_size, normalize_clip_result
+from .clips import cut_playback_clip, ensure_under_size
 from .gateway import (
     GEMINI_VIDEO_MIN_OUTPUT_TOKENS,
     GatewayModelUnavailableError,
@@ -67,11 +67,10 @@ def _append_warning(current: str, extra: str) -> str:
     return "；".join(dict.fromkeys(values))
 
 
-VIDEO_INPUT_TOKEN_BUDGET = 14_000
+VIDEO_INPUT_TOKEN_BUDGET = 128_000
 VIDEO_TOKENS_PER_SECOND = 85
 VIDEO_TOKEN_OVERHEAD = 256
 GEMINI_SPLIT_TIMEOUT_SECONDS = 360
-GEMINI_CLIP_TIMEOUT_SECONDS = 360
 GEMINI_SPLIT_MAX_CANDIDATES = 2
 
 
@@ -89,16 +88,20 @@ def _estimate_video_tokens(duration_s: float) -> int:
     return max(ceil(max(float(duration_s), 0.0) * VIDEO_TOKENS_PER_SECOND) + VIDEO_TOKEN_OVERHEAD, 1)
 
 
-def _select_split_prompt(duration_s: float) -> tuple[str, str, int, int, int]:
-    """Pick the richest prompt that fits the gateway's observed video input limit."""
+def _select_split_prompt(
+    duration_s: float,
+    token_budget: int = VIDEO_INPUT_TOKEN_BUDGET,
+) -> tuple[str, str, int, int, int]:
+    """Pick the richest prompt that fits the configured multimodal input budget."""
     full_prompt = build_split_prompt(duration_s)
     compact_prompt = build_compact_split_prompt(duration_s)
     full_tokens = _estimate_text_tokens(full_prompt)
     compact_tokens = _estimate_text_tokens(compact_prompt)
     video_tokens = _estimate_video_tokens(duration_s)
-    if video_tokens + full_tokens <= VIDEO_INPUT_TOKEN_BUDGET:
+    budget = max(int(token_budget), 4000)
+    if video_tokens + full_tokens <= budget:
         return full_prompt, "full_video", full_tokens, video_tokens, video_tokens + full_tokens
-    if video_tokens + compact_tokens <= VIDEO_INPUT_TOKEN_BUDGET:
+    if video_tokens + compact_tokens <= budget:
         return compact_prompt, "compact_video", compact_tokens, video_tokens, video_tokens + compact_tokens
     return full_prompt, "frames", full_tokens, video_tokens, video_tokens + full_tokens
 
@@ -262,7 +265,6 @@ def understand_settings(public: dict[str, Any]) -> dict[str, Any]:
     section = public.get("understand") or {}
     return {
         "transition_detection": bool(section.get("transition_detection", True)),
-        "clip_analysis": bool(section.get("clip_analysis", True)),
         "observe": bool(section.get("observe", True)),
         "clip_workers": max(1, min(int(section.get("clip_workers") or 3), 8)),
         "gemini_max_size_mb": max(1.0, float(section.get("gemini_max_size_mb") or 15)),
@@ -300,8 +302,6 @@ def run_decompose(
     )
     if not allow_local_fallback and not remote_ready:
         raise UnderstandError("Gemini 视频理解未就绪，请检查 base_url、换票地址或 API Key")
-    if not allow_local_fallback and not options["clip_analysis"]:
-        raise UnderstandError("视频片段理解必须启用 Gemini clip_analysis")
     logger.info(
         "decompose.started file=%s duration_ms=%s resolution=%sx%s fps=%.3f "
         "provider=%s model=%s remote_ready=%s options=%s",
@@ -573,35 +573,21 @@ def run_decompose(
         len(str(opening.get("reason") or "")),
     )
 
-    _emit("stage_started", {"stage": "decompose", "step": "clip_analysis"})
+    _emit("stage_started", {"stage": "decompose", "step": "clip_extraction"})
     _cut_and_frame(src, artifact_dir, segments, info, production_id, cancel, _check)
     _cut_opening_clip(src, artifact_dir, opening, info, production_id)
-    if remote_ready and used_provider != "local_ffmpeg" and options["clip_analysis"]:
-        _analyze_clips(
-            segments,
-            artifact_dir,
-            mm,
-            secrets.get("multimodal") or "",
-            provider,
-            options,
-            video_tags,
-            warnings,
-            _emit,
-            cancel,
-            allow_local_fallback,
-        )
     _emit(
         "stage_completed",
         {
             "stage": "decompose",
-            "step": "clip_analysis",
+            "step": "clip_extraction",
             "message": f"已提取 {len(segments)} 组片段与关键帧",
             "details": {"segments": len(segments)},
         },
     )
     _check()
 
-    if remote_ready and used_provider != "local_ffmpeg" and options["clip_analysis"] and options["observe"]:
+    if remote_ready and used_provider != "local_ffmpeg" and options["observe"]:
         _emit("stage_started", {"stage": "decompose", "step": "observe"})
         _observe_clips(
             segments,
@@ -624,7 +610,7 @@ def run_decompose(
             {
                 "stage": "decompose",
                 "step": "observe",
-                "message": f"片段观察完成，{observed}/{len(segments)} 段有结果",
+                "message": f"深度观察完成，{observed}/{len(segments)} 段有结果",
                 "details": {
                     "observed": observed,
                     "failed": failed,
@@ -634,7 +620,7 @@ def run_decompose(
         )
     elif not options["observe"] or provider == "local_ffmpeg" or not remote_ready:
         if options["observe"] and (provider == "local_ffmpeg" or not remote_ready):
-            message = "当前无法调用模型，已省略 observe"
+            message = "当前无法调用模型，已省略深度观察"
             warnings.append(message)
             _emit("warning", {"stage": "decompose", "step": "observe", "message": message})
 
@@ -824,7 +810,14 @@ def _remote_split(
         if provider == "gemini_gateway"
         else None
     )
-    prompt, prompt_mode, prompt_tokens, video_tokens, estimated_tokens = _select_split_prompt(duration_s)
+    input_token_budget = max(
+        int(mm.get("input_token_budget") or VIDEO_INPUT_TOKEN_BUDGET),
+        4000,
+    )
+    prompt, prompt_mode, prompt_tokens, video_tokens, estimated_tokens = _select_split_prompt(
+        duration_s,
+        input_token_budget,
+    )
     compressed, warning = ensure_under_size(src, artifact_dir / "tmp", options["gemini_max_size_mb"])
     video_within_size = (
         compressed.is_file()
@@ -862,7 +855,7 @@ def _remote_split(
         prompt_tokens,
         video_tokens,
         estimated_tokens,
-        VIDEO_INPUT_TOKEN_BUDGET,
+        input_token_budget,
     )
     candidate_attempts = GEMINI_SPLIT_MAX_CANDIDATES if provider == "gemini_gateway" else 1
     request_timeout = GEMINI_SPLIT_TIMEOUT_SECONDS if provider == "gemini_gateway" else None
@@ -1140,106 +1133,6 @@ def _call_understand(
     return payload, True
 
 
-def _analyze_clips(
-    segments: list[dict[str, Any]],
-    artifact_dir: Path,
-    mm: dict[str, Any],
-    api_key: str,
-    provider: str,
-    options: dict[str, Any],
-    video_tags: dict[str, Any],
-    warnings: list[str],
-    emit: Emit,
-    cancel: Any,
-    allow_local_fallback: bool = False,
-) -> None:
-    product = ""
-    names = video_tags.get("product_name") or []
-    if isinstance(names, list) and names:
-        product = str(names[0])
-    prompt = build_lens_prompt(product)
-    recorder = (
-        GeminiCallRecorder(
-            artifact_dir,
-            "clip_analysis",
-            provider=provider,
-            model=str(mm.get("model") or ""),
-        )
-        if provider == "gemini_gateway"
-        else None
-    )
-
-    def work(segment: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
-        started = time.perf_counter()
-        clip = artifact_dir / str(segment.get("clip_path") or "")
-        frames = sorted(artifact_dir.glob(f"{segment['id']}_frame_*.jpg"))[:8]
-        video = clip if clip.is_file() else None
-        logger.info(
-            "decompose.clip_analysis_started seg_id=%s range=%s-%sms video=%s frames=%s prompt_chars=%s",
-            segment["id"],
-            segment["start_ms"],
-            segment["end_ms"],
-            file_summary(video),
-            len(frames),
-            len(prompt),
-        )
-        try:
-            data, _used = _call_understand(
-                provider,
-                mm,
-                api_key,
-                prompt,
-                video,
-                frames,
-                temperature=0.4,
-                timeout_seconds=(
-                    GEMINI_CLIP_TIMEOUT_SECONDS if provider == "gemini_gateway" else None
-                ),
-                cancel=cancel,
-                recorder=recorder,
-                label=f"clip_{segment['id']}",
-            )
-            if not isinstance(data, dict):
-                raise RuntimeError("片段解析不是对象")
-            normalized = normalize_clip_result(data)
-            logger.info(
-                "decompose.clip_analysis_completed seg_id=%s tags=%s product=%s description=%s elapsed_ms=%.1f",
-                segment["id"],
-                sum(1 for value in normalized.values() if value not in (None, "", [], {})),
-                normalized.get("is_include_product"),
-                len(str(normalized.get("clip_description") or "")),
-                (time.perf_counter() - started) * 1000,
-            )
-            return segment["id"], normalized, ""
-        except Exception as exc:  # noqa: BLE001
-            if _cancel_requested(cancel):
-                _raise_if_cancelled(cancel)
-            logger.warning(
-                "decompose.clip_analysis_failed seg_id=%s elapsed_ms=%.1f",
-                segment["id"],
-                (time.perf_counter() - started) * 1000,
-                exc_info=True,
-            )
-            return segment["id"], empty_lens_info(segment), f"{segment['id']} 片段解析失败：{exc.__class__.__name__}"
-
-    _run_workers(
-        segments,
-        work,
-        options["clip_workers"],
-        "lens_info",
-        warnings,
-        emit,
-        "clip_analysis",
-        cancel,
-    )
-    if not allow_local_fallback:
-        failed = [segment["id"] for segment in segments if segment.get("error")]
-        if failed:
-            raise UnderstandError(
-                "Gemini 片段理解未全部成功：" + ", ".join(failed)
-            )
-
-
 def _observe_clips(
     segments: list[dict[str, Any]],
     artifact_dir: Path,
@@ -1288,7 +1181,6 @@ def _observe_clips(
             result = normalize_observe_response(
                 payload,
                 duration_s,
-                has_audio,
                 original_start=int(segment["start_ms"]) / 1000,
             )
             if observe_is_empty(result):
@@ -1309,13 +1201,12 @@ def _observe_clips(
                 (time.perf_counter() - started) * 1000,
                 exc_info=True,
             )
-            return segment["id"], empty_observe(), f"{segment['id']} observe 失败：{exc.__class__.__name__}"
+            return segment["id"], empty_observe(), f"{segment['id']} 深度观察失败：{exc.__class__.__name__}"
 
     results = _run_workers(
         segments,
         work,
         options["clip_workers"],
-        "observe",
         warnings,
         emit,
         "observe",
@@ -1331,7 +1222,7 @@ def _observe_clips(
         failed = [segment["id"] for segment in segments if segment.get("error")]
         if failed:
             raise UnderstandError(
-                "Gemini 片段观察未全部成功：" + ", ".join(failed)
+                "Gemini 深度观察未全部成功：" + ", ".join(failed)
             )
 
 
@@ -1339,7 +1230,6 @@ def _run_workers(
     segments: list[dict[str, Any]],
     work,
     workers: int,
-    field: str,
     warnings: list[str],
     emit: Emit,
     step: str,
@@ -1365,9 +1255,6 @@ def _run_workers(
                 _raise_if_cancelled(cancel)
             seg_id, payload, error = future.result()
             results[seg_id] = payload
-            for segment in segments:
-                if segment["id"] == seg_id and field == "lens_info":
-                    segment["lens_info"] = payload
             if error:
                 logger.warning("decompose.worker_failed step=%s seg_id=%s message=%s", step, seg_id, error)
                 warnings.append(error)

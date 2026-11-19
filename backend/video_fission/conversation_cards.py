@@ -26,8 +26,10 @@ STEP_LABELS = {
     "transition": "场景转场",
     "understand": "整片理解",
     "refine": "切片校正",
+    # Historical runs used the removed clip-understanding step name for extraction.
     "clip_analysis": "关键帧与片段",
-    "observe": "片段观察",
+    "clip_extraction": "关键帧与片段",
+    "observe": "深度观察",
     "assemble": "片段拼接",
     "finalize": "音画对齐",
 }
@@ -647,10 +649,9 @@ def _observe_empty(observe: Any) -> bool:
     if observe.get("shot_observation_card") or observe.get("raw_claims"):
         return False
     speech = observe.get("speech_evidence") or {}
-    if isinstance(speech, dict) and (
-        speech.get("segments") or str(speech.get("status") or "not_used") not in {"", "not_used"}
-    ):
-        return False
+    if isinstance(speech, dict):
+        if speech.get("segments") or str(speech.get("notes") or "").strip():
+            return False
     return True
 
 
@@ -664,8 +665,14 @@ def observe_payload(public: dict[str, Any]) -> dict[str, Any] | None:
         error = segment.get("error")
         if _observe_empty(observe) and not error:
             continue
-        if _observe_empty(observe) and error and "observe" not in str(error):
-            # 切片失败但没有观察结果时不单独占观察卡；仅 observe 失败才列出
+        error_text = str(error or "")
+        if (
+            _observe_empty(observe)
+            and error
+            and "observe" not in error_text.lower()
+            and "观察" not in error_text
+        ):
+            # 切片失败但没有观察结果时不单独占观察卡；仅深度观察失败才列出
             continue
         items.append(
             {

@@ -333,7 +333,6 @@ def to_production_segments(
                 "sub_slot_desc": sub_slot_desc,
                 "clip_path": clip_path,
                 "clip_url": f"/api/productions/{production_id}/artifacts/{clip_path}",
-                "lens_info": dict(lens.get("lens_info") or {}),
                 "error": lens.get("error"),
             }
         )
@@ -379,7 +378,11 @@ def coverage_ok(segments: list[dict[str, Any]], duration_ms: int, tolerance_ms: 
 def observe_is_empty(observe: Any) -> bool:
     if not isinstance(observe, dict):
         return True
-    if observe.get("shot_observation_card"):
+    cards = observe.get("shot_observation_card") or []
+    if any(
+        isinstance(card, dict) and any(str(value or "").strip() for value in card.values())
+        for card in cards
+    ):
         return False
     if observe.get("raw_claims"):
         return False
@@ -387,8 +390,7 @@ def observe_is_empty(observe: Any) -> bool:
     if isinstance(speech, dict):
         if speech.get("segments"):
             return False
-        status = str(speech.get("status") or "not_used")
-        if status not in {"", "not_used"}:
+        if str(speech.get("notes") or "").strip():
             return False
     return True
 

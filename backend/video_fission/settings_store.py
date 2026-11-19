@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from . import media
@@ -25,6 +26,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_key_set": False,
         "model": "",
         "max_tokens": 12000,
+        "input_token_budget": 128000,
         "timeout_seconds": 360,
     },
     "video_generator": {
@@ -39,7 +41,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "understand": {
         "transition_detection": True,
-        "clip_analysis": True,
         "observe": True,
         "clip_workers": 3,
         "gemini_max_size_mb": 15,
@@ -79,6 +80,7 @@ class SettingsStore:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         public, secrets = self._load(user_id)
+        persisted_secrets = self._persisted_secrets(user_id)
         for section in ("multimodal", "video_generator", "understand"):
             if section not in patch or patch[section] is None:
                 continue
@@ -114,6 +116,15 @@ class SettingsStore:
                 if max_tokens < 256 or max_tokens > 65536:
                     raise ValueError("multimodal.max_tokens 需在 256 到 65536 之间")
                 public[section]["max_tokens"] = max_tokens
+            if (
+                section == "multimodal"
+                and "input_token_budget" in incoming
+                and incoming["input_token_budget"] is not None
+            ):
+                budget = int(incoming["input_token_budget"])
+                if budget < 4000 or budget > 1_000_000:
+                    raise ValueError("multimodal.input_token_budget 需在 4000 到 1000000 之间")
+                public[section]["input_token_budget"] = budget
             if section != "understand" and "timeout_seconds" in incoming and incoming["timeout_seconds"] is not None:
                 timeout = int(incoming["timeout_seconds"])
                 if timeout < 5 or timeout > 3600:
@@ -121,7 +132,7 @@ class SettingsStore:
                 if "timeout_seconds" in public[section]:
                     public[section]["timeout_seconds"] = timeout
             if section == "understand":
-                for flag in ("transition_detection", "clip_analysis", "observe"):
+                for flag in ("transition_detection", "observe"):
                     if flag in incoming and incoming[flag] is not None:
                         public[section][flag] = bool(incoming[flag])
                 if "clip_workers" in incoming and incoming["clip_workers"] is not None:
@@ -146,11 +157,21 @@ class SettingsStore:
                     secrets[section] = ""
                 elif str(value) != "":
                     secrets[section] = str(value)
+        # Machine-wide fallback credentials stay outside the database unless the
+        # caller explicitly provides a different key.
+        machine_seedance_key = self._seedance_runtime_secret()
+        if machine_seedance_key and not persisted_secrets.get("video_generator"):
+            if secrets.get("video_generator") == machine_seedance_key:
+                secrets["video_generator"] = ""
         if user_id:
             self.db.upsert_user_settings(user_id, public, secrets)
         else:
             self.db.upsert_app_settings(public, secrets)
-        return self._mask(public, secrets)
+        effective_secrets = dict(secrets)
+        for key, value in self._runtime_secrets(public).items():
+            if value and not effective_secrets.get(key):
+                effective_secrets[key] = value
+        return self._mask(public, effective_secrets)
 
     def test_target(self, target: str, user_id: str | None = None) -> dict[str, Any]:
         if target not in SECRET_KEYS:
@@ -304,11 +325,21 @@ class SettingsStore:
         defaults = self._defaults()
         public = deepcopy(defaults)
         secrets = {key: "" for key in SECRET_KEYS}
+        for key, value in self._runtime_secrets(public).items():
+            if key in secrets and value:
+                secrets[key] = value
         if not row:
             if user_id:
-                self.db.upsert_user_settings(user_id, public, secrets)
+                self.db.upsert_user_settings(
+                    user_id,
+                    public,
+                    {key: "" for key in SECRET_KEYS},
+                )
             else:
-                self.db.upsert_app_settings(public, secrets)
+                self.db.upsert_app_settings(
+                    public,
+                    {key: "" for key in SECRET_KEYS},
+                )
             return public, secrets
         stored = row.get("public") or {}
         migrated = False
@@ -365,6 +396,9 @@ class SettingsStore:
         for key, value in (row.get("secrets") or {}).items():
             if key in secrets:
                 secrets[key] = str(value or "")
+        for key, value in self._runtime_secrets(public).items():
+            if not secrets.get(key) and value:
+                secrets[key] = value
         if migrated:
             if user_id:
                 self.db.upsert_user_settings(user_id, public, secrets)
@@ -387,7 +421,38 @@ class SettingsStore:
                     "timeout_seconds": 360,
                 }
             )
+        if runtime:
+            if runtime.seedance_base_url:
+                defaults["video_generator"]["base_url"] = runtime.seedance_base_url
+            if runtime.seedance_model:
+                defaults["video_generator"]["model"] = runtime.seedance_model
         return defaults
+
+    def _runtime_secrets(self, public: dict[str, Any] | None = None) -> dict[str, str]:
+        runtime = self.runtime_settings
+        if runtime is None:
+            return {}
+        if public is not None:
+            provider = str((public.get("video_generator") or {}).get("provider") or "seedance")
+            if provider != "seedance":
+                return {}
+        seedance_key = self._seedance_runtime_secret()
+        return {"video_generator": seedance_key}
+
+    def _seedance_runtime_secret(self) -> str:
+        runtime = self.runtime_settings
+        if runtime is None:
+            return ""
+        return runtime.seedance_api_key or _read_seedance_auth(runtime.seedance_auth_file)
+
+    def _persisted_secrets(self, user_id: str | None) -> dict[str, str]:
+        row = self.db.get_user_settings(user_id) if user_id else self.db.get_app_settings()
+        if not row:
+            return {}
+        return {
+            str(key): str(value or "")
+            for key, value in (row.get("secrets") or {}).items()
+        }
 
     def _mask(self, public: dict[str, Any], secrets: dict[str, str]) -> dict[str, Any]:
         masked = deepcopy(public)
@@ -395,3 +460,21 @@ class SettingsStore:
             masked[key]["api_key_set"] = bool(secrets.get(key))
             masked[key].pop("api_key", None)
         return masked
+
+
+def _read_seedance_auth(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return ""
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("authKey", "api_key", "apiKey", "token"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""

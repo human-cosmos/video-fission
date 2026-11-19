@@ -24,6 +24,14 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _seedance_auth_file() -> Path | None:
+    configured = os.getenv("VF_SEEDANCE_AUTH_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    # `npx dksk auth <key>` writes this machine-local credential file.
+    return (Path.home() / ".acore" / "auth.json").resolve()
+
+
 def _auth_secret(data_dir: Path) -> str:
     configured = os.getenv("VF_AUTH_SECRET_KEY", "").strip()
     if configured:
@@ -83,6 +91,10 @@ class Settings:
     gemini_token_url: str = ""
     gemini_model: str = ""
     gemini_source: str = ""
+    seedance_base_url: str = ""
+    seedance_api_key: str = ""
+    seedance_model: str = ""
+    seedance_auth_file: Path | None = None
     allow_local_copy_fallback: bool = False
     e2e_fake_creative_context: bool = False
 
@@ -146,6 +158,10 @@ class Settings:
             ).strip(),
             gemini_model=os.getenv("VF_GEMINI_MODEL", "").strip(),
             gemini_source=os.getenv("VF_GEMINI_SOURCE", "").strip(),
+            seedance_base_url=os.getenv("VF_SEEDANCE_BASE_URL", "").strip(),
+            seedance_api_key=os.getenv("VF_SEEDANCE_API_KEY", "").strip(),
+            seedance_model=os.getenv("VF_SEEDANCE_MODEL", "").strip(),
+            seedance_auth_file=_seedance_auth_file(),
             allow_local_copy_fallback=_env_bool("VF_ALLOW_LOCAL_COPY_FALLBACK", False),
             e2e_fake_creative_context=_env_bool("VF_E2E_FAKE_CREATIVE_CONTEXT", False),
         )

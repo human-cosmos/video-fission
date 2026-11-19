@@ -1667,6 +1667,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "scenedetect" },
+    { name = "torch" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1675,9 +1676,6 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-]
-shot-detect = [
-    { name = "torch" },
 ]
 
 [package.metadata]
@@ -1697,10 +1695,10 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.26" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "scenedetect", specifier = ">=0.6" },
-    { name = "torch", marker = "extra == 'shot-detect'", specifier = ">=2.2" },
+    { name = "torch", specifier = ">=2.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.38.0" },
 ]
-provides-extras = ["dev", "shot-detect"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "watchfiles"

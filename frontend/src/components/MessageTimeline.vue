@@ -10,7 +10,7 @@ import {
   payloadText,
   toolCallName,
 } from '../utils/events'
-import { isVideoFile } from '../utils/format'
+import { formatMessageTime, isImageFile, isVideoFile } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { mediaUrl } from '../utils/productionMedia'
 import { toolLabel } from '../utils/agentTraceDisplay'
@@ -34,39 +34,16 @@ const emit = defineEmits([
   'answer-clarification',
   'copy',
   'cancel-production',
-  'rerun-selected',
   'rerun-brief',
   'select-video',
+  'approve-scripts',
+  'request-script-revision',
   'regenerate-scripts',
   'regenerate-video',
-  'use-prompt',
 ])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
 const displayItems = computed(() => groupExecutionItems(props.conversation?.items || []))
-const starterTickets = [
-  {
-    title: '参考视频拆解',
-    desc: '看懂卖点、节奏、镜头与叙事结构',
-    prompt: '帮我拆解一个参考视频：它为什么抓人，哪些结构可以复用？',
-  },
-  {
-    title: '短视频脚本',
-    desc: '保留有效结构，换一个更有记忆点的开场',
-    prompt: '把一个产品卖点拆成 30 秒短视频，先给我 3 个不同方向的开场。',
-  },
-  {
-    title: '镜头级规划',
-    desc: '把脚本拆成可执行的镜头、素材与生成要求',
-    prompt: '把这条短视频脚本拆成镜头级执行方案，并标出每个镜头的素材需求。',
-  },
-]
-const starterAsks = [
-  ['卖点拆解', '把一个产品卖点拆成 30 秒短视频'],
-  ['开场钩子', '为美妆新品写一个反常识开场'],
-  ['脚本结构', '设计一套三段式种草脚本'],
-  ['镜头复盘', '复盘这条视频的镜头节奏和转场问题'],
-]
 
 function scrollToBottom(behavior = 'smooth') {
   nextTick(() => {
@@ -122,6 +99,17 @@ function structuredText(item) {
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
 }
 
+function messageTime(value) {
+  return formatMessageTime(value)
+}
+
+function messageTimeTitle(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return ''
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
 function traceStatusText(item) {
   if (item.status === 'inProgress') return '进行中'
   if (item.status === 'failed') return '有失败'
@@ -157,10 +145,8 @@ defineExpose({ scrollToBottom })
   <div ref="scroller" class="message-scroller">
     <div v-if="!conversation" class="welcome">
       <header class="welcome-head">
-        <h2>先看再拆</h2>
-        <p>
-          从参考视频、卖点和目标受众出发，先拿到判断，再进入脚本与镜头。上传素材、追问方向、继续执行，上下文都留在这张工作台上。
-        </p>
+        <h2>视频裂变</h2>
+        <p>从视频、卖点、受众先判断，再写脚本拆镜头。</p>
         <div class="welcome-signal" aria-label="Video Fission 工作范围">
           <span><i></i>视频理解</span>
           <span><i></i>脚本规划</span>
@@ -168,37 +154,6 @@ defineExpose({ scrollToBottom })
           <span><i></i>成片生成</span>
         </div>
       </header>
-
-      <div class="tickets" role="list">
-        <button
-          v-for="(ticket, index) in starterTickets"
-          :key="ticket.title"
-          type="button"
-          class="ticket"
-          role="listitem"
-          @click="$emit('use-prompt', ticket.prompt)"
-        >
-          <span class="ticket-index">0{{ index + 1 }}</span>
-          <span class="ticket-body">
-            <span class="ticket-name">{{ ticket.title }}</span>
-            <span class="ticket-desc">{{ ticket.desc }}</span>
-          </span>
-          <span class="ticket-arrow" aria-hidden="true">↗</span>
-        </button>
-      </div>
-
-      <div class="asks">
-        <p class="asks-title">推荐指令</p>
-        <button
-          v-for="item in starterAsks"
-          :key="item[0]"
-          type="button"
-          class="ask"
-          @click="$emit('use-prompt', item[1])"
-        >
-          {{ item[1] }}
-        </button>
-      </div>
     </div>
 
     <div v-else class="transcript" data-testid="message-timeline">
@@ -215,6 +170,14 @@ defineExpose({ scrollToBottom })
         <div class="message-spine" aria-hidden="true">
           <span></span>
         </div>
+        <time
+          v-if="messageTime(item.created_at)"
+          class="message-time"
+          :datetime="item.created_at"
+          :title="messageTimeTitle(item.created_at)"
+        >
+          {{ messageTime(item.created_at) }}
+        </time>
 
         <template v-if="item.item_type === 'userMessage'">
           <div class="user-message" data-testid="user-message">
@@ -235,6 +198,12 @@ defineExpose({ scrollToBottom })
                   :height="Number(file.height) || 0"
                   testid="user-message-video"
                   compact
+                />
+                <img
+                  v-else-if="isImageFile(file) && mediaUrl(file)"
+                  class="user-image"
+                  :src="mediaUrl(file)"
+                  :alt="file.name"
                 />
                 <span v-else>
                   <FileText :size="13" /> {{ file.name }}
@@ -360,6 +329,8 @@ defineExpose({ scrollToBottom })
           <VideoPlanCard
             :payload="cardPayload(item)"
             :rerunning="rerunning"
+            @approve-scripts="$emit('approve-scripts', $event)"
+            @request-script-revision="$emit('request-script-revision')"
             @regenerate-scripts="$emit('regenerate-scripts', $event)"
             @regenerate-video="$emit('regenerate-video', $event)"
           />
@@ -369,7 +340,6 @@ defineExpose({ scrollToBottom })
           <VideoSegmentsCard
             :payload="cardPayload(item)"
             :rerunning="rerunning"
-            @rerun-selected="$emit('rerun-selected', $event)"
             @rerun-brief="$emit('rerun-brief', $event)"
           />
         </template>
@@ -420,6 +390,13 @@ defineExpose({ scrollToBottom })
       >
         <div class="message-spine"><span></span></div>
         <form class="interaction-card clarification-card" @submit.prevent="submitClarification(clarification)">
+          <time
+            v-if="messageTime(clarification.created_at)"
+            class="message-time message-time--interaction"
+            :datetime="clarification.created_at"
+          >
+            {{ messageTime(clarification.created_at) }}
+          </time>
           <div class="interaction-kicker">AGENT QUESTION</div>
           <div v-for="question in clarification.questions" :key="question.id" class="question-row">
             <label :for="`${clarification.id}-${question.id}`">

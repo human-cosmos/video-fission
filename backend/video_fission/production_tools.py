@@ -276,6 +276,14 @@ class ProductionToolHost:
         production = self._production(production_id)
         timeline = production.get("script") or local_script(production)
         assert_opening_locked(timeline, production)
+        intent = dict(arguments.get("intent") or production.get("intent") or {})
+        if not intent.get("true_intent") and intent.get("goal"):
+            intent["true_intent"] = intent.get("goal")
+        if not intent.get("selling_points"):
+            landing = production.get("landing_page") or {}
+            intent["selling_points"] = list(
+                landing.get("selling_points") or landing.get("benefits") or []
+            )[:8]
         candidates = list(arguments.get("script_candidates") or arguments.get("candidates") or [])
         if len(candidates) != 3:
             raise ProductionToolError("必须恰好写入 3 个脚本候选")
@@ -296,13 +304,13 @@ class ProductionToolHost:
             )
         display = locked_candidates[0]["script"]
         updates: dict[str, Any] = {
-            "intent": arguments.get("intent") or production.get("intent"),
+            "intent": intent,
             "skeleton": arguments.get("skeleton") or production.get("skeleton"),
             "script": display,
             "script_candidates": locked_candidates,
             "selected_script_id": None,
             "candidate_videos": [],
-            "status": "running",
+            "status": "awaiting_script_approval",
             "current_stage": "script",
             "error": None,
         }
@@ -310,10 +318,10 @@ class ProductionToolHost:
         context_paths = write_creative_context(self.settings, self._production(production_id))
         return {
             "production_id": production_id,
-            "status": "running",
+            "status": "awaiting_script_approval",
             "candidate_ids": ids,
-            "paused": False,
-            "message": "3 个创意已写入，接下来会分别生成并合成候选视频。",
+            "paused": True,
+            "message": "3 个创意脚本已写入。请先向用户展示并确认脚本，确认后才生成候选视频。",
             **context_paths,
         }
 

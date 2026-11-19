@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import re
 import time
 import uuid
@@ -402,11 +403,40 @@ async def upload(
     stored.write_bytes(b"".join(chunks))
     return {
         "id": stored.stem,
+        "kind": "reference_image" if str(file.content_type or "").startswith("image/") else "attachment",
         "name": original,
         "path": str(stored.resolve()),
         "size": total,
         "content_type": file.content_type or "application/octet-stream",
+        "url": f"/api/uploads/{stored.stem}",
     }
+
+
+@router.get("/uploads/{file_id}")
+def get_upload(
+    file_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    if not re.fullmatch(r"[a-f0-9]{32}", file_id):
+        raise HTTPException(400, "附件标识无效")
+    upload_root = user_upload_root(container.settings.uploads_dir, owner_id(current_user))
+    matches = [path for path in upload_root.glob(f"{file_id}.*") if path.is_file()]
+    if not matches and current_user.get("role") == "admin":
+        matches = [
+            path
+            for path in container.settings.uploads_dir.glob(f"{file_id}.*")
+            if path.is_file()
+        ]
+    if not matches:
+        raise HTTPException(404, "附件不存在")
+    path = matches[0]
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name,
+        content_disposition_type="inline",
+    )
 
 
 @router.delete("/uploads/{file_id}")
@@ -532,6 +562,7 @@ class ProductionRunBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
     replace_policy: ReplacePolicyBody | None = None
     resume_from: str | None = None
+    user_approved: bool = False
 
 
 class SelectScriptBody(BaseModel):
@@ -717,6 +748,7 @@ async def run_production(
 ) -> dict[str, Any]:
     policy = None
     resume_from = None
+    user_approved = False
     raw = await request.body()
     if raw.strip():
         try:
@@ -725,11 +757,41 @@ async def run_production(
             raise HTTPException(400, f"run 请求体无效: {exc}") from exc
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
         resume_from = body.resume_from
+        user_approved = body.user_approved
     try:
         return container.productions.run(
             production_id,
             replace_policy=policy,
             resume_from=resume_from,
+            user_approved=user_approved,
+            user_id=owner_id(current_user),
+        )
+    except Exception as exc:
+        _production_error(exc)
+
+
+@router.post("/productions/{production_id}/generate-scripts")
+def generate_production_scripts(
+    production_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        return container.productions.generate_scripts_with_gemini(
+            production_id,
+            user_id=owner_id(current_user),
+        )
+    except Exception as exc:
+        _production_error(exc)
+
+
+@router.post("/productions/{production_id}/approve-scripts")
+def approve_production_scripts(
+    production_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        return container.productions.approve_scripts(
+            production_id,
             user_id=owner_id(current_user),
         )
     except Exception as exc:

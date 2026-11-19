@@ -33,7 +33,7 @@ def test_run_goes_through_production_agent_not_pipeline_loop(app_env):
     result = app_env.productions.run(production["id"], wait=True)
     assert called == []
     assert runtime.plans
-    assert result["status"] == "running"
+    assert result["status"] == "awaiting_script_approval"
     assert result.get("selected_script_id") is None
     tools = called_tools(result)
     assert tools == [
@@ -56,7 +56,7 @@ def test_run_goes_through_production_agent_not_pipeline_loop(app_env):
     assert "tool_completed" in events
 
 
-def test_default_planner_attempts_all_candidate_videos_without_codex_process(app_env):
+def test_default_planner_waits_for_script_approval_before_candidate_videos(app_env):
     production = create_production(app_env.productions)
     app_env.productions.update_creative_context(
         production["id"],
@@ -65,9 +65,17 @@ def test_default_planner_attempts_all_candidate_videos_without_codex_process(app
         script_candidates=stub_candidates(),
     )
 
-    result = app_env.productions.run(production["id"], wait=True)
+    pending = app_env.productions.run(production["id"], wait=True)
 
     assert isinstance(app_env.productions.agent.runtime, DeterministicPlanner)
+    assert pending["status"] == "awaiting_script_approval"
+    assert "generate_candidate_videos" not in called_tools(pending)
+    result = app_env.productions.run(
+        production["id"],
+        wait=True,
+        resume_from="generate",
+        user_approved=True,
+    )
     assert result["status"] == "failed"
     assert "Key" in (result.get("error") or "") or "base_url" in (result.get("error") or "")
     assert called_tools(result) == [
@@ -192,12 +200,13 @@ def test_start_and_run_tools_hand_off_to_agent(app_env):
     )
     assert resumed["success"]
     resume_payload = json.loads(resumed["contentItems"][0]["text"])
-    assert resume_payload["production"]["status"] == "failed"
-    assert "Key" in (resume_payload["production"].get("error") or "") or "base_url" in (
-        resume_payload["production"].get("error") or ""
-    )
-    assert "generate_candidate_videos" in called_tools(resume_payload["production"])
+    assert resume_payload["production"]["status"] == "awaiting_script_approval"
+    assert "generate_candidate_videos" not in called_tools(resume_payload["production"])
     assert "后台创作任务" in resume_payload["message"]
+    approved = app_env.productions.approve_scripts(production_id)
+    assert approved["status"] == "failed"
+    assert "Key" in (approved.get("error") or "") or "base_url" in (approved.get("error") or "")
+    assert "generate_candidate_videos" in called_tools(approved)
     assert engine_called == []
 
 
@@ -209,7 +218,14 @@ def test_candidate_generation_does_not_require_script_selection(app_env):
         skeleton={"one_liner": "测试", "hook": "钩子", "value": "价值", "cta": "行动"},
         script_candidates=stub_candidates(),
     )
-    result = app_env.productions.run(production["id"], wait=True)
+    pending = app_env.productions.run(production["id"], wait=True)
+    assert pending["status"] == "awaiting_script_approval"
+    result = app_env.productions.run(
+        production["id"],
+        wait=True,
+        resume_from="generate",
+        user_approved=True,
+    )
     assert result["id"] == production["id"]
     assert result["status"] == "failed"
     error = result.get("error") or ""
@@ -255,7 +271,15 @@ def test_recovery_migrates_legacy_script_choice_to_all_candidate_generation(app_
 def test_bulk_shot_generation_still_rejects_missing_selection(app_env):
     production = create_production(app_env.productions)
     inject_fake(app_env, plan_with_premature_generate())
-    result = app_env.productions.run(production["id"], wait=True)
+    pending = app_env.productions.run(production["id"], wait=True)
+    assert pending["status"] in {"awaiting_script_approval", "failed"}
+    inject_fake(app_env, {"steps": [{"tool": "generate_video_shots"}]})
+    result = app_env.productions.run(
+        production["id"],
+        wait=True,
+        resume_from="generate",
+        user_approved=True,
+    )
     assert result["status"] == "failed"
     assert "选定" in (result.get("error") or "") or "选择" in (result.get("error") or "")
     assert result.get("selected_script_id") is None
@@ -292,7 +316,7 @@ def test_followup_tool_keeps_same_production(app_env):
     assert payload["action"] == "clarify"
     current = app_env.db.get_production(paused["id"])
     assert current["id"] == paused["id"]
-    assert current["status"] == "running"
+    assert current["status"] == "awaiting_script_approval"
 
 
 def test_fake_runtime_never_needs_codex_binary(app_env):

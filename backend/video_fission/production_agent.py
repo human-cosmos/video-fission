@@ -83,7 +83,6 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
-                "generate_candidate_videos",
             ]
         elif resume_from == "intent":
             tools = [
@@ -91,13 +90,11 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
-                "generate_candidate_videos",
             ]
         elif resume_from == "script":
             tools = [
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
-                "generate_candidate_videos",
             ]
         else:
             tools = [
@@ -107,7 +104,6 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
-                "generate_candidate_videos",
             ]
         return {
             "skills": list(VIDEO_CREATIVE_SKILLS),
@@ -293,6 +289,13 @@ class ProductionAgent:
                 raise ProductionAgentError(message)
             completed_steps.append(name)
             current = self.db.get_production(production_id) or {}
+            if current.get("status") == "awaiting_script_approval":
+                self._emit(
+                    production_id,
+                    "awaiting_script_approval",
+                    {"message": "创意脚本已生成，等待用户确认后再生视频"},
+                )
+                return current
             if current.get("status") == "awaiting_video_choice":
                 self._emit(production_id, "awaiting_video_choice", {"message": "请选择候选视频"})
                 return current

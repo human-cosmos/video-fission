@@ -1,4 +1,5 @@
 <script setup>
+import { ChevronRight } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import {
   ACTION_LABELS,
@@ -20,14 +21,11 @@ const props = defineProps({
   rerunning: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['rerun-selected', 'rerun-brief'])
+defineEmits(['rerun-brief'])
 
-const regenSelected = ref({})
 const hiddenFrames = ref({})
 
 const productionId = computed(() => props.payload?.production_id || '')
-const status = computed(() => props.payload?.status || '')
-const isRunning = computed(() => status.value === 'running')
 const segments = computed(
   () => props.payload?.segments || props.payload?.decomposition?.segments || [],
 )
@@ -35,17 +33,6 @@ const shots = computed(() => props.payload?.shots || props.payload?.script?.shot
 const clips = computed(() => props.payload?.clips || [])
 const replacePlan = computed(() => props.payload?.replace_plan || null)
 const opening = computed(() => openingOf(props.payload))
-const selectedIds = computed(() =>
-  segments.value.map((segment) => segment.id).filter((id) => regenSelected.value[id]),
-)
-const canRerunSelected = computed(
-  () =>
-    Boolean(productionId.value) &&
-    status.value !== 'running' &&
-    status.value !== 'draft' &&
-    selectedIds.value.length > 0 &&
-    !props.rerunning,
-)
 const canRerunBrief = computed(
   () =>
     Boolean(productionId.value) &&
@@ -55,16 +42,11 @@ const canRerunBrief = computed(
 )
 
 watch(productionId, () => {
-  regenSelected.value = {}
   hiddenFrames.value = {}
 })
 
 function actionOf(segment) {
   return segmentAction(segment, replacePlan.value, shots.value)
-}
-
-function setRegen(id, checked) {
-  regenSelected.value = { ...regenSelected.value, [id]: Boolean(checked) }
 }
 
 function hideFrame(key) {
@@ -82,7 +64,15 @@ function segmentClipUrl(segment) {
 
 <template>
   <section class="video-card studio-card" data-testid="video-segments-card">
-    <h3>原片与片段</h3>
+    <details class="studio-disclosure" data-testid="video-segments-disclosure">
+      <summary class="studio-disclosure-summary">
+        <span>
+          <strong>原片与片段</strong>
+          <small>{{ segments.length }} 个片段{{ clips.length ? ` · ${clips.length} 个产物` : '' }}</small>
+        </span>
+        <ChevronRight :size="15" />
+      </summary>
+      <div class="studio-disclosure-body">
     <p v-if="replacePlan" class="page-muted" data-testid="video-replace-plan">
       本轮新生成：{{ (replacePlan.resolved_segment_ids || []).join('、') || '无' }}
     </p>
@@ -115,16 +105,6 @@ function segmentClipUrl(segment) {
           >
             建议复用
           </span>
-          <label class="segment-regen">
-            <input
-              type="checkbox"
-              :data-testid="`video-segment-regen-${segment.id}`"
-              :disabled="isRunning || rerunning"
-              :checked="Boolean(regenSelected[segment.id])"
-              @change="setRegen(segment.id, $event.target.checked)"
-            />
-            重新生成
-          </label>
         </header>
         <p v-if="slotTrail(segment)" class="page-muted" :data-testid="`video-segment-slot-${segment.id}`">
           {{ slotTrail(segment) }}
@@ -177,15 +157,6 @@ function segmentClipUrl(segment) {
       <button
         class="button primary"
         type="button"
-        data-testid="video-rerun-selected"
-        :disabled="!canRerunSelected"
-        @click="$emit('rerun-selected', { productionId, segmentIds: selectedIds })"
-      >
-        {{ rerunning ? '重新生成中…' : '重新生成所选片段' }}
-      </button>
-      <button
-        class="button subtle"
-        type="button"
         data-testid="video-rerun-brief"
         :disabled="!canRerunBrief"
         @click="$emit('rerun-brief', productionId)"
@@ -193,5 +164,7 @@ function segmentClipUrl(segment) {
         按最新说明重跑
       </button>
     </div>
+      </div>
+    </details>
   </section>
 </template>

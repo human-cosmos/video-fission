@@ -255,6 +255,7 @@ class Database:
                     clips TEXT NOT NULL,
                     output TEXT,
                     video_upload_id TEXT NOT NULL,
+                    reference_images TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -299,6 +300,7 @@ class Database:
             self._ensure_column(connection, "users", "token_version", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "productions", "replace_policy", "TEXT")
             self._ensure_column(connection, "productions", "replace_plan", "TEXT")
+            self._ensure_column(connection, "productions", "reference_images", "TEXT")
             self._ensure_column(
                 connection,
                 "productions",
@@ -1315,6 +1317,7 @@ class Database:
                 separators=(",", ":"),
             ),
             "replace_plan": json.dumps(payload.get("replace_plan"), ensure_ascii=False, separators=(",", ":")),
+            "reference_images": _json(payload.get("reference_images") or []),
             "video_upload_id": payload["video_upload_id"],
             "conversation_id": payload.get("conversation_id"),
             "source_item_id": payload.get("source_item_id"),
@@ -1327,11 +1330,13 @@ class Database:
                 INSERT INTO productions (
                     id, user_id, title, brief, status, current_stage, error, warnings, source_video,
                     decomposition, intent, skeleton, script, clips, output, replace_policy,
-                    replace_plan, video_upload_id, conversation_id, source_item_id, created_at, updated_at
+                    replace_plan, reference_images, video_upload_id, conversation_id, source_item_id,
+                    created_at, updated_at
                 ) VALUES (
                     :id, :user_id, :title, :brief, :status, :current_stage, :error, :warnings, :source_video,
                     :decomposition, :intent, :skeleton, :script, :clips, :output, :replace_policy,
-                    :replace_plan, :video_upload_id, :conversation_id, :source_item_id, :created_at, :updated_at
+                    :replace_plan, :reference_images, :video_upload_id, :conversation_id, :source_item_id,
+                    :created_at, :updated_at
                 )
                 """,
                 values,
@@ -1439,6 +1444,7 @@ class Database:
             "output",
             "replace_policy",
             "replace_plan",
+            "reference_images",
             "conversation_id",
             "source_item_id",
             "landing_page",
@@ -1460,6 +1466,7 @@ class Database:
             "output",
             "replace_policy",
             "replace_plan",
+            "reference_images",
             "landing_page",
             "script_candidates",
             "candidate_videos",
@@ -1566,6 +1573,7 @@ class Database:
                 {"mode": "default", "roles": [], "segment_ids": [], "time_ranges": []},
             ),
             "replace_plan": _load(_row_get(row, "replace_plan"), None),
+            "reference_images": _load(_row_get(row, "reference_images"), []),
             "video_upload_id": row["video_upload_id"],
             "conversation_id": _row_get(row, "conversation_id"),
             "source_item_id": _row_get(row, "source_item_id"),

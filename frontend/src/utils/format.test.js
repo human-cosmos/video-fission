@@ -6,9 +6,11 @@ import {
   cleanDisplayText,
   formatBytes,
   formatDuration,
+  formatMessageTime,
   formatTimecode,
   historyStatusText,
   humanizeMsText,
+  isImageFile,
   isTechnicalVisual,
   isVideoFile,
   needsRemoteFields,
@@ -36,6 +38,13 @@ describe('format helpers', () => {
     expect(formatBytes(1_572_864)).toBe('1.5 MB')
   })
 
+  it('formats message timestamps for the local conversation view', () => {
+    const now = new Date(2026, 10, 19, 15, 30)
+    expect(formatMessageTime(new Date(2026, 10, 19, 14, 5), now)).toBe('14:05')
+    expect(formatMessageTime(new Date(2026, 10, 18, 9, 8), now)).toBe('11-18 09:08')
+    expect(formatMessageTime(new Date(2025, 10, 18, 9, 8), now)).toBe('2025-11-18 09:08')
+  })
+
   it('uses conventional keyframe artifact names without inventing contract fields', () => {
     expect(segmentFrameNames('seg_01')).toEqual([
       'seg_01_frame_01.jpg',
@@ -56,6 +65,9 @@ describe('format helpers', () => {
     expect(historyStatusText({ status: 'running', current_stage: 'generate' })).toBe('进行中 · 生成')
     expect(historyStatusText({ status: 'awaiting_creative_context', current_stage: 'intent' })).toBe(
       '等待生成脚本',
+    )
+    expect(historyStatusText({ status: 'awaiting_script_approval', current_stage: 'script' })).toBe(
+      '待确认脚本',
     )
     expect(historyStatusText({ status: 'awaiting_script_choice', current_stage: 'script' })).toBe(
       '自动生成准备中',
@@ -98,6 +110,13 @@ describe('chat-native production helpers', () => {
     expect(isVideoFile({ name: 'hook.mp4' })).toBe(true)
     expect(isVideoFile({ content_type: 'video/webm', name: 'clip' })).toBe(true)
     expect(isVideoFile({ name: 'notes.md' })).toBe(false)
+  })
+
+  it('detects uploaded reference images', () => {
+    expect(isImageFile({ kind: 'reference_image', name: 'product.bin' })).toBe(true)
+    expect(isImageFile({ content_type: 'image/png', name: 'reference' })).toBe(true)
+    expect(isImageFile({ name: 'reference.webp' })).toBe(true)
+    expect(isImageFile({ name: 'reference.mp4' })).toBe(false)
   })
 
   it('classifies player aspect and revises artifact urls', () => {

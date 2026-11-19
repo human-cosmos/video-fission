@@ -21,6 +21,24 @@ export function formatBytes(bytes) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
+export function formatMessageTime(value, now = new Date()) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return ''
+  const current = now instanceof Date ? now : new Date(now)
+  const sameYear = date.getFullYear() === current.getFullYear()
+  const sameDay =
+    sameYear &&
+    date.getMonth() === current.getMonth() &&
+    date.getDate() === current.getDate()
+  const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  if (sameDay) return time
+  const day = `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  return sameYear
+    ? `${day} ${time}`
+    : `${date.getFullYear()}-${day} ${time}`
+}
+
 export const WORKSPACE_MODES = [
   { id: 'chat', label: '对话' },
   { id: 'settings', label: '系统设置' },
@@ -36,6 +54,8 @@ export const VIDEO_ITEM_TYPES = [
 ]
 
 export const VIDEO_ACCEPT = '.mp4,.mov,.webm,.m4v,video/mp4,video/quicktime,video/webm,video/x-m4v'
+export const IMAGE_ACCEPT = '.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp'
+export const COMPOSER_MEDIA_ACCEPT = `${VIDEO_ACCEPT},${IMAGE_ACCEPT}`
 export const MAX_PRODUCTION_UPLOAD_BYTES = 500 * 1024 * 1024
 
 export const STAGE_ORDER = [
@@ -62,6 +82,7 @@ export const STATUS_LABELS = {
   draft: '草稿',
   running: '进行中',
   awaiting_creative_context: '等待生成脚本',
+  awaiting_script_approval: '待确认脚本',
   awaiting_script_choice: '自动生成准备中',
   awaiting_video_choice: '待选择视频',
   completed: '已完成',
@@ -99,6 +120,7 @@ export function historyStatusText(item) {
   if (item?.status === 'completed' || item?.current_stage === 'done') return status
   if (
     item?.status === 'awaiting_creative_context' ||
+    item?.status === 'awaiting_script_approval' ||
     item?.status === 'awaiting_script_choice' ||
     item?.status === 'awaiting_video_choice'
   ) {
@@ -141,6 +163,14 @@ export function isVideoFile(file) {
   const type = String(file.content_type || file.type || '')
   if (type.startsWith('video/')) return true
   return /\.(mp4|mov|webm|m4v)$/i.test(String(file.name || file.filename || ''))
+}
+
+export function isImageFile(file) {
+  if (!file) return false
+  if (file.kind === 'reference_image') return true
+  const type = String(file.content_type || file.type || '')
+  if (type.startsWith('image/')) return true
+  return /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(String(file.name || file.filename || ''))
 }
 
 export function aspectStyle(dims) {

@@ -425,6 +425,8 @@ class CodexHub:
             return self.productions.select_video(latest["id"], value, user_id=user_id)
         if action == "select":
             return self.productions.select_script(latest["id"], value, user_id=user_id)
+        if value == "generate" and latest.get("status") == "awaiting_script_approval":
+            return self.productions.approve_scripts(latest["id"], user_id=user_id)
         return self.productions.run(latest["id"], resume_from=value, user_id=user_id)
 
     def send_message(
@@ -911,7 +913,8 @@ class CodexHub:
                 )
                 continue
             if path:
-                lines.append(f"{index}. {name} — `{path}`")
+                kind = "参考图" if file.get("kind") == "reference_image" else "附件"
+                lines.append(f"{index}. {name} — {kind}，路径 `{path}`")
         return "\n\n".join(lines)
 
     def _validated_files(
@@ -974,6 +977,13 @@ class CodexHub:
                     "id": str(item.get("id") or path.stem),
                     "name": Path(str(item.get("name") or path.name)).name,
                     "path": str(path),
+                    "kind": (
+                        "reference_image"
+                        if str(item.get("content_type") or "").startswith("image/")
+                        else str(item.get("kind") or "attachment")
+                    ),
+                    "content_type": str(item.get("content_type") or ""),
+                    "url": f"/api/uploads/{path.stem}",
                 }
             )
         return validated
@@ -995,6 +1005,11 @@ class CodexHub:
 - 你拥有动态工具：{tool_names}。当用户要求统计、查看工作区、读取文件或生成并保存视频简报时，应调用对应工具。
 - 对话里上传的参考视频使用 video_upload_id。若当前对话已有创作任务，先 get_video_production 查询，
   或 run_video_production 按说明重跑，禁止再 start_video_production 开一条重复任务。
+- 创意意图和脚本优先使用 Gemini：prepare_video_production 会把用户新上传的参考图写入任务，
+  并在 Gemini 可用时直接生成 intent、skeleton 和 3 个脚本候选。若返回 awaiting_script_approval，
+  必须在对话中说明真实意图、产品卖点和用户痛点，并等待用户明确确认，禁止自动生成视频。
+- 只有用户确认脚本后，才调用 run_video_production 并设置 resume_from=generate、user_approved=true。
+  参考图会随 Seedance 请求作为 reference_image 传入，提示词必须保持商品外观和场景一致。
 - 项目 Skill 已注册在服务端。必须使用 read_skill 工具读取完整 SKILL.md 和其目录内的参考文件，
   不要依赖终端、工作区路径或 file:// 打开 Skill；这些方式在隔离运行环境中可能不可用。
 - 可用 Skill：

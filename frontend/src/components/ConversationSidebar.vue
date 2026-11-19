@@ -1,7 +1,6 @@
 <script setup>
 import {
   ChevronRight,
-  Clapperboard,
   LoaderCircle,
   LogOut,
   MessageSquare,
@@ -28,7 +27,6 @@ const props = defineProps({
   collapsed: { type: Boolean, default: false },
   width: { type: Number, default: 278 },
   productionBadges: { type: Object, default: () => ({}) },
-  unboundProductions: { type: Array, default: () => [] },
   settingsActive: { type: Boolean, default: false },
   query: { type: String, default: '' },
   hasMore: { type: Boolean, default: false },
@@ -43,14 +41,12 @@ const emit = defineEmits([
   'resize-start',
   'resize-keydown',
   'resize-reset',
-  'bind-unbound',
   'open-settings',
   'logout',
   'search',
   'load-more',
 ])
 
-const unboundOpen = ref(true)
 const accountMenu = ref(null)
 const accountName = computed(
   () => props.currentUser.display_name || props.currentUser.username || '用户',
@@ -186,44 +182,7 @@ onBeforeUnmount(() => {
         {{ loadingMore ? '加载中' : '加载更多' }}
       </button>
 
-      <div v-if="!conversations.length && !loading" class="sidebar-empty">
-        <p>{{ query ? '没有匹配的对话' : '还没有对话' }}</p>
-        <button v-if="!query" @click="$emit('new')">开始第一次对话</button>
-      </div>
     </nav>
-
-    <section v-if="unboundProductions.length" class="unbound-productions" data-testid="unbound-productions">
-      <button
-        class="sidebar-section-label unbound-toggle"
-        type="button"
-        :aria-expanded="unboundOpen"
-        @click="unboundOpen = !unboundOpen"
-      >
-        <span>
-          <ChevronRight :size="14" :class="{ open: unboundOpen }" />
-          未归入对话的成片
-        </span>
-        <span>{{ unboundProductions.length }}</span>
-      </button>
-      <nav v-if="unboundOpen" class="conversation-list unbound-list" aria-label="未归入对话的成片">
-        <button
-          v-for="item in unboundProductions"
-          :key="item.id"
-          class="conversation-row"
-          type="button"
-          :data-testid="`unbound-production-${item.id}`"
-          @click="$emit('bind-unbound', item.id)"
-        >
-          <span class="conversation-icon">
-            <Clapperboard :size="15" />
-          </span>
-          <span class="conversation-copy">
-            <strong>{{ compactTitle(item.title || item.brief || item.id) }}</strong>
-            <small>{{ item.badge || item.id }}</small>
-          </span>
-        </button>
-      </nav>
-    </section>
 
     <footer class="sidebar-footer">
       <div class="sidebar-utility-group" data-testid="sidebar-account-group">

@@ -20,10 +20,11 @@ import {
   mergeConversationSummaries,
 } from './utils/events'
 import {
+  COMPOSER_MEDIA_ACCEPT,
   MAX_PRODUCTION_UPLOAD_BYTES,
-  VIDEO_ACCEPT,
   WORKSPACE_MODES,
   formatDuration,
+  isImageFile,
   isVideoFile,
   toProductionVideoFile,
 } from './utils/format'
@@ -167,7 +168,10 @@ const effortOptions = computed(() =>
 const hasConversation = computed(() => Boolean(currentConversation.value?.id))
 const isArchived = computed(() => Boolean(currentConversation.value?.is_archived))
 const productionVideo = computed(() => attachments.value.find((file) => isVideoFile(file)))
-const otherAttachments = computed(() => attachments.value.filter((file) => !isVideoFile(file)))
+const referenceImages = computed(() => attachments.value.filter((file) => isImageFile(file)))
+const otherAttachments = computed(() =>
+  attachments.value.filter((file) => !isVideoFile(file) && !isImageFile(file)),
+)
 const needsBriefHint = computed(() => Boolean(productionVideo.value) && !composer.value.trim())
 const awaitingVideoChoice = computed(() =>
   (currentConversation.value?.items || []).some(
@@ -176,25 +180,19 @@ const awaitingVideoChoice = computed(() =>
       item?.payload?.status === 'awaiting_video_choice',
   ),
 )
+const awaitingScriptApproval = computed(() =>
+  (currentConversation.value?.items || []).some(
+    (item) =>
+      ['video_progress', 'video_plan'].includes(item?.item_type) &&
+      item?.payload?.status === 'awaiting_script_approval',
+  ),
+)
 const canSend = computed(
   () =>
     !sending.value &&
     !uploading.value &&
     !isArchived.value &&
     (productionVideo.value ? Boolean(composer.value.trim()) : Boolean(composer.value.trim() || attachments.value.length)),
-)
-const unboundProductions = computed(() =>
-  (productions.value || [])
-    .filter((item) => !item.conversation_id)
-    .map((item) => ({
-      ...item,
-      badge:
-        item.status === 'completed' && item.output?.duration_ms
-          ? formatDuration(item.output.duration_ms)
-          : item.status === 'completed'
-            ? '成片'
-            : item.title || item.brief || item.id,
-    })),
 )
 const productionBadges = computed(() => {
   const badges = {}
@@ -724,12 +722,25 @@ async function uploadFiles(event) {
       await attachProductionVideo(videos[0], generation)
       if (generation !== uploadGeneration) return
     }
+    let imageCount = attachments.value.filter((file) => isImageFile(file)).length
     for (const file of others) {
+      if (isImageFile(file) && imageCount >= 3) {
+        notify('参考图最多添加 3 张')
+        continue
+      }
       const uploaded = await api.upload(file)
       if (generation !== uploadGeneration) return
+      if (isImageFile(uploaded)) imageCount += 1
       attachments.value.push(uploaded)
     }
-    notify(videos.length ? '已添加参考视频' : `已添加 ${files.length} 个文件`)
+    const imageTotal = files.filter((file) => isImageFile(file)).length
+    notify(
+      videos.length
+        ? `已添加参考视频${imageTotal ? `和 ${Math.min(imageTotal, 3)} 张参考图` : ''}`
+        : imageTotal
+          ? `已添加 ${Math.min(imageTotal, 3)} 张参考图`
+          : `已添加 ${files.length} 个文件`,
+    )
   } catch (error) {
     notify(error.message)
   } finally {
@@ -906,16 +917,37 @@ async function regenerateScripts(productionId) {
   if (!productionId) return
   rerunning.value = true
   try {
-    await api.runProduction(productionId, { resume_from: 'script' })
+    await api.regenerateProductionScripts(productionId)
     await refreshCurrent()
     await loadProductions()
-    notify('正在再出 3 个脚本')
+    notify('Gemini 正在重新生成 3 个脚本')
   } catch (error) {
     notify(error.message)
     await refreshCurrent()
   } finally {
     rerunning.value = false
   }
+}
+
+async function approveScripts(productionId) {
+  if (!productionId) return
+  rerunning.value = true
+  try {
+    await api.approveProductionScripts(productionId)
+    await refreshCurrent()
+    await loadProductions()
+    notify('脚本已确认，开始生成 3 条候选视频')
+  } catch (error) {
+    notify(error.message)
+    await refreshCurrent()
+  } finally {
+    rerunning.value = false
+  }
+}
+
+function requestScriptRevision() {
+  composerInput.value?.focus()
+  notify('请在输入框说明需要修改的卖点、台词或镜头')
 }
 
 async function regenerateVideo(productionId) {
@@ -931,23 +963,6 @@ async function regenerateVideo(productionId) {
     await refreshCurrent()
   } finally {
     rerunning.value = false
-  }
-}
-
-async function bindUnboundProduction(productionId) {
-  try {
-    let conversation = currentConversation.value
-    if (!conversation?.id) {
-      await createConversationTask()
-      conversation = currentConversation.value
-    }
-    if (!conversation?.id) return
-    await api.patchProduction(productionId, { conversation_id: conversation.id })
-    await refreshCurrent()
-    await loadProductions()
-    notify('已将成片归入当前对话')
-  } catch (error) {
-    notify(error.message)
   }
 }
 
@@ -1050,7 +1065,6 @@ onBeforeUnmount(() => {
       :collapsed="sidebarCollapsed"
       :width="sidebarWidth"
       :production-badges="productionBadges"
-      :unbound-productions="unboundProductions"
       :settings-active="workspaceMode === 'settings'"
       :query="conversationQuery"
       :has-more="hasMoreConversations"
@@ -1064,7 +1078,6 @@ onBeforeUnmount(() => {
       @resize-start="startSidebarResize"
       @resize-keydown="handleSidebarResizeKey"
       @resize-reset="resetSidebarWidth"
-      @bind-unbound="bindUnboundProduction"
       @open-settings="openSettings"
       @logout="$emit('logout')"
     />
@@ -1090,7 +1103,7 @@ onBeforeUnmount(() => {
               @blur="saveTitle"
               @keydown.enter.target.blur
             />
-            <h1 v-else>先看再拆</h1>
+            <h1 v-else>视频裂变</h1>
           </template>
           <template v-else>
             <h1>系统设置</h1>
@@ -1121,9 +1134,10 @@ onBeforeUnmount(() => {
         @answer-clarification="answerClarification"
         @copy="copyReply"
         @cancel-production="cancelProduction"
-        @rerun-selected="rerunSelected"
         @rerun-brief="rerunBrief"
         @select-video="selectVideo"
+        @approve-scripts="approveScripts"
+        @request-script-revision="requestScriptRevision"
         @regenerate-scripts="regenerateScripts"
         @regenerate-video="regenerateVideo"
         @use-prompt="usePrompt"
@@ -1135,7 +1149,7 @@ onBeforeUnmount(() => {
             ref="videoInput"
             type="file"
             hidden
-            :accept="VIDEO_ACCEPT"
+            :accept="COMPOSER_MEDIA_ACCEPT"
             data-testid="composer-video-upload"
             :disabled="uploading || isArchived"
             @change="uploadComposerVideo"
@@ -1161,18 +1175,32 @@ onBeforeUnmount(() => {
               </button>
             </span>
           </div>
+          <div v-if="referenceImages.length" class="composer-reference-images" data-testid="composer-reference-images">
+            <figure v-for="file in referenceImages" :key="file.id">
+              <img :src="file.previewUrl || file.url" :alt="file.name" />
+              <figcaption>{{ file.name }}</figcaption>
+              <button
+                type="button"
+                class="icon-button compact"
+                :aria-label="`移除 ${file.name}`"
+                @click="removeAttachment(file.id)"
+              >
+                <X :size="12" />
+              </button>
+            </figure>
+          </div>
           <div class="composer-row">
             <div class="composer-tools">
               <button
                 type="button"
                 class="composer-plus"
-                title="上传参考视频"
-                aria-label="上传参考视频"
+                title="上传参考视频或参考图"
+                aria-label="上传参考视频或参考图"
                 :disabled="uploading || isArchived"
                 @click="videoInput?.click()"
               >
                 <Plus :size="19" />
-                <span>上传参考视频</span>
+                <span>视频 / 参考图</span>
               </button>
               <span v-if="uploading" class="uploading-label">上传中…</span>
             </div>
@@ -1190,6 +1218,8 @@ onBeforeUnmount(() => {
                   ? '追问当前执行，或补充新的限制…'
                   : awaitingVideoChoice
                   ? '三个候选视频已生成，请先选择一个视频'
+                  : awaitingScriptApproval
+                  ? '确认脚本，或说明需要修改的卖点、台词和镜头'
                   : '描述你想拆解、策划或完成的视频任务…'
               "
               @keydown="insertLineBreak"
@@ -1229,7 +1259,7 @@ onBeforeUnmount(() => {
                 :title="currentConversation?.status === 'running' ? '追问' : '发送'"
                 @click="send"
               >
-                <ArrowUp :size="17" />
+                <ArrowUp :size="15" />
               </button>
             </div>
           </div>
@@ -1243,6 +1273,13 @@ onBeforeUnmount(() => {
           data-testid="composer-hint-awaiting-video"
         >
           请先在上方候选视频中选择一条，选定后会继续最终替换与合成。
+        </p>
+        <p
+          v-else-if="awaitingScriptApproval"
+          class="composer-hint"
+          data-testid="composer-hint-awaiting-script"
+        >
+          脚本已生成，确认后才会调用 Seedance 生成视频。
         </p>
         <p v-else class="composer-hint">
           <span>ENTER 发送 · SHIFT + ENTER 换行</span>

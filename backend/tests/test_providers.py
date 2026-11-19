@@ -33,6 +33,28 @@ def test_seedance_payload_uses_supported_duration():
     assert "input_contents" not in payload
 
 
+def test_seedance_payload_includes_uploaded_reference_images(tmp_path: Path):
+    image = tmp_path / "product.png"
+    image.write_bytes(b"reference-image")
+
+    payload = providers.build_seedance_submit_payload(
+        "seedance-2-0-fast",
+        "keep the product appearance",
+        5000,
+        1080,
+        1920,
+        reference_images=[image],
+    )
+
+    assert payload["input_contents"] == [
+        {
+            "type": "image_url",
+            "role": "reference_image",
+            "image_url": {"url": "data:image/png;base64,cmVmZXJlbmNlLWltYWdl"},
+        }
+    ]
+
+
 def test_seedance_submission_adapts_long_shot_before_remote_call(monkeypatch, tmp_path: Path):
     submitted: list[dict | None] = []
 

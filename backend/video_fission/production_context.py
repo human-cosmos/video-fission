@@ -47,6 +47,7 @@ def write_creative_context(
         "production_id": production.get("id"),
         "brief": production.get("brief") or "",
         "source_video": source,
+        "reference_images": list(production.get("reference_images") or []),
         "summary": decomposition.get("summary") or decomposition.get("description") or "",
         "opening": opening,
         "duration_ms": int(source.get("duration_ms") or 0),

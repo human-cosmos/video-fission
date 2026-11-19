@@ -1,4 +1,5 @@
 <script setup>
+import { ChevronRight } from '@lucide/vue'
 import { computed } from 'vue'
 import { ROLE_LABELS, formatTimecode } from '../utils/format'
 import {
@@ -53,7 +54,15 @@ function speechOf(segment) {
 
 <template>
   <section v-if="visible" class="video-card studio-card" data-testid="video-observe-card">
-    <h3>片段观察</h3>
+    <details class="studio-disclosure" data-testid="video-observe-disclosure">
+      <summary class="studio-disclosure-summary">
+        <span>
+          <strong>片段观察</strong>
+          <small>{{ rows.length }} 段视听事实</small>
+        </span>
+        <ChevronRight :size="15" />
+      </summary>
+      <div class="studio-disclosure-body">
     <article
       v-for="segment in rows"
       :key="segment.id"
@@ -101,5 +110,7 @@ function speechOf(segment) {
         </div>
       </template>
     </article>
+      </div>
+    </details>
   </section>
 </template>

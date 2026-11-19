@@ -23,6 +23,8 @@ test("generates three candidate videos, then finalizes the selected video", asyn
   await expect(page.getByTestId("user-message-video")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-progress-card")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-plan-card")).toBeVisible({ timeout: 180_000 })
+  await expect(page.getByTestId("video-script-approval")).toBeVisible({ timeout: 180_000 })
+  await page.getByTestId("video-script-approve").click()
   await expect(page.getByTestId("video-progress-awaiting-video")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-script-choose")).toHaveCount(0)
   await expect(page.getByTestId("video-candidate-grid")).toBeVisible()

@@ -1,4 +1,5 @@
 <script setup>
+import { ChevronRight } from '@lucide/vue'
 import { computed } from 'vue'
 import {
   ROLE_LABELS,
@@ -30,7 +31,15 @@ const sourceUrl = computed(() => sourceVideoUrl(props.payload))
 
 <template>
   <section class="video-card studio-card" data-testid="video-understanding-card">
-    <h3>视频理解</h3>
+    <details class="studio-disclosure" data-testid="video-understanding-disclosure">
+      <summary class="studio-disclosure-summary">
+        <span>
+          <strong>视频理解</strong>
+          <small>{{ segments.length ? `${segments.length} 个片段` : '整片摘要与镜头判断' }}</small>
+        </span>
+        <ChevronRight :size="15" />
+      </summary>
+      <div class="studio-disclosure-body">
     <p class="summary-text">{{ summary }}</p>
     <p v-if="description" class="describe-text" data-testid="video-understanding-describe">
       {{ description }}
@@ -64,5 +73,7 @@ const sourceUrl = computed(() => sourceVideoUrl(props.payload))
         </p>
       </li>
     </ol>
+      </div>
+    </details>
   </section>
 </template>

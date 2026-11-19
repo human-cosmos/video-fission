@@ -116,6 +116,7 @@ class ProductionService:
         replace_policy: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         source_item_id: str | None = None,
+        reference_images: list[dict[str, Any]] | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         brief = (brief or "").strip()
@@ -160,6 +161,7 @@ class ProductionService:
                 "output": None,
                 "replace_policy": normalize_replace_policy(replace_policy),
                 "replace_plan": None,
+                "reference_images": list(reference_images or []),
                 "video_upload_id": upload["id"],
                 "conversation_id": bound_conversation,
                 "source_item_id": (source_item_id or "").strip() or None,
@@ -324,12 +326,149 @@ class ProductionService:
             self.sync_conversation_cards(production_id)
         return self.public(production_id, user_id=user_id)
 
+    def attach_conversation_reference_images(
+        self,
+        production_id: str,
+        conversation_id: str | None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        conversation = str(conversation_id or "").strip()
+        if not conversation:
+            return list(production.get("reference_images") or [])
+        items = self.db.list_items(conversation)
+        files: list[dict[str, Any]] = []
+        for item in reversed(items):
+            if item.get("item_type") != "userMessage" or not isinstance(item.get("payload"), dict):
+                continue
+            candidate_files = item["payload"].get("files") or []
+            if any(
+                isinstance(file, dict)
+                and (
+                    file.get("kind") == "reference_image"
+                    or str(file.get("content_type") or "").startswith("image/")
+                )
+                for file in candidate_files
+            ):
+                files = candidate_files
+                break
+        allowed_root = user_upload_root(self.settings.uploads_dir, user_id).resolve()
+        production_root = user_upload_root(
+            self.settings.uploads_dir,
+            user_id,
+            production=True,
+        ).resolve()
+        images: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            content_type = str(item.get("content_type") or "")
+            name = str(item.get("name") or "")
+            kind = str(item.get("kind") or "")
+            if kind != "reference_image" and not content_type.startswith("image/"):
+                continue
+            path = Path(str(item.get("path") or "")).expanduser().resolve()
+            if (
+                not path.is_file()
+                or not any(root == path or root in path.parents for root in (allowed_root, production_root))
+                or str(path) in seen
+            ):
+                continue
+            seen.add(str(path))
+            images.append(
+                {
+                    "id": str(item.get("id") or path.stem),
+                    "kind": "reference_image",
+                    "name": name or path.name,
+                    "path": str(path),
+                    "size": int(item.get("size") or path.stat().st_size),
+                    "content_type": content_type or "image/jpeg",
+                    "url": str(item.get("url") or (f"/api/uploads/{path.stem}" if path.stem else "")),
+                }
+            )
+            if len(images) >= 3:
+                break
+        if images:
+            self.db.update_production(production_id, {"reference_images": images})
+            self.sync_conversation_cards(production_id)
+        return images or list(production.get("reference_images") or [])
+
+    def generate_scripts_with_gemini(
+        self,
+        production_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        from .creative_generation import generate_creative_bundle
+
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production.get("status") == "running":
+            raise ProductionConflict("任务正在运行")
+        if not production.get("reference_images") and production.get("conversation_id"):
+            self.attach_conversation_reference_images(
+                production_id,
+                production.get("conversation_id"),
+                user_id=user_id,
+            )
+            production = self.db.get_production(production_id, user_id) or production
+        bundle = generate_creative_bundle(self.store, production, user_id=user_id)
+        host = getattr(self, "tool_host", None)
+        if host is None:
+            raise ValueError("创作工具尚未就绪")
+        context = {
+            "production_id": production_id,
+            "conversation_id": production.get("conversation_id"),
+        }
+        host.lock_timeline_opening({"production_id": production_id}, context)
+        host.write_intent_and_scripts(
+            {
+                "production_id": production_id,
+                "intent": bundle["intent"],
+                "skeleton": bundle["skeleton"],
+                "script_candidates": bundle["script_candidates"],
+            },
+            context,
+        )
+        self.engine._emit(
+            production_id,
+            "awaiting_script_approval",
+            {
+                "message": "创意脚本已由 Gemini 生成，等待用户确认后再生视频",
+                "model": bundle.get("model") or "",
+            },
+        )
+        return self.public(production_id, user_id=user_id)
+
+    def approve_scripts(
+        self,
+        production_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production.get("status") != "awaiting_script_approval":
+            raise ProductionConflict("当前任务不在脚本确认阶段")
+        if len(production.get("script_candidates") or []) != 3:
+            raise ValueError("还没有 3 个可确认的脚本候选")
+        return self.run(
+            production_id,
+            resume_from="generate",
+            user_approved=True,
+            user_id=user_id,
+        )
+
     def run(
         self,
         production_id: str,
         wait: bool = False,
         replace_policy: dict[str, Any] | None = None,
         resume_from: str | None = None,
+        user_approved: bool = False,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         production = self.db.get_production(production_id, user_id)
@@ -348,6 +487,12 @@ class ProductionService:
         brief = production.get("brief") or ""
         segments = (production.get("decomposition") or {}).get("segments") or []
         resume = self._resolve_resume_from(production, resume_from, segments)
+        if (
+            resume == "generate"
+            and production.get("status") == "awaiting_script_approval"
+            and not user_approved
+        ):
+            raise ValueError("创意脚本尚未确认，不能开始生成视频")
         if policy["mode"] == "selected" and not (policy["segment_ids"] or policy["roles"] or policy["time_ranges"]):
             raise ValueError("没有命中任何片段")
         if segments:
@@ -445,7 +590,13 @@ class ProductionService:
             },
         )
         self.sync_conversation_cards(production_id)
-        return self.run(production_id, wait=wait, resume_from="generate", user_id=user_id)
+        return self.run(
+            production_id,
+            wait=wait,
+            resume_from="generate",
+            user_approved=True,
+            user_id=user_id,
+        )
 
     def select_video(
         self,
@@ -886,6 +1037,7 @@ class ProductionService:
                 "time_ranges": [],
             },
             "replace_plan": production.get("replace_plan"),
+            "reference_images": production.get("reference_images") or [],
             "conversation_id": production.get("conversation_id"),
             "landing_page": production.get("landing_page"),
             "script_candidates": production.get("script_candidates") or [],

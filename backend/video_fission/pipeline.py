@@ -191,9 +191,15 @@ class PipelineEngine:
         generate_shots = [shot for shot in script.get("shots") or [] if shot.get("action") == "generate"]
         if generate_shots and not vg.get("base_url"):
             raise ValueError(f"视频生成 Provider {provider} 未配置 base_url")
+        reference_images = [
+            Path(str(item.get("path") or ""))
+            for item in production.get("reference_images") or []
+            if isinstance(item, dict) and item.get("path")
+        ]
+        reference_images = [path for path in reference_images if path.is_file()][:3]
         logger.info(
             "pipeline.generate_config provider=%s model=%s target=%sx%s "
-            "fps=%.3f shots=%s generated=%s",
+            "fps=%.3f shots=%s generated=%s reference_images=%s",
             provider,
             vg.get("model") or "-",
             width,
@@ -201,6 +207,7 @@ class PipelineEngine:
             fps,
             len(script.get("shots") or []),
             len(generate_shots),
+            len(reference_images),
         )
         from .jobs import JobRunner, revision
 
@@ -286,6 +293,7 @@ class PipelineEngine:
                             external_task_id=job.get("external_task_id"),
                             on_submitted=lambda task_id: self.db.update_production_job(
                                 job["id"], {"external_task_id": task_id}),
+                            reference_images=reference_images,
                         )
                         self._raise_if_cancelled(cancel)
                         if not dest.is_file() or dest.stat().st_size <= 0:

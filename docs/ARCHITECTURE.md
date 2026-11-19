@@ -19,20 +19,24 @@
   → prepare_video_production
     → ingest / understand / landing / search references
     → 返回 creative_context，状态 awaiting_creative_context
-  → 基于真实拆解和检索结果生成 intent / skeleton / 3 个 script_candidates
-  → run_video_production（resume_from=script）
+  → Gemini 可用时直接生成 intent / skeleton / 3 个 script_candidates
+  → awaiting_script_approval（展示真实意图、卖点、痛点与脚本，等待用户确认）
+  → 用户确认后 run_video_production（resume_from=generate, user_approved=true）
     → ProductionService
       → ProductionAgent（确定性执行器，无子进程）
         1. DeterministicPlanner 按状态和 resume_from 生成步骤
         2. 记录 plan 并调用 ToolRegistry
-        3. 写入 3 个脚本候选，并分别生成、分离音频、合成三条候选视频
-        4. 暂停在 awaiting_video_choice
-        5. 用户选定一条视频后，从 finalize 继续最终合成 / 烧字幕
+        3. 写入 3 个脚本候选后暂停，不调用视频模型
+        4. 用户确认脚本后分别生成、分离音频、合成三条候选视频
+        5. 暂停在 awaiting_video_choice
+        6. 用户选定一条视频后，从 finalize 继续最终合成 / 烧字幕
 ```
 
 `DeterministicPlanner` 不调用模型，只根据当前 production 状态、`resume_from` 和已保存的创意内容生成固定步骤。测试仍可注入 `FakeCodexRuntime` 验证异常计划分支，但生产默认路径不会实例化 `CodexAppServer`。
 
-当前对话 Codex 通过服务端 `read_skill` 工具读取 `skills/production-orchestration/SKILL.md`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`。该工具绕过受限工作区和终端，只允许读取已注册 Skill 目录内的文件。`prepare_video_production` 返回的 `creative_context` 必须包含拆解 segments、opening 和实际检索到的 reference paths，脚本生成不得早于该阶段。
+创意意图与脚本优先使用 `gemini_gateway`。`prepare_video_production` 会把当前消息里的参考图附加到 production，并尝试由 Gemini 直接生成完整创意内容；Gemini 不可用时才回落到当前对话模型。当前对话 Codex 通过服务端 `read_skill` 工具读取编排与脚本 Skill。`creative_context` 必须包含拆解 segments、opening、参考图和实际检索到的 reference paths。
+
+脚本写入后状态必须是 `awaiting_script_approval`。即使用户上传了视频和完整说明，也不得自动越过此暂停点调用 Seedance。
 
 ## 出片 Tool
 
@@ -45,10 +49,10 @@
 | `extract_landing_points` | 抽取落地页卖点（无 URL 不阻断） |
 | `search_video_references` | 检索 `video-references` |
 | `lock_timeline_opening` | 锁定共享时间轴，并将 `[0, opening_end)` 合并为单个连续 `shot_opening` |
-| `write_intent_and_scripts` | 写入意图、骨架和恰好 3 个脚本候选，随后继续生成候选视频 |
+| `write_intent_and_scripts` | 写入意图、骨架和恰好 3 个脚本候选，随后暂停在 `awaiting_script_approval` |
 | `get_production_state` | 读取状态、所选脚本和产物路径 |
 | `update_production_progress` | 更新进度或状态 |
-| `generate_candidate_videos` | 依次生成并合成 3 条候选视频，写入 `candidate_videos`，最后停在 `awaiting_video_choice` |
+| `generate_candidate_videos` | 仅在用户确认脚本后依次生成并合成 3 条候选视频，最后停在 `awaiting_video_choice` |
 | `generate_video_shots` | 仅在已选定脚本后生成；通道只允许 `seedance` / `openai_compatible` / `generic_http`。存在 generate 镜头但缺少 `base_url` 或 API Key 时明确失败，不使用本地关键帧伪生成 |
 | `separate_audio` | 分离参考人声/BGM；结果记录 `applied_to_output` |
 | `compose_timeline` | FFmpeg 拼接时间线，并把可用参考 BGM 以低音量混入最终音轨。内部写入 `production_jobs`；成功后只保存合成产物，不得把任务标为 completed |
@@ -70,7 +74,7 @@
 `ProductionService.cancel` 在现有取消事件之外，把该生产任务未完成作业标为 `cancelled`；轮询看到取消后停止且不得下载。启动恢复由 `container.configure` 调用 `ProductionService.recover_orphaned_runs`：继续轮询可恢复的远端任务，再从中断步骤续跑确定性计划，而不是从 ingest 重来；不得把带可续取 `external_task_id` 的作业标为失败。
 
 启动恢复还会识别旧版 `awaiting_script_choice` 且已有 3 个脚本候选的任务，将它们直接转入
-`generate`，由 `generate_candidate_videos` 生成全部 3 条候选视频，避免旧任务永久停在已废弃的脚本选择点。
+`generate`。新流程中的 `awaiting_script_approval` 是用户确认门禁，不会被启动恢复自动跳过。
 
 唯一可以把生产任务标为 `completed` 的入口是计划结束后的 `ProductionAgent._finalize`。必须同时满足：本计划必做步骤全部成功（`prepare_only` 与 `awaiting_video_choice` 暂停除外）；若计划含 `burn_subtitles`，最终成片路径必须是烧录后文件；成片存在且非空；该生产任务没有未完成或失败的相关作业。合成已有但计划中的烧字幕未跑或失败时，保持 `running` 或标 `failed`，不得 completed。
 
@@ -80,6 +84,8 @@
 
 - 开场 `[0, opening_end)` 是一个连续的 `shot_opening` 块，不得再切出 3000ms 钩子
 - 脚本阶段恰好 3 个候选；三条候选视频全部成功后才进入 `awaiting_video_choice`
+- 脚本写入后必须暂停在 `awaiting_script_approval`，用户未明确确认时不得调用 Seedance
+- 用户上传参考图时，`reference_images` 必须随 Seedance 提交为 `reference_image` 输入
 - `generate_video_shots` 要求已有 `selected_script_id`，不得把未选定的 `production.script.shots` 当作已选
 - 生成镜头只走远端视频模型通道
 - 无 Key、Tool 失败、占位或没有真实视频模型调用时，不得出现「已还原」「已按参考对齐」「已还原参考」这类表述

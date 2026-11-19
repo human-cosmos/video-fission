@@ -103,13 +103,15 @@ def test_write_intent_requires_exactly_three_candidates_and_continues(app_env):
             script_candidates=stub_candidates(),
         )
     )
-    assert written["status"] == "running"
-    assert written["paused"] is False
+    assert written["status"] == "awaiting_script_approval"
+    assert written["paused"] is True
     production = app_env.db.get_production(pid)
-    assert production["status"] == "running"
+    assert production["status"] == "awaiting_script_approval"
     assert production.get("selected_script_id") is None
     assert len(production["script_candidates"]) == 3
     assert production.get("candidate_videos") == []
+    with pytest.raises(ValueError, match="尚未确认"):
+        app_env.productions.run(pid, resume_from="generate")
 
 
 def test_candidate_generation_fails_honestly_without_key(app_env):
@@ -127,6 +129,94 @@ def test_candidate_generation_fails_honestly_without_key(app_env):
     output_blob = str(production.get("output") or "") + str(production.get("error") or "")
     for phrase in FORBIDDEN_CLAIMS:
         assert phrase not in output_blob
+
+
+def test_reference_image_upload_is_attached_to_production(app_env):
+    conversation = app_env.hub.create_conversation({"title": "参考图测试"})
+    image = app_env.productions.settings.uploads_dir / "product-reference.png"
+    image.write_bytes(b"image")
+    app_env.db.add_item(
+        conversation["id"],
+        {
+            "item_type": "userMessage",
+            "role": "user",
+            "status": "completed",
+            "payload": {
+                "text": "按参考图保持商品外观",
+                "files": [
+                    {
+                        "kind": "reference_image",
+                        "id": image.stem,
+                        "name": image.name,
+                        "path": str(image),
+                        "content_type": "image/png",
+                        "size": image.stat().st_size,
+                    }
+                ],
+            },
+        },
+    )
+    production = create_production(app_env.productions)
+    images = app_env.productions.attach_conversation_reference_images(
+        production["id"],
+        conversation["id"],
+    )
+    current = app_env.productions.public(production["id"])
+
+    assert len(images) == 1
+    assert current["reference_images"][0]["path"] == str(image.resolve())
+    assert current["reference_images"][0]["content_type"] == "image/png"
+
+
+def test_prepare_prefers_gemini_scripts_and_pauses_for_approval(app_env, monkeypatch):
+    from tests.helpers import upload_fixture
+
+    def fake_bundle(_store, production, user_id=None):
+        return {
+            "intent": {
+                "goal": "让用户理解产品",
+                "true_intent": "用真实使用场景证明省时",
+                "audience": "通勤人群",
+                "selling_points": ["快速", "便携"],
+                "pain_points": ["早上时间紧"],
+                "promise": "一分钟完成",
+                "evidence": ["完整动作演示"],
+                "assumptions": [],
+            },
+            "skeleton": {
+                "one_liner": "从匆忙到从容",
+                "hook": "早晨手忙脚乱",
+                "value": "快速完成",
+                "cta": "现在试试",
+            },
+            "script_candidates": stub_candidates(),
+            "provider": "gemini_gateway",
+            "model": "gemini-test",
+        }
+
+    monkeypatch.setattr(
+        "video_fission.creative_generation.generate_creative_bundle",
+        fake_bundle,
+    )
+    upload = upload_fixture(app_env.productions)
+    result = app_env.tools.execute(
+        "prepare_video_production",
+        {
+            "brief": "做一个通勤场景的便携产品短视频",
+            "video_upload_id": upload["id"],
+        },
+        {},
+    )
+    payload = _payload(result)
+    production = payload["production"]
+
+    assert production["status"] == "awaiting_script_approval"
+    assert production["intent"]["true_intent"] == "用真实使用场景证明省时"
+    assert production["intent"]["selling_points"] == ["快速", "便携"]
+    assert production["intent"]["pain_points"] == ["早上时间紧"]
+    assert len(production["script_candidates"]) == 3
+    assert payload["creative_context"]["reference_images"] == []
+    assert "等待用户明确同意" in payload["next_action"]
 
 
 def test_get_state_does_not_rewrite_creative_context(app_env, monkeypatch):
@@ -272,7 +362,7 @@ def test_followup_stays_on_same_production_and_does_not_restart_ingest(app_env):
     assert "ingest" not in (clarified.get("resume_from") or "")
     production = app_env.db.get_production(pid)
     assert production["id"] == pid
-    assert production["status"] == "running"
+    assert production["status"] == "awaiting_script_approval"
     selected = _payload(_execute(app_env, "handle_production_followup", pid, text="选方案 1"))
     assert selected["production_id"] == pid
     assert selected["action"] == "resume"
@@ -280,7 +370,7 @@ def test_followup_stays_on_same_production_and_does_not_restart_ingest(app_env):
     assert selected.get("paused") is not True
     production = app_env.db.get_production(pid)
     assert production["selected_script_id"] is None
-    assert production["status"] == "running"
+    assert production["status"] == "awaiting_script_approval"
 
 
 def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):

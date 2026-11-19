@@ -148,7 +148,10 @@ POST https://api.giikin.com/acore/model/v1/task/generate/video
 }
 ```
 
-本项目向 Seedance 提交视频生成任务时只发送文本提示词，不发送 `input_contents`，也不会通过 `video_generator.media_public_base_url` 或 GCloud 上传参考视频。参考视频只用于本地拆解、片段复用和脚本生成；人声、音乐和环境音由视频模型直接生成。
+本项目默认发送文本提示词。用户在对话中上传参考图后，`production.reference_images` 会以
+`type=image_url`、`role=reference_image` 写入 `input_contents`，图片使用 data URL 传入，避免依赖
+外网可访问的本地地址。参考视频仍只用于本地拆解、片段复用和脚本生成；人声、音乐和环境音由视频
+模型直接生成。
 
 ### 图生视频请求示例
 

@@ -53,7 +53,7 @@ test("composer requires a brief after a reference video is attached", async ({ p
   await expect(page.getByTestId("send-message")).toBeEnabled()
 })
 
-test("runs a production inside a conversation, then regenerates a selected segment", async ({
+test("confirms scripts before generating candidates and keeps detail cards collapsed", async ({
   page,
   request,
 }) => {
@@ -85,6 +85,17 @@ test("runs a production inside a conversation, then regenerates a selected segme
   await expect(page.getByTestId("video-production-step-decompose")).toContainText("拆解")
   await expect(page.getByTestId("video-understanding-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-plan-card")).toBeVisible({ timeout: 180_000 })
+  await expect(page.getByTestId("video-script-approval")).toBeVisible({ timeout: 180_000 })
+  expect(
+    await page.getByTestId("video-understanding-disclosure").evaluate((element) => element.open),
+  ).toBe(false)
+  expect(
+    await page.getByTestId("video-plan-disclosure").evaluate((element) => element.open),
+  ).toBe(false)
+  expect(
+    await page.getByTestId("video-segments-disclosure").evaluate((element) => element.open),
+  ).toBe(false)
+  await page.getByTestId("video-script-approve").click()
   const chooseVideo = page.getByTestId("video-candidate-select").first()
   const segmentsCard = page.getByTestId("video-segments-card")
   await expect(chooseVideo).toBeVisible({ timeout: 180_000 })
@@ -110,15 +121,7 @@ test("runs a production inside a conversation, then regenerates a selected segme
   const detail = await request.get(`/api/productions/${productionId}`)
   expect(detail.ok()).toBeTruthy()
   const production = await detail.json()
-  const valueSegment = (production.decomposition?.segments || []).find((segment) => segment.role === "value")
-  expect(valueSegment?.id).toBeTruthy()
-
-  const checkbox = page.getByTestId(`video-segment-regen-${valueSegment.id}`)
-  await checkbox.check()
-  await expect(page.getByTestId("video-rerun-selected")).toBeEnabled()
-  await page.getByTestId("video-rerun-selected").click()
-  await expect(page.getByTestId("video-progress-card")).toContainText("进行中", { timeout: 15_000 })
-  await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
-  await expect(page.getByTestId(`video-segment-action-${valueSegment.id}`)).toHaveText("新生成")
+  await expect(page.locator('[data-testid^="video-segment-regen-"]')).toHaveCount(0)
+  await expect(page.getByTestId("video-rerun-selected")).toHaveCount(0)
   await expect(page.getByTestId("mode-studio")).toHaveCount(0)
 })

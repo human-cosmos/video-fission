@@ -180,6 +180,7 @@ def generate_remote_video(
     cancel: Event | None = None,
     on_submitted: Callable[[str], None] | None = None,
     external_task_id: str | None = None,
+    reference_images: list[Path] | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +217,8 @@ def generate_remote_video(
             resolution=resolution,
             cancel=cancel,
             on_submitted=on_submitted,
+            external_task_id=external_task_id,
+            reference_images=reference_images,
         )
     payload = {
         "model": model,
@@ -310,6 +313,7 @@ def build_seedance_submit_payload(
     height: int,
     source: str = "",
     resolution: str = "720p",
+    reference_images: list[Path] | None = None,
 ) -> dict[str, Any]:
     requested_duration, submitted_duration = seedance_duration_seconds(duration_ms)
     payload = {
@@ -327,6 +331,23 @@ def build_seedance_submit_payload(
             "return_last_frame": False,
         },
     }
+    image_contents = []
+    for path in (reference_images or [])[:3]:
+        if not path.is_file():
+            continue
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        if not mime.startswith("image/"):
+            continue
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_contents.append(
+            {
+                "type": "image_url",
+                "role": "reference_image",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            }
+        )
+    if image_contents:
+        payload["input_contents"] = image_contents
     if submitted_duration != requested_duration:
         logger.warning(
             "video.seedance_duration_adjusted model=%s requested_s=%s submitted_s=%s "
@@ -365,6 +386,7 @@ def generate_seedance_video(
     cancel: Event | None = None,
     on_submitted: Callable[[str], None] | None = None,
     external_task_id: str | None = None,
+    reference_images: list[Path] | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel)
     if external_task_id:
@@ -381,6 +403,7 @@ def generate_seedance_video(
         height,
         source=source,
         resolution=resolution,
+        reference_images=reference_images,
     )
     requested_duration = max(1, int(math.ceil(max(duration_ms, 1) / 1000)))
     submitted_duration = int(payload["duration"])

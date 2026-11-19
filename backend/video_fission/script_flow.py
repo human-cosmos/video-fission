@@ -47,8 +47,10 @@ _SCRIPT_REWRITE_RE = re.compile(
     r"换脚本|再出脚本|重新写脚本|再给.{0,6}脚本|改卖点|改文案|不要这[几个份套]|重做脚本|换一[批组套]脚本"
 )
 _GENERATE_RE = re.compile(
-    r"再生成(?:视频|一遍|一版)?|改画面|重新出片|按这个再生成|再出片|重跑生成|画面再来|重新生成(?!脚本)"
+    r"再生成(?:视频|一遍|一版)?|开始生成(?:视频|候选视频)?|确认(?:脚本|生成)|按这个生成"
+    r"|改画面|重新出片|按这个再生成|再出片|重跑生成|画面再来|重新生成(?!脚本)"
 )
+_APPROVE_SCRIPT_RE = re.compile(r"脚本(?:没问题|可以|确认)|确认(?:脚本|生成)|开始生成|继续生成")
 
 
 def lock_script_to_timeline(
@@ -156,7 +158,7 @@ def parse_script_selection(text: str, candidates: list[dict[str, Any]] | None = 
 
 
 def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
-    """Return ('select_video', id) or ('resume', stage). Scripts no longer pause for selection."""
+    """Return ('select_video', id) or ('resume', stage)."""
     status = str(production.get("status") or "")
     selected = str(production.get("selected_script_id") or "").strip()
     candidates = production.get("script_candidates") or []
@@ -164,6 +166,12 @@ def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
     rewrite = bool(_SCRIPT_REWRITE_RE.search(text or ""))
     generate = bool(_GENERATE_RE.search(text or ""))
     new_landing = bool(extract_urls(text or "")) or ("卖点" in (text or ""))
+    if status == "awaiting_script_approval":
+        if rewrite or new_landing:
+            return "resume", "script"
+        if generate or _APPROVE_SCRIPT_RE.search(text or ""):
+            return "resume", "generate"
+        return "resume", "script"
     if choice and status == "awaiting_video_choice" and not rewrite:
         return "select_video", choice
     if choice and not rewrite:

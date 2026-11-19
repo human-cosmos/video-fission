@@ -15,6 +15,7 @@ const status = computed(() => props.payload?.status || '')
 const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
 const awaitingCreativeContext = computed(() => status.value === 'awaiting_creative_context')
+const awaitingScript = computed(() => status.value === 'awaiting_script_approval')
 const awaitingVideo = computed(() => status.value === 'awaiting_video_choice')
 const latestActivityStage = computed(() => {
   const items = props.payload?.activity || []
@@ -92,6 +93,7 @@ const allStagesDone = computed(
 const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
+  if (awaitingScript.value) return '创意脚本已生成，等待确认'
   if (awaitingVideo.value) return '3 个候选视频已生成，等待选择'
   if (agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value
@@ -144,6 +146,16 @@ const warnings = computed(() => {
   if (!value) return []
   return Array.isArray(value) ? value : [value]
 })
+const intentStage = computed(() =>
+  stages.value.find(
+    (stage) => stage.id === 'intent' && stage.state !== 'pending' && stage.outputs?.length,
+  ),
+)
+const intentRows = computed(() =>
+  (intentStage.value?.outputs || []).filter((item) =>
+    ['真实意图', '产品卖点', '用户痛点', '核心承诺'].includes(item.label),
+  ),
+)
 
 function stageStatusText(state) {
   return {
@@ -202,6 +214,22 @@ function formatClock(value) {
         <span>{{ stage.label }}</span>
       </li>
     </ol>
+    <section
+      v-if="intentStage"
+      class="intent-snapshot"
+      data-testid="video-intent-snapshot"
+    >
+      <header>
+        <strong>创作判断</strong>
+        <span>{{ intentStage.state === 'done' ? '意图已确认' : '意图已提炼' }}</span>
+      </header>
+      <dl>
+        <div v-for="row in intentRows" :key="row.label">
+          <dt>{{ row.label }}</dt>
+          <dd>{{ row.value }}</dd>
+        </div>
+      </dl>
+    </section>
     <div
       v-if="isRunning && currentActivity"
       class="production-current-operation"
@@ -326,7 +354,9 @@ function formatClock(value) {
               activeStage.state === 'awaiting'
                 ? awaitingVideo
                   ? '等待选择候选视频后继续'
-                  : '后台正在自动推进'
+                  : awaitingScript
+                    ? '等待确认脚本后开始生成视频'
+                    : '后台正在自动推进'
                 : '正在处理，结果完成后显示'
             }}
           </p>

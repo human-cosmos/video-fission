@@ -24,7 +24,12 @@ const props = defineProps({
   rerunning: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['regenerate-scripts', 'regenerate-video'])
+const emit = defineEmits([
+  'regenerate-scripts',
+  'regenerate-video',
+  'approve-scripts',
+  'request-script-revision',
+])
 
 const intent = computed(() => props.payload?.intent || {})
 const skeleton = computed(() => props.payload?.skeleton || {})
@@ -45,6 +50,10 @@ const showAgentPlan = computed(() => hasAgentTrace(props.payload))
 const agentPlan = computed(() => latestAgentPlan(props.payload))
 const planSkills = computed(() => agentPlanSkills(agentPlan.value).map((name) => ({ name, label: skillLabel(name) })))
 const planTools = computed(() => agentPlanTools(agentPlan.value).map((name) => ({ name, label: toolLabel(name) })))
+const awaitingApproval = computed(() => props.payload?.status === 'awaiting_script_approval')
+const referenceImages = computed(() =>
+  Array.isArray(props.payload?.reference_images) ? props.payload.reference_images : [],
+)
 
 function shotDuration(shot) {
   const explicit = Number(shot?.duration_ms)
@@ -64,11 +73,28 @@ function regenVideo() {
   if (!canRegenVideo.value || busy.value || !productionId.value) return
   emit('regenerate-video', productionId.value)
 }
+
+function approveScripts() {
+  if (!awaitingApproval.value || busy.value || !productionId.value) return
+  emit('approve-scripts', productionId.value)
+}
+
+function requestRevision() {
+  emit('request-script-revision')
+}
 </script>
 
 <template>
   <section class="video-card studio-card" data-testid="video-plan-card">
-    <h3>任务规划</h3>
+    <details class="studio-disclosure" data-testid="video-plan-disclosure">
+      <summary class="studio-disclosure-summary">
+        <span>
+          <strong>任务规划</strong>
+          <small>{{ candidates.length ? `${candidates.length} 个脚本候选` : '创作判断与执行计划' }}</small>
+        </span>
+        <ChevronRight :size="15" />
+      </summary>
+      <div class="studio-disclosure-body">
     <details
       v-if="showAgentPlan"
       class="agent-trace agent-trace--collapsible"
@@ -121,6 +147,16 @@ function regenVideo() {
       </ul>
       <p v-if="landing.method && landingStatus !== 'ok'" class="page-muted">抽取方式：{{ landing.method }}</p>
     </section>
+    <section
+      v-if="referenceImages.length"
+      class="reference-image-strip"
+      data-testid="video-plan-reference-images"
+    >
+      <figure v-for="image in referenceImages" :key="image.id || image.path || image.name">
+        <img :src="image.url" :alt="image.name || '参考图'" />
+        <figcaption>{{ image.name || '参考图' }}</figcaption>
+      </figure>
+    </section>
     <VideoOpeningRange :payload="payload" />
     <ol v-if="shots.length" class="opening-shot-list" data-testid="video-plan-shots">
       <li
@@ -138,7 +174,15 @@ function regenVideo() {
     <div v-if="candidates.length" class="script-candidates" data-testid="video-script-candidates">
       <header class="script-candidates-head">
         <strong>创意脚本</strong>
-        <span>{{ payload.status === 'awaiting_video_choice' ? '3 条候选视频已生成' : '3 个创意将分别生成视频' }}</span>
+        <span>
+          {{
+            payload.status === 'awaiting_script_approval'
+              ? '等待确认后生成视频'
+              : payload.status === 'awaiting_video_choice'
+                ? '3 条候选视频已生成'
+                : '3 个创意将分别生成视频'
+          }}
+        </span>
       </header>
       <ol class="script-candidate-list">
         <li
@@ -185,10 +229,24 @@ function regenVideo() {
         </button>
       </div>
     </div>
-    <dl v-if="intent.goal || intent.audience || intent.promise" class="intent-grid">
+    <dl
+      v-if="
+        intent.goal ||
+        intent.true_intent ||
+        intent.audience ||
+        intent.promise ||
+        intent.selling_points?.length ||
+        intent.pain_points?.length
+      "
+      class="intent-grid"
+    >
       <div v-if="intent.goal">
         <dt>目标</dt>
         <dd>{{ cleanDisplayText(intent.goal) || '—' }}</dd>
+      </div>
+      <div v-if="intent.true_intent">
+        <dt>真实意图</dt>
+        <dd>{{ cleanDisplayText(intent.true_intent) || '—' }}</dd>
       </div>
       <div v-if="intent.audience">
         <dt>受众</dt>
@@ -197,6 +255,14 @@ function regenVideo() {
       <div v-if="intent.promise">
         <dt>承诺</dt>
         <dd>{{ cleanDisplayText(intent.promise) || '—' }}</dd>
+      </div>
+      <div v-if="intent.selling_points?.length">
+        <dt>产品卖点</dt>
+        <dd>{{ intent.selling_points.join('；') }}</dd>
+      </div>
+      <div v-if="intent.pain_points?.length">
+        <dt>用户痛点</dt>
+        <dd>{{ intent.pain_points.join('；') }}</dd>
       </div>
     </dl>
     <ul v-if="references.length" class="reference-list">
@@ -228,5 +294,35 @@ function regenVideo() {
     <p v-if="replacePlan" class="page-muted" data-testid="video-replace-plan">
       本轮新生成：{{ resolved.join('、') || '无' }}
     </p>
+      </div>
+    </details>
+    <section
+      v-if="awaitingApproval"
+      class="script-approval"
+      data-testid="video-script-approval"
+    >
+      <div class="script-approval-copy">
+        <span class="script-approval-kicker">脚本待确认</span>
+        <strong>先检查方向和表达，再开始生成视频</strong>
+        <p>
+          {{ candidates.map((candidate) => candidate.title || candidate.id).join(' · ') }}
+          已准备好。确认后会调用 Seedance 生成 3 条候选视频。
+        </p>
+      </div>
+      <div class="script-approval-actions">
+        <button class="button subtle" type="button" data-testid="video-script-revise" @click="requestRevision">
+          继续修改
+        </button>
+        <button
+          class="button primary"
+          type="button"
+          data-testid="video-script-approve"
+          :disabled="busy"
+          @click="approveScripts"
+        >
+          {{ busy ? '处理中…' : '确认脚本并生成视频' }}
+        </button>
+      </div>
+    </section>
   </section>
 </template>

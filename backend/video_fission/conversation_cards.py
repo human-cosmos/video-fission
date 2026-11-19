@@ -98,6 +98,13 @@ def _stage_state(public: dict[str, Any], stage_id: str) -> str:
         if index == intent_index:
             return "awaiting"
         return "pending"
+    if status == "awaiting_script_approval":
+        script_index = _stage_index("script")
+        if index < script_index:
+            return "done"
+        if index == script_index:
+            return "awaiting"
+        return "pending"
     if status in {"failed", "cancelled"}:
         if current_index < 0:
             return "pending"
@@ -233,8 +240,12 @@ def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[di
         rows.extend(
             [
                 _output_row("目标", intent.get("goal")),
+                _output_row("真实意图", intent.get("true_intent")),
                 _output_row("受众", intent.get("audience")),
                 _output_row("核心承诺", intent.get("promise")),
+                _output_row("产品卖点", "；".join(intent.get("selling_points") or [])),
+                _output_row("用户痛点", "；".join(intent.get("pain_points") or [])),
+                _output_row("证据", "；".join(intent.get("evidence") or [])),
                 _output_row("一句话骨架", skeleton.get("one_liner")),
                 _output_row(
                     "Hook / Value / CTA",
@@ -402,6 +413,8 @@ def _activity_item(
             text = f"执行失败：{message}" if message else "执行失败"
     elif kind == "awaiting_video_choice":
         text = message or "等待选择候选视频"
+    elif kind == "awaiting_script_approval":
+        text = message or "创意脚本已生成，等待确认"
     elif kind == "completed":
         text = "全部步骤完成，成片已生成"
     else:
@@ -477,6 +490,7 @@ def progress_payload(
         "cancellable": status == "running",
         "stages": stages,
         "activity": activity[-120:],
+        "intent": public.get("intent"),
         "agent_trace": public.get("agent_trace") or [],
     }
 
@@ -544,6 +558,7 @@ def plan_payload(public: dict[str, Any]) -> dict[str, Any] | None:
         "script_candidates": public.get("script_candidates") or [],
         "selected_script_id": public.get("selected_script_id"),
         "agent_trace": public.get("agent_trace") or [],
+        "reference_images": public.get("reference_images") or [],
     }
     if duration_ms > 0:
         payload["duration_ms"] = duration_ms

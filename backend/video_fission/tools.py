@@ -416,6 +416,25 @@ def build_registry(
             conversation_id=conversation_id,
             **kwargs,
         )
+        if conversation_id:
+            productions.attach_conversation_reference_images(
+                result["id"],
+                conversation_id,
+                user_id=user_id,
+            )
+            result = productions.public(result["id"], user_id=user_id)
+        generation_error = ""
+        if result.get("status") == "awaiting_creative_context":
+            try:
+                result = productions.generate_scripts_with_gemini(result["id"], user_id=user_id)
+            except Exception as exc:  # Gemini is preferred, not a hard dependency.
+                generation_error = str(exc)
+                warnings = list(result.get("warnings") or [])
+                warning = f"Gemini 创意生成不可用，继续由当前对话模型生成：{generation_error}"
+                if warning not in warnings:
+                    warnings.append(warning)
+                    productions.db.update_production(result["id"], {"warnings": warnings})
+                    result = productions.public(result["id"], user_id=user_id)
         intent = result.get("intent") or {}
         from .production_context import write_creative_context
 
@@ -429,12 +448,19 @@ def build_registry(
                 "opening": (result.get("decomposition") or {}).get("opening"),
                 "references": intent.get("references") or [],
                 "warnings": result.get("warnings") or [],
+                "reference_images": result.get("reference_images") or [],
                 **context_paths,
             },
             "next_action": (
-                "读取 creative_context.context_path 或 timeline_path 获取完整片段时间轴与摘要，"
-                "生成 intent、skeleton 和恰好 3 个 script_candidates，然后调用 "
-                "run_video_production 并传 resume_from=script。不要查询数据库，也不要请求人工审批。"
+                "脚本已生成，请在对话中展示用户真实意图、卖点、痛点和 3 个候选脚本，"
+                "等待用户明确同意后再开始生成视频。不要自动调用 generate 流程。"
+                if result.get("status") == "awaiting_script_approval"
+                else (
+                    "读取 creative_context.context_path 或 timeline_path 获取完整片段时间轴与摘要，"
+                    "生成 intent、skeleton 和恰好 3 个 script_candidates，然后调用 "
+                    "run_video_production 并传 resume_from=script。写完后必须等待用户确认脚本，"
+                    "不得直接生成视频。"
+                )
             ),
         }
 
@@ -499,6 +525,7 @@ def build_registry(
         run_kwargs: dict[str, Any] = {
             "replace_policy": policy if isinstance(policy, dict) else None,
             "resume_from": str(resume_from).strip() if resume_from else None,
+            "user_approved": bool(arguments.get("user_approved")),
         }
         if user_id is not None:
             run_kwargs["user_id"] = user_id
@@ -624,6 +651,8 @@ def build_registry(
                 "Submit creative content and execute or resume an existing video production. "
                 "When the production is awaiting_creative_context, pass intent, skeleton, and exactly "
                 "three script candidates; resume_from defaults to script. "
+                "Scripts always pause at awaiting_script_approval. Only set user_approved=true when the "
+                "user explicitly asked to continue and start video generation. "
                 "Optional resume_from (ingest|decompose|intent|script|generate) and replace_policy. "
                 "Does not run the Python PipelineEngine stage loop."
             ),
@@ -632,6 +661,7 @@ def build_registry(
                 "properties": {
                     "production_id": {"type": "string", "maxLength": 80},
                     "resume_from": {"type": "string", "maxLength": 20},
+                    "user_approved": {"type": "boolean"},
                     "intent": {"type": "object"},
                     "skeleton": {"type": "object"},
                     "script_candidates": {

@@ -86,9 +86,10 @@ def cut_playback_clip(
     height: int,
     fps: float,
     keep_audio: bool,
+    timeout: int = 120,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    return media.cut_segment(source, dest, start_ms, end_ms, width, height, fps, keep_audio)
+    return media.cut_segment(source, dest, start_ms, end_ms, width, height, fps, keep_audio, timeout)
 
 
 def ensure_under_size(source: Path, dest_dir: Path, max_mb: float = 15.0) -> tuple[Path, str]:

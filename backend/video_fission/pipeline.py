@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import threading
@@ -15,6 +16,7 @@ from .paths import production_artifact_dir
 from .references import ReferenceLibrary
 from .replace import apply_replace_plan, resolve_replace_plan, strip_rewrite_instructions
 from .settings_store import SettingsStore
+from .script_agent import ScriptAgentError
 from .understand.opening import opening_block_generate
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ class PipelineEngine:
         self.db = db
         self.store = store
         self.library = ReferenceLibrary(settings.project_root)
+        self.script_agent = None
 
     def artifact_dir(self, production_id: str) -> Path:
         production = self.db.get_production(production_id)
@@ -207,6 +210,7 @@ class PipelineEngine:
             warnings,
             emit=lambda kind, payload: self._emit(production_id, kind, payload),
             cancel=cancel,
+            allow_local_fallback=self.settings.allow_local_copy_fallback,
         )
         logger.info(
             "pipeline.decompose_completed provider=%s model=%s segments=%s summary_chars=%s warnings=%s",
@@ -290,17 +294,33 @@ class PipelineEngine:
             path = self.settings.project_root / item["path"]
             if not path.is_file():
                 raise ValueError(f"参考文件不存在: {item['path']}")
-        intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
-        public, secrets = self._settings_for_production(production_id)
-        mm = public["multimodal"]
-        if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
+        if self.script_agent is not None:
             try:
-                intent, skeleton = self._llm_intent(production, refs, mm, secrets["multimodal"], intent, skeleton)
+                production_for_agent = {
+                    **production,
+                    "_artifact_dir": str(self.artifact_dir(production_id)),
+                }
+                data = self.script_agent.generate_intent(
+                    production_for_agent,
+                    refs,
+                    cancel=cancel,
+                )
+                intent, skeleton = self._validate_agent_intent(data)
             except Exception as exc:
-                message = f"意图模型失败，已用本地规划器：{exc.__class__.__name__}"
-                warnings.append(message)
-                logger.warning("pipeline.intent_llm_failed fallback=local", exc_info=True)
-                self._emit(production_id, "warning", {"stage": "intent", "message": message})
+                if cancel.is_set():
+                    raise PipelineCancelled("任务已取消") from exc
+                if self.settings.allow_local_copy_fallback:
+                    warnings.append(f"测试兼容模式：脚本 Agent 失败，回退本地规划器：{exc.__class__.__name__}")
+                    intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
+                    logger.warning("pipeline.intent_agent_failed test_fallback=local", exc_info=True)
+                else:
+                    logger.exception("pipeline.intent_agent_failed")
+                    raise ScriptAgentError(f"Agent 意图生成失败：{str(exc)[:500]}") from exc
+        elif self.settings.allow_local_copy_fallback:
+            warnings.append("测试兼容模式：intent 使用本地文案规划器")
+            intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
+        else:
+            raise ScriptAgentError("intent 必须由 Codex Agent 使用项目 Skills 生成")
         # Strip excerpts before persisting references (contract only has path/why)
         intent["references"] = [{"path": item["path"], "why": item["why"]} for item in refs]
         logger.info(
@@ -312,54 +332,32 @@ class PipelineEngine:
         )
         self.db.update_production(production_id, {"intent": intent, "skeleton": skeleton, "warnings": warnings})
 
-    def _llm_intent(self, production, refs, mm, api_key, fallback_intent, fallback_skeleton):
-        excerpts = []
-        for item in refs:
-            excerpts.append(
-                {
-                    "path": item["path"],
-                    "skeleton": (item.get("excerpt") or {}).get("skeleton"),
-                    "notes": (item.get("excerpt") or {}).get("notes"),
-                }
-            )
-        raw = providers.chat_completions(
-            mm.get("base_url") or "",
-            api_key,
-            mm.get("model") or "",
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "按 creative-intent-script-skeleton 产出严格 JSON："
-                        '{"intent":{"goal","audience","promise","assumptions":[]},'
-                        '"skeleton":{"one_liner","hook","value","cta"}}。'
-                        f"创作说明：{production['brief']}\n"
-                        f"{self._landing_prompt(production)}\n"
-                        f"拆解：{production.get('decomposition')}\n参考：{excerpts}"
-                    ),
-                }
-            ],
-            int(mm.get("timeout_seconds") or 120),
-        )
-        data = providers.extract_json(raw)
+    @staticmethod
+    def _validate_agent_intent(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         intent = data.get("intent") or {}
         skeleton = data.get("skeleton") or {}
-        merged_intent = {
-            "goal": str(intent.get("goal") or fallback_intent["goal"]),
-            "audience": str(intent.get("audience") or fallback_intent["audience"]),
-            "promise": str(intent.get("promise") or fallback_intent["promise"]),
-            "assumptions": intent.get("assumptions") or fallback_intent["assumptions"],
-            "references": fallback_intent.get("references") or [],
+        required_intent = {
+            "goal": str(intent.get("goal") or "").strip(),
+            "audience": str(intent.get("audience") or "").strip(),
+            "promise": str(intent.get("promise") or "").strip(),
         }
-        merged_skeleton = {
-            "one_liner": str(skeleton.get("one_liner") or fallback_skeleton["one_liner"]),
-            "hook": str(skeleton.get("hook") or fallback_skeleton["hook"]),
-            "value": str(skeleton.get("value") or fallback_skeleton["value"]),
-            "cta": str(skeleton.get("cta") or fallback_skeleton["cta"]),
+        missing = [key for key, value in required_intent.items() if not value]
+        assumptions = [str(item).strip() for item in (intent.get("assumptions") or []) if str(item).strip()]
+        if not assumptions:
+            missing.append("assumptions")
+        required_skeleton = {
+            key: str(skeleton.get(key) or "").strip()
+            for key in ("one_liner", "hook", "value", "cta")
         }
+        missing.extend(
+            [f"skeleton.{key}" for key, value in required_skeleton.items() if not value]
+        )
+        if missing:
+            raise ScriptAgentError(f"Agent 意图字段不完整：{', '.join(missing)}")
+        merged_intent = {**required_intent, "assumptions": assumptions}
+        merged_skeleton = required_skeleton
         logger.info(
-            "llm.intent_completed model=%s goal_chars=%s promise_chars=%s assumptions=%s",
-            mm.get("model") or "-",
+            "agent.intent_completed goal_chars=%s promise_chars=%s assumptions=%s",
             len(merged_intent["goal"]),
             len(merged_intent["promise"]),
             len(merged_intent["assumptions"]),
@@ -397,21 +395,40 @@ class PipelineEngine:
             sum(len(text) for text in full_texts),
         )
         timeline = local_script(production)
-        candidates = build_local_candidates(production, timeline)
-        public, secrets = self._settings_for_production(production_id)
-        mm = public["multimodal"]
-        if mm.get("provider") == "openai_compatible" and secrets.get("multimodal") and mm.get("base_url"):
+        if self.script_agent is not None:
             try:
-                candidates = self._llm_script_candidates(
-                    production, full_texts, mm, secrets["multimodal"], timeline, candidates
+                production_for_agent = {
+                    **production,
+                    "_artifact_dir": str(self.artifact_dir(production_id)),
+                }
+                data = self.script_agent.generate_script_candidates(
+                    production_for_agent,
+                    timeline,
+                    [item.get("path") or "" for item in refs],
+                    cancel=cancel,
                 )
+                candidates = self._normalize_agent_candidates(data, timeline)
             except Exception as exc:
-                message = f"分镜模型失败，已用本地规划器：{exc.__class__.__name__}"
-                warnings.append(message)
-                logger.warning("pipeline.script_llm_failed fallback=local", exc_info=True)
-                self._emit(production_id, "warning", {"stage": "script", "message": message})
+                if cancel.is_set():
+                    raise PipelineCancelled("任务已取消") from exc
+                if self.settings.allow_local_copy_fallback:
+                    warnings.append(f"测试兼容模式：脚本 Agent 失败，回退本地规划器：{exc.__class__.__name__}")
+                    candidates = build_local_candidates(production, timeline)
+                    logger.warning("pipeline.script_agent_failed test_fallback=local", exc_info=True)
+                else:
+                    logger.exception("pipeline.script_agent_failed")
+                    raise ScriptAgentError(f"Agent 分镜生成失败：{str(exc)[:500]}") from exc
+        elif self.settings.allow_local_copy_fallback:
+            warnings.append("测试兼容模式：script 使用本地文案规划器")
+            candidates = build_local_candidates(production, timeline)
+        else:
+            raise ScriptAgentError("script 必须由 Codex Agent 使用项目 Skills 生成")
         for item in candidates:
-            locked = lock_script_to_timeline(item.get("script") or timeline, timeline)
+            locked = lock_script_to_timeline(
+                item.get("script") or timeline,
+                timeline,
+                strict=not self.settings.allow_local_copy_fallback,
+            )
             item["script"] = apply_replace_plan(locked, production)
         display = (candidates[0]["script"] if candidates else timeline)
         logger.info(
@@ -433,67 +450,97 @@ class PipelineEngine:
             },
         )
 
-    def _llm_script_candidates(self, production, full_texts, mm, api_key, timeline, fallback_candidates):
-        from .script_flow import CANDIDATE_SPECS, lock_script_to_timeline
+    def _normalize_agent_candidates(
+        self,
+        data: dict[str, Any],
+        timeline: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        from .script_flow import CANDIDATE_SPECS
 
-        raw = providers.chat_completions(
-            mm.get("base_url") or "",
-            api_key,
-            mm.get("model") or "",
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "请给出恰好 3 个创意脚本候选，返回严格 JSON："
-                        '{"candidates":[{"id","title","angle","script":{...}}]}。'
-                        "id 使用 script_a/script_b/script_c。"
-                        "每个 script 字段为 total_duration_ms, shots[], audio_plan。"
-                        "shots 需含 id,role,duration_ms,action,source_segment_id,"
-                        "visual,voiceover,on_screen_text,prompt。"
-                        "三个候选必须共用同一条参考时间轴和开头连续块，"
-                        "只允许角度、口播、画面描述和花字不同。"
-                        "action 只能是 reuse 或 generate。reuse 必须带 source_segment_id。"
-                        f"创作说明：{production['brief']}\n"
-                        f"{self._landing_prompt(production)}\n"
-                        f"骨架：{production.get('skeleton')}\n"
-                        f"拆解：{production.get('decomposition')}\n参考全文节选：{full_texts[:3]}"
-                    ),
-                }
-            ],
-            int(mm.get("timeout_seconds") or 120),
-        )
-        data = providers.extract_json(raw)
         incoming = data.get("candidates") or data.get("scripts") or []
-        if not incoming and (data.get("shots") or data.get("script")):
-            incoming = [data.get("script") or data]
+        if not isinstance(incoming, list) or len(incoming) < len(CANDIDATE_SPECS):
+            raise ScriptAgentError(f"Agent 必须返回 {len(CANDIDATE_SPECS)} 个候选")
         merged = []
         for index, spec in enumerate(CANDIDATE_SPECS):
-            source = incoming[index] if index < len(incoming) else {}
-            script_data = source.get("script") if isinstance(source, dict) and "script" in source else source
-            fallback = fallback_candidates[index]["script"] if index < len(fallback_candidates) else timeline
-            normalized = normalize_script(script_data or {}, production, fallback)
-            locked = lock_script_to_timeline(normalized, timeline)
+            source = incoming[index]
+            if not isinstance(source, dict):
+                raise ScriptAgentError(f"第 {index + 1} 个候选不是对象")
             merged.append(
                 {
                     "id": spec["id"],
-                    "title": str(source.get("title") or spec["title"]),
-                    "angle": str(source.get("angle") or spec["angle"]),
-                    "script": locked,
+                    "title": self._required_agent_text(source.get("title"), f"candidates[{index}].title"),
+                    "angle": self._required_agent_text(source.get("angle"), f"candidates[{index}].angle"),
+                    "script": self._agent_candidate_script(
+                        source.get("script") or source,
+                        timeline,
+                        index,
+                    ),
                 }
             )
         logger.info(
-            "llm.script_candidates_completed model=%s raw_candidates=%s candidates=%s",
-            mm.get("model") or "-",
+            "agent.script_candidates_completed raw_candidates=%s candidates=%s",
             len(incoming),
             len(merged),
         )
         return merged
 
-    def _llm_script(self, production, full_texts, mm, api_key, fallback):
-        data_candidates = self._llm_script_candidates(
-            production, full_texts, mm, api_key, fallback, [{"script": fallback}] * 3
-        )
-        return data_candidates[0]["script"] if data_candidates else fallback
+    @staticmethod
+    def _required_agent_text(value: Any, field: str) -> str:
+        text = strip_duration_phrase(str(value or "")).strip()
+        if not text or _is_template_copy(text):
+            raise ScriptAgentError(f"Agent 字段缺失或仍是模板：{field}")
+        return text
+
+    def _agent_candidate_script(
+        self,
+        source: Any,
+        timeline: dict[str, Any],
+        candidate_index: int,
+    ) -> dict[str, Any]:
+        if not isinstance(source, dict):
+            raise ScriptAgentError(f"第 {candidate_index + 1} 个候选的 script 不是对象")
+        incoming = source.get("shots")
+        timeline_shots = timeline.get("shots") or []
+        if not isinstance(incoming, list) or len(incoming) < len(timeline_shots):
+            raise ScriptAgentError(
+                f"第 {candidate_index + 1} 个 Agent 候选镜头数不足：需要 {len(timeline_shots)}，"
+                f"实际 {len(incoming) if isinstance(incoming, list) else 0}"
+            )
+        by_id = {
+            str(item.get("id") or ""): item
+            for item in incoming
+            if isinstance(item, dict) and item.get("id")
+        }
+        locked = copy.deepcopy(timeline)
+        for index, shot in enumerate(locked.get("shots") or []):
+            item = by_id.get(str(shot.get("id") or "")) or incoming[index]
+            if not isinstance(item, dict):
+                raise ScriptAgentError(f"第 {candidate_index + 1} 个候选镜头 {index + 1} 无效")
+            field_base = f"candidates[{candidate_index}].shots[{index}]"
+            visual = self._required_agent_text(item.get("visual"), f"{field_base}.visual")
+            role = str(shot.get("role") or "other")
+            voiceover = strip_duration_phrase(str(item.get("voiceover") or "")).strip()
+            on_screen_text = strip_duration_phrase(str(item.get("on_screen_text") or "")).strip()
+            if role != "other":
+                if not voiceover or _is_template_copy(voiceover):
+                    raise ScriptAgentError(f"Agent 口播缺失或仍是模板：{field_base}.voiceover")
+                if not on_screen_text or on_screen_text.lower() in _GENERIC_ON_SCREEN:
+                    raise ScriptAgentError(f"Agent 花字缺失或仍是模板：{field_base}.on_screen_text")
+            prompt = str(item.get("prompt") or "").strip()
+            if shot.get("action") == "generate" and not prompt:
+                raise ScriptAgentError(f"生成镜头缺少视频 prompt：{field_base}.prompt")
+            shot["visual"] = visual
+            shot["voiceover"] = voiceover if role != "other" else ""
+            shot["on_screen_text"] = on_screen_text if role != "other" else ""
+            shot["prompt"] = prompt if shot.get("action") == "generate" else ""
+        locked["total_duration_ms"] = sum(int(shot["duration_ms"]) for shot in locked["shots"])
+        audio_plan = source.get("audio_plan")
+        locked["audio_plan"] = {
+            "voiceover_language": str((audio_plan or {}).get("voiceover_language") or "zh"),
+            "bgm": "model_generated",
+            "subtitles": False,
+        }
+        return locked
 
     def _stage_generate(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
         production = self._get(production_id)
@@ -1061,6 +1108,8 @@ def plan_segments(
     window = min(3000, max(1500, int(duration_ms * 0.15)))
     hook_target = window
     cta_target = max(duration_ms - window, window)
+    min_gap_ms = 900
+    max_mid_segments = 8
 
     def snap(target: int, low: int, high: int, invent: bool) -> int | None:
         if has_audio and silence:
@@ -1086,22 +1135,48 @@ def plan_segments(
     hook_for_cta = hook_end if hook_end is not None else 0
     cta_start = snap(cta_target, hook_for_cta + 400, max(duration_ms - 400, hook_for_cta + 400), invent=True)
     assert cta_start is not None
+    mid_start = hook_end if hook_end is not None else 400
+    mid_end = cta_start - 400
+    mid_span = max(mid_end - mid_start, 0)
+    desired_mid = min(max_mid_segments, max(0, int(round(mid_span / 9000))))
+    if mid_span >= 6500:
+        desired_mid = max(1, desired_mid)
+
+    def select_mid_cuts() -> list[int]:
+        if desired_mid <= 0 or mid_end <= mid_start:
+            return []
+        candidates = sorted(
+            {
+                int(cut)
+                for cut in cuts
+                if mid_start + 300 <= int(cut) <= mid_end - 300
+            }
+        )
+        targets = [
+            int(round(mid_start + mid_span * index / (desired_mid + 1)))
+            for index in range(1, desired_mid + 1)
+        ]
+        selected: list[int] = []
+        for target in targets:
+            pool = [item for item in candidates if item not in selected]
+            if not pool:
+                chosen = target
+            else:
+                chosen = min(pool, key=lambda item: abs(item - target))
+            if not selected or abs(chosen - selected[-1]) >= min_gap_ms:
+                selected.append(chosen)
+        return sorted(selected)
+
     if hook_end is not None:
-        mid_cuts = [cut for cut in cuts if hook_end + 400 < cut < cta_start - 400]
-        if len(cuts) < 2:
-            mid_cuts = []
-            cursor = hook_end + 4000
-            while cursor < cta_start - 800:
-                mid_cuts.append(cursor)
-                cursor += 4000
+        mid_cuts = select_mid_cuts()
         bounds = [0, hook_end, *mid_cuts, cta_start, duration_ms]
     else:
-        mid_cuts = [cut for cut in cuts if 400 < cut < cta_start - 400]
+        mid_cuts = select_mid_cuts()
         bounds = [0, *mid_cuts, cta_start, duration_ms]
     unique: list[int] = []
     for value in sorted(bounds):
         value = min(max(value, 0), duration_ms)
-        if not unique or value - unique[-1] >= 200:
+        if not unique or value - unique[-1] >= min_gap_ms:
             unique.append(value)
     if unique[-1] != duration_ms:
         if duration_ms - unique[-1] <= 100:

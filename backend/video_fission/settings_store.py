@@ -47,6 +47,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
 }
 
+INCOMPATIBLE_GEMINI_MODELS = {"gemini-3.0-flash": "gemini-3.8-flash"}
+
 PROVIDER_ENUMS = {
     "multimodal": {"local_ffmpeg", "openai_compatible", "gemini_gateway"},
     "video_generator": {"openai_compatible", "generic_http", "seedance"},
@@ -100,6 +102,9 @@ class SettingsStore:
             ):
                 if field in incoming and incoming[field] is not None and field in public[section]:
                     public[section][field] = str(incoming[field]).strip()
+            if section == "multimodal" and public[section].get("provider") == "gemini_gateway":
+                model = str(public[section].get("model") or "").strip()
+                public[section]["model"] = INCOMPATIBLE_GEMINI_MODELS.get(model, model)
             if section == "video_generator":
                 resolution = str(public[section].get("resolution") or "").strip()
                 if resolution not in {"480p", "720p"}:
@@ -344,6 +349,15 @@ class SettingsStore:
         ):
             public["multimodal"]["timeout_seconds"] = 120
             migrated = True
+        if (
+            isinstance(stored_multimodal, dict)
+            and stored_multimodal.get("provider") == "gemini_gateway"
+            and stored_multimodal.get("model") in INCOMPATIBLE_GEMINI_MODELS
+        ):
+            public["multimodal"]["model"] = INCOMPATIBLE_GEMINI_MODELS[
+                str(stored_multimodal["model"])
+            ]
+            migrated = True
         stored_video = stored.get("video_generator")
         if isinstance(stored_video, dict) and stored_video.get("provider") == "local_ffmpeg":
             public["video_generator"] = deepcopy(defaults["video_generator"])
@@ -368,7 +382,7 @@ class SettingsStore:
                     "base_url": runtime.gemini_api_url,
                     "upload_url": runtime.gemini_upload_url,
                     "token_url": runtime.gemini_token_url,
-                    "model": runtime.gemini_model or "gemini-3.0-flash",
+                    "model": runtime.gemini_model or "gemini-3.8-flash",
                     "source": runtime.gemini_source,
                     "timeout_seconds": 120,
                 }

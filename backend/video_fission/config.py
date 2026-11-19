@@ -83,6 +83,8 @@ class Settings:
     gemini_token_url: str = ""
     gemini_model: str = ""
     gemini_source: str = ""
+    allow_local_copy_fallback: bool = False
+    script_agent_timeout_seconds: int = 900
 
     def __post_init__(self) -> None:
         if self.auth_required and not self.auth_secret_key:
@@ -144,6 +146,8 @@ class Settings:
             ).strip(),
             gemini_model=os.getenv("VF_GEMINI_MODEL", "").strip(),
             gemini_source=os.getenv("VF_GEMINI_SOURCE", "").strip(),
+            allow_local_copy_fallback=_env_bool("VF_ALLOW_LOCAL_COPY_FALLBACK", False),
+            script_agent_timeout_seconds=int(os.getenv("VF_SCRIPT_AGENT_TIMEOUT_SECONDS", "900")),
         )
 
     def ensure_directories(self) -> None:

@@ -3,13 +3,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from video_fission.container import configure
 from video_fission.main import app
-from video_fission.media import audio_levels, ffmpeg_bin, probe, scene_cut_ms
+from video_fission.media import audio_levels, extract_frames, ffmpeg_bin, probe, scene_cut_ms
 from video_fission.pipeline import brief_role_phrases, local_intent, local_script, plan_segments
 from video_fission.replace import (
     is_rewrite_only_brief,
@@ -17,6 +18,7 @@ from video_fission.replace import (
     resolve_replace_plan,
     strip_rewrite_instructions,
 )
+from video_fission.understand.service import UnderstandError
 
 from tests.helpers import finish_production
 
@@ -129,6 +131,33 @@ def test_local_decompose_covers_timeline_with_hook_value_cta():
         assert right["start_ms"] == left["end_ms"]
 
 
+def test_local_decompose_consolidates_dense_scene_cuts():
+    segments = plan_segments(
+        108_333,
+        list(range(1600, 108_333, 1600)),
+        [],
+        False,
+    )
+
+    assert 7 <= len(segments) <= 12
+    assert min(item["end_ms"] - item["start_ms"] for item in segments) >= 900
+    assert segments[0]["role"] == "hook"
+    assert segments[-1]["role"] == "cta"
+
+
+def test_frame_extraction_batches_timestamps(tmp_path: Path):
+    frames = extract_frames(
+        FIXTURE,
+        [400, 2700, 5000],
+        tmp_path / "frames",
+        "sample_frame",
+        fps=30,
+    )
+
+    assert len(frames) == 3
+    assert all(path.is_file() and path.stat().st_size > 0 for path in frames)
+
+
 def test_sample_reference_detects_main_scene_cuts():
     cuts = scene_cut_ms(FIXTURE)
     assert cuts == [2700, 5400]
@@ -205,6 +234,41 @@ def test_intent_references_exist_and_full_run_writes_final(test_settings, client
     # unknown path still 404 is a conversation concern; traversal must not escape
     traversal = client.get(f"/api/productions/{production_id}/artifacts/..%2F..%2F..%2Fetc%2Fpasswd")
     assert traversal.status_code in {400, 404}
+
+
+def test_pipeline_requires_real_gemini_understanding_when_fallback_disabled(
+    test_settings,
+    client: TestClient,
+):
+    uploaded = _upload(client)
+    created = client.post(
+        "/api/productions",
+        json={
+            "title": "strict model",
+            "brief": "用香酥虾做一个真实卖点短视频",
+            "video_upload_id": uploaded["id"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    production_id = created.json()["id"]
+
+    from video_fission import container
+
+    engine = container.productions.engine
+    original = engine.settings
+    engine.settings = replace(test_settings, allow_local_copy_fallback=False)
+    try:
+        with pytest.raises(
+            UnderstandError,
+            match="视频理解必须使用真实 Gemini 模型",
+        ):
+            engine.run(production_id)
+    finally:
+        engine.settings = original
+
+    public = container.productions.get(production_id)
+    assert public["status"] == "failed"
+    assert "Gemini" in (public["error"] or "")
 
 
 def test_cancel_draft_and_running_conflict(client: TestClient):

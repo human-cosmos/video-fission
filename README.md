@@ -53,7 +53,7 @@ npm install --prefix frontend
 
 ### 视频创作
 
-在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片；配置了理解模型后还会出现整片标签、三级标签和观察卡。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。当前阶段不额外生成或烧录字幕。
+在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；本地降级只保留给自动化测试。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。当前阶段不额外生成或烧录字幕。
 
 「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
@@ -195,7 +195,9 @@ SQLite 保存以下数据：
 | `GET` | `/api/productions/{id}/events?after_id=` | SSE 进度 |
 | `GET` | `/api/productions/{id}/artifacts/{name}` | 下载产物，禁止路径穿越 |
 
-阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。`script` 产出 3 个候选后暂停，需选用后才生成；跟进可再出脚本或在已选脚本上再生成。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`GET /api/health` 在原有字段外增加 `ffmpeg` 和 `pipeline`。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。勾选优先于 brief 点名。`mode=selected` 未命中任何段时 `/run` 返回 400。
+阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。`decompose` 必须使用真实 Gemini 整片与片段理解结果。`intent` 和 `script` 由隔离的 Codex Agent 完成，Agent 必须实际加载 `video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`，不再使用本地文案模板作为生产兜底。Agent 原始最终消息写入产物目录的 `agent_intent.txt` / `agent_script.txt`。`script` 产出 3 个候选后暂停，需选用后才生成；跟进可再出脚本或在已选脚本上再生成。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。`mode=selected` 未命中任何段时 `/run` 返回 400。
+
+`VF_ALLOW_LOCAL_COPY_FALLBACK=1` 仅用于测试，不应在部署环境启用。`VF_SCRIPT_AGENT_TIMEOUT_SECONDS` 控制单次 Agent 意图或分镜生成超时，默认 900 秒。
 
 配置 `gemini_gateway` 后，整片理解与片段分析的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/` 和 `gemini_api_calls/clip_analysis/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
 

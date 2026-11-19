@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -24,6 +25,9 @@ from .normalize import extract_json
 logger = logging.getLogger(__name__)
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+_UPLOAD_CACHE_LOCK = threading.Lock()
+_UPLOAD_CACHE: dict[tuple[str, str, int, int, str, str], str] = {}
+_MODEL_CHANNEL_RE = re.compile(r"No available channel for model\s+([A-Za-z0-9._:/-]+)", re.I)
 GEMINI_VIDEO_MIN_OUTPUT_TOKENS = 30_720
 MAX_INLINE_VIDEO_BYTES = 4 * 1024 * 1024
 
@@ -50,6 +54,14 @@ def media_mime(path: Path | str) -> str:
 
 class GatewayError(RuntimeError):
     pass
+
+
+class GatewayModelUnavailableError(GatewayError):
+    """The upstream model route has no available channel."""
+
+
+class GatewayModelRoutingError(GatewayModelUnavailableError):
+    """The upstream routed to a different model than the one requested."""
 
 
 class GatewayHTTPError(GatewayError):
@@ -98,6 +110,22 @@ def _http_error_detail(status_code: int, payload: dict[str, Any]) -> str:
     if request_id:
         parts.append(f"request_id={clip_text(request_id, 120)}")
     return clip_text(": ".join(parts[:2]) + (f" ({'; '.join(parts[2:])})" if parts[2:] else ""), 1000)
+
+
+def _model_availability_error(status_code: int, detail: str, requested_model: str) -> GatewayError | None:
+    match = _MODEL_CHANNEL_RE.search(detail or "")
+    if not match:
+        return None
+    routed_model = match.group(1).strip().rstrip(".,;)")
+    requested = str(requested_model or "").strip()
+    if requested and routed_model.lower() != requested.lower():
+        return GatewayModelRoutingError(
+            f"Gemini 模型路由不一致：请求 {requested}，上游实际使用 {routed_model}。"
+            "请在系统设置中使用网关支持的模型名。"
+        )
+    return GatewayModelUnavailableError(
+        f"Gemini 模型当前无可用通道：{routed_model or requested or 'unknown'}"
+    )
 
 
 class GeminiGatewayClient:
@@ -298,6 +326,9 @@ class GeminiGatewayClient:
                     (time.perf_counter() - started) * 1000,
                     detail,
                 )
+                model_error = _model_availability_error(exc.code, detail, self.model)
+                if model_error is not None:
+                    raise model_error from exc
                 if exc.code == 401 and self.token_url and not refreshed_401:
                     refreshed_401 = True
                     logger.warning("gemini_gateway.unauthorized_refresh attempt=%s", attempt + 1)
@@ -410,6 +441,29 @@ class GeminiGatewayClient:
         token = token or self.get_access_token()
         mime = mime_type or media_mime(path)
         upload_name = object_name or path.name
+        try:
+            stat = path.stat()
+            cache_key = (
+                self.upload_url,
+                str(path.resolve()),
+                stat.st_size,
+                stat.st_mtime_ns,
+                upload_name,
+                mime,
+            )
+        except OSError:
+            cache_key = None
+        if cache_key is not None:
+            with _UPLOAD_CACHE_LOCK:
+                cached = _UPLOAD_CACHE.get(cache_key)
+            if cached:
+                logger.info(
+                    "gemini_gateway.upload_cache_hit endpoint=%s file=%s upload_name=%s",
+                    safe_url(self.upload_url),
+                    file_summary(path),
+                    upload_name,
+                )
+                return cached
         started = time.perf_counter()
         logger.info(
             "gemini_gateway.upload_started endpoint=%s file=%s upload_name=%s mime=%s",
@@ -456,6 +510,11 @@ class GeminiGatewayClient:
             safe_url(uri),
             (time.perf_counter() - started) * 1000,
         )
+        if cache_key is not None:
+            with _UPLOAD_CACHE_LOCK:
+                if len(_UPLOAD_CACHE) >= 128:
+                    _UPLOAD_CACHE.pop(next(iter(_UPLOAD_CACHE)), None)
+                _UPLOAD_CACHE[cache_key] = uri
         return uri
 
     def upload_video(self, path: Path, token: str = "") -> str:

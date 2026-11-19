@@ -51,7 +51,12 @@ _GENERATE_RE = re.compile(
 )
 
 
-def lock_script_to_timeline(script: dict[str, Any], timeline: dict[str, Any]) -> dict[str, Any]:
+def lock_script_to_timeline(
+    script: dict[str, Any],
+    timeline: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
     locked = copy.deepcopy(timeline)
     incoming_shots = list((script or {}).get("shots") or [])
     for index, shot in enumerate(locked.get("shots") or []):
@@ -60,6 +65,8 @@ def lock_script_to_timeline(script: dict[str, Any], timeline: dict[str, Any]) ->
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 shot[key] = value.strip()
+            elif strict:
+                shot[key] = ""
         # Timeline wins for timing and reuse/opening structure.
         for key in ("start_ms", "end_ms", "duration_ms", "role", "action", "source_segment_id", "id"):
             if key in (timeline.get("shots") or [])[index]:

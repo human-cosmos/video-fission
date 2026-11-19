@@ -17,7 +17,12 @@ from video_fission import media, providers
 from video_fission.logging_utils import clip_text, file_summary, safe_url
 
 from .clips import build_lens_prompt, cut_playback_clip, empty_lens_info, ensure_under_size, normalize_clip_result
-from .gateway import GEMINI_VIDEO_MIN_OUTPUT_TOKENS, GeminiGatewayClient, video_mime
+from .gateway import (
+    GEMINI_VIDEO_MIN_OUTPUT_TOKENS,
+    GatewayModelUnavailableError,
+    GeminiGatewayClient,
+    video_mime,
+)
 from .normalize import (
     build_compact_split_prompt,
     build_split_prompt,
@@ -273,6 +278,7 @@ def run_decompose(
     warnings: list[str],
     emit: Emit | None = None,
     cancel: Any = None,
+    allow_local_fallback: bool = False,
 ) -> dict[str, Any]:
     from video_fission.pipeline import plan_segments
 
@@ -285,11 +291,17 @@ def run_decompose(
     options = understand_settings(public)
     mm = public.get("multimodal") or {}
     provider = str(mm.get("provider") or "local_ffmpeg")
+    if not allow_local_fallback and provider != "gemini_gateway":
+        raise UnderstandError("视频理解必须使用真实 Gemini 模型，请将多模态 Provider 配置为 gemini_gateway")
     remote_ready = bool(
         provider in {"openai_compatible", "gemini_gateway"}
         and bool(mm.get("base_url"))
         and (bool(secrets.get("multimodal")) or (provider == "gemini_gateway" and bool(mm.get("token_url"))))
     )
+    if not allow_local_fallback and not remote_ready:
+        raise UnderstandError("Gemini 视频理解未就绪，请检查 base_url、换票地址或 API Key")
+    if not allow_local_fallback and not options["clip_analysis"]:
+        raise UnderstandError("视频片段理解必须启用 Gemini clip_analysis")
     logger.info(
         "decompose.started file=%s duration_ms=%s resolution=%sx%s fps=%.3f "
         "provider=%s model=%s remote_ready=%s options=%s",
@@ -426,6 +438,11 @@ def run_decompose(
 
             if isinstance(exc, PipelineCancelled):
                 raise
+            if isinstance(exc, GatewayModelUnavailableError):
+                raise
+            if not allow_local_fallback:
+                detail = _exception_detail(exc)
+                raise UnderstandError(f"Gemini 视频理解失败：{detail}") from exc
             detail = _exception_detail(exc)
             elapsed_ms = (time.perf_counter() - understand_started) * 1000
             message = f"整片理解失败，已保留本地切分：{detail}"
@@ -527,6 +544,8 @@ def run_decompose(
             used_provider = "local_ffmpeg"
             video_tags = empty_video_tags()
             model_opening = None
+    elif not allow_local_fallback:
+        raise UnderstandError("Gemini 未返回有效视频拆分镜头")
     else:
         segments = to_production_segments(local_lenses, duration_ms, production_id)
 
@@ -569,6 +588,7 @@ def run_decompose(
             warnings,
             _emit,
             cancel,
+            allow_local_fallback,
         )
     _emit(
         "stage_completed",
@@ -593,6 +613,7 @@ def run_decompose(
             warnings,
             _emit,
             cancel,
+            allow_local_fallback,
         )
         observed = sum(
             1 for segment in segments if not observe_is_empty(segment.get("observe"))
@@ -669,22 +690,40 @@ def _cut_and_frame(
     cancel: Any,
     check: Callable[[], None],
 ) -> None:
+    cut_failures: list[str] = []
     for segment in segments:
         check()
         seg_id = segment["id"]
         dest = artifact_dir / "clips" / f"{seg_id}.mp4"
         started = time.perf_counter()
-        try:
-            cut_playback_clip(
-                src,
-                dest,
-                int(segment["start_ms"]),
-                int(segment["end_ms"]),
-                int(info["width"]),
-                int(info["height"]),
-                float(info["fps"] or 25),
-                bool(info["has_audio"]),
-            )
+        last_error: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                cut_playback_clip(
+                    src,
+                    dest,
+                    int(segment["start_ms"]),
+                    int(segment["end_ms"]),
+                    int(info["width"]),
+                    int(info["height"]),
+                    float(info["fps"] or 25),
+                    bool(info["has_audio"]),
+                    timeout=60,
+                )
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning(
+                    "decompose.clip_cut_failed seg_id=%s attempt=%s max_attempts=2",
+                    seg_id,
+                    attempt,
+                    exc_info=True,
+                )
+                if attempt == 1:
+                    time.sleep(0.25)
+        if last_error is None:
+            segment.pop("error", None)
             segment["clip_path"] = f"clips/{seg_id}.mp4"
             segment["clip_url"] = f"/api/productions/{production_id}/artifacts/clips/{seg_id}.mp4"
             logger.info(
@@ -695,9 +734,9 @@ def _cut_and_frame(
                 file_summary(dest),
                 (time.perf_counter() - started) * 1000,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("decompose.clip_cut_failed seg_id=%s", seg_id, exc_info=True)
-            segment["error"] = f"切片失败：{exc.__class__.__name__}"
+        else:
+            cut_failures.append(seg_id)
+            segment["error"] = f"切片失败：{last_error.__class__.__name__}"
         span = max(int(segment["end_ms"]) - int(segment["start_ms"]), 1)
         stamps = [int(segment["start_ms"]) + int(span * ratio) for ratio in (0.15, 0.5, 0.82)]
         stamps = [
@@ -705,10 +744,21 @@ def _cut_and_frame(
             for ts in stamps
         ]
         try:
-            frames = media.extract_frames(src, stamps, artifact_dir, f"{seg_id}_frame")
+            frames = media.extract_frames(
+                src,
+                stamps,
+                artifact_dir,
+                f"{seg_id}_frame",
+                fps=float(info.get("fps") or 0),
+            )
             logger.info("decompose.frames_extracted seg_id=%s timestamps=%s frames=%s", seg_id, stamps, len(frames))
         except Exception:  # noqa: BLE001
             logger.warning("decompose.frame_extract_failed seg_id=%s", seg_id, exc_info=True)
+    if cut_failures:
+        raise UnderstandError(
+            "以下片段在两次切片后仍失败，不能继续生成残缺成片："
+            + ", ".join(cut_failures)
+        )
 
 
 
@@ -842,6 +892,8 @@ def _remote_split(
         except Exception as exc:  # noqa: BLE001
             if _cancel_requested(cancel):
                 _raise_if_cancelled(cancel)
+            if isinstance(exc, GatewayModelUnavailableError):
+                raise
             last_error = exc
             logger.warning(
                 "decompose.remote_split_attempt_failed attempt=%s max_attempts=%s "
@@ -1008,6 +1060,8 @@ def _call_understand(
             except Exception as exc:  # noqa: BLE001
                 if _cancel_requested(cancel):
                     _raise_if_cancelled(cancel)
+                if isinstance(exc, GatewayModelUnavailableError):
+                    raise
                 logger.warning(
                     "llm.understand_video_failed provider=%s fallback=frames error_type=%s detail=%s",
                     provider,
@@ -1097,6 +1151,7 @@ def _analyze_clips(
     warnings: list[str],
     emit: Emit,
     cancel: Any,
+    allow_local_fallback: bool = False,
 ) -> None:
     product = ""
     names = video_tags.get("product_name") or []
@@ -1177,6 +1232,12 @@ def _analyze_clips(
         "clip_analysis",
         cancel,
     )
+    if not allow_local_fallback:
+        failed = [segment["id"] for segment in segments if segment.get("error")]
+        if failed:
+            raise UnderstandError(
+                "Gemini 片段理解未全部成功：" + ", ".join(failed)
+            )
 
 
 def _observe_clips(
@@ -1189,6 +1250,7 @@ def _observe_clips(
     warnings: list[str],
     emit: Emit,
     cancel: Any,
+    allow_local_fallback: bool = False,
 ) -> None:
     def work(segment: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         started = time.perf_counter()
@@ -1265,6 +1327,12 @@ def _observe_clips(
             segment["observe"] = observe
         else:
             segment.pop("observe", None)
+    if not allow_local_fallback:
+        failed = [segment["id"] for segment in segments if segment.get("error")]
+        if failed:
+            raise UnderstandError(
+                "Gemini 片段观察未全部成功：" + ", ".join(failed)
+            )
 
 
 def _run_workers(

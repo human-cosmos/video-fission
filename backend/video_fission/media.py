@@ -390,11 +390,71 @@ def silence_points_ms(path: Path) -> list[int]:
     return result_points
 
 
-def extract_frames(path: Path, timestamps_ms: list[int], output_dir: Path, prefix: str) -> list[Path]:
+def extract_frames(
+    path: Path,
+    timestamps_ms: list[int],
+    output_dir: Path,
+    prefix: str,
+    fps: float | None = None,
+) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in output_dir.glob(f"{prefix}_*.jpg"):
+        stale.unlink(missing_ok=True)
     started = time.perf_counter()
-    logger.info("media.frame_extract_started file=%s timestamps=%s prefix=%s", path.name, timestamps_ms, prefix)
+    logger.info(
+        "media.frame_extract_started file=%s timestamps=%s prefix=%s batch=%s",
+        path.name,
+        timestamps_ms,
+        prefix,
+        bool(fps),
+    )
     frames: list[Path] = []
+    if fps and fps > 0 and timestamps_ms:
+        frame_numbers = sorted(
+            {
+                max(int(round(max(timestamp, 0) * float(fps) / 1000)), 0)
+                for timestamp in timestamps_ms
+            }
+        )
+        expression = "+".join(f"eq(n,{number})" for number in frame_numbers)
+        try:
+            run_ffmpeg(
+                [
+                    ffmpeg_bin(),
+                    "-y",
+                    "-i",
+                    str(path),
+                    "-vf",
+                    f"select='{expression}'",
+                    "-fps_mode",
+                    "vfr",
+                    "-q:v",
+                    "3",
+                    str(output_dir / f"{prefix}_%02d.jpg"),
+                ],
+                timeout=60,
+            )
+            frames = sorted(output_dir.glob(f"{prefix}_*.jpg"))
+            if len(frames) < len(frame_numbers):
+                logger.warning(
+                    "media.frame_extract_batch_incomplete prefix=%s expected=%s actual=%s fallback=sequential",
+                    prefix,
+                    len(frame_numbers),
+                    len(frames),
+                )
+                frames = []
+        except Exception:
+            logger.warning("media.frame_extract_batch_failed prefix=%s fallback=sequential", prefix, exc_info=True)
+            frames = []
+    if frames:
+        logger.info(
+            "media.frame_extract_completed file=%s requested=%s frames=%s mode=batch elapsed_ms=%.1f",
+            path.name,
+            len(timestamps_ms),
+            len(frames),
+            (time.perf_counter() - started) * 1000,
+        )
+        return frames
     for index, ts in enumerate(timestamps_ms, start=1):
         dest = output_dir / f"{prefix}_{index:02d}.jpg"
         seconds = max(ts, 0) / 1000
@@ -417,7 +477,7 @@ def extract_frames(path: Path, timestamps_ms: list[int], output_dir: Path, prefi
         if dest.is_file() and dest.stat().st_size > 0:
             frames.append(dest)
     logger.info(
-        "media.frame_extract_completed file=%s requested=%s frames=%s elapsed_ms=%.1f",
+        "media.frame_extract_completed file=%s requested=%s frames=%s mode=sequential elapsed_ms=%.1f",
         path.name,
         len(timestamps_ms),
         len(frames),
@@ -459,6 +519,7 @@ def cut_segment(
     height: int,
     fps: float,
     keep_audio: bool,
+    timeout: int = 120,
 ) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     duration = max(end_ms - start_ms, 1) / 1000
@@ -496,7 +557,7 @@ def cut_segment(
     else:
         args.extend(["-an"])
     args.append(str(dest))
-    run_ffmpeg(args, timeout=120)
+    run_ffmpeg(args, timeout=timeout)
     logger.info("media.cut_segment_completed output=%s size=%s", dest.name, dest.stat().st_size)
     return dest
 

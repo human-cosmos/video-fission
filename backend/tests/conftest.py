@@ -50,6 +50,7 @@ def test_settings(tmp_path: Path) -> Settings:
         host="127.0.0.1",
         port=8000,
         auth_required=False,
+        allow_local_copy_fallback=True,
     )
     settings.ensure_directories()
     return settings

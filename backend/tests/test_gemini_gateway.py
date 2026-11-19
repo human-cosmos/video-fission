@@ -14,7 +14,12 @@ from video_fission.db import Database
 from video_fission.settings_store import SettingsStore
 from video_fission.understand import gateway as gateway_module
 from video_fission.understand import service as understand_service
-from video_fission.understand.gateway import GatewayError, GeminiGatewayClient, video_mime
+from video_fission.understand.gateway import (
+    GatewayError,
+    GatewayModelRoutingError,
+    GeminiGatewayClient,
+    video_mime,
+)
 from video_fission.understand.normalize import coverage_ok_lenses
 
 
@@ -112,6 +117,9 @@ def test_multimodal_default_stays_local_and_accepts_gateway_settings(test_settin
     assert updated["multimodal"]["provider"] == "gemini_gateway"
     assert updated["multimodal"]["source"] == "video-fission"
 
+    migrated = store.update({"multimodal": {"model": "gemini-3.0-flash"}})
+    assert migrated["multimodal"]["model"] == "gemini-3.8-flash"
+
 
 def test_gateway_environment_seeds_and_migrates_settings(test_settings):
     database = Database(test_settings.database_path)
@@ -132,7 +140,7 @@ def test_gateway_environment_seeds_and_migrates_settings(test_settings):
         gemini_api_url="https://gateway.example/chat",
         gemini_upload_url="https://gateway.example/upload",
         gemini_token_url="https://gateway.example/token",
-        gemini_model="gemini-3.0-flash",
+        gemini_model="gemini-3.8-flash",
         gemini_source="hot-product-system",
     )
     store = SettingsStore(database, runtime)
@@ -141,7 +149,7 @@ def test_gateway_environment_seeds_and_migrates_settings(test_settings):
     persisted = database.get_app_settings()["public"]
 
     assert public["multimodal"]["provider"] == "gemini_gateway"
-    assert public["multimodal"]["model"] == "gemini-3.0-flash"
+    assert public["multimodal"]["model"] == "gemini-3.8-flash"
     assert public["multimodal"]["upload_url"] == "https://gateway.example/upload"
     assert public["multimodal"]["max_tokens"] == 12000
     assert public["multimodal"]["timeout_seconds"] == 120
@@ -156,7 +164,7 @@ def test_gateway_environment_migrates_seeded_timeout_to_120(test_settings):
         gemini_api_url="https://gateway.example/chat",
         gemini_upload_url="https://gateway.example/upload",
         gemini_token_url="https://gateway.example/token",
-        gemini_model="gemini-3.0-flash",
+        gemini_model="gemini-3.8-flash",
         gemini_source="hot-product-system",
     )
     database.upsert_app_settings(
@@ -275,6 +283,71 @@ def test_gateway_http_error_keeps_safe_upstream_diagnostics(monkeypatch):
     assert "upstream_http_error" in detail
     assert "req-upstream-123" in detail
     assert "sensitive prompt" not in detail
+
+
+def test_gateway_rejects_mismatched_model_route_without_retry(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=io.BytesIO(
+                json.dumps(
+                    {
+                        "code": 503,
+                        "message": "No available channel for model gemini-3.8-flash under group gemini-cli",
+                        "error_type": "upstream_http_error",
+                    }
+                ).encode("utf-8")
+            ),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = GeminiGatewayClient(
+        base_url="https://gateway.example/chat",
+        api_key="token",
+        model="gemini-3.0-flash",
+        max_retries=2,
+    )
+
+    with pytest.raises(GatewayModelRoutingError, match="请求 gemini-3.0-flash"):
+        client.call("ping")
+
+    assert calls["count"] == 1
+
+
+def test_gateway_reuses_upload_uri_for_unchanged_file(monkeypatch, tmp_path: Path):
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    calls = {"count": 0}
+
+    def fake_post(_url, **_kwargs):
+        calls["count"] += 1
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            status_code=200,
+            json=lambda: {
+                "code": 200,
+                "data": {"gsutil_uri": "https://storage.example/shared-source.mp4"},
+            },
+        )
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    client = GeminiGatewayClient(
+        base_url="https://gateway.example/chat",
+        upload_url="https://gateway.example/upload",
+        api_key="token",
+    )
+
+    first = client.upload_media(video, object_name="source.mp4")
+    second = client.upload_media(video, object_name="source.mp4")
+
+    assert first == second == "https://storage.example/shared-source.mp4"
+    assert calls["count"] == 1
 
 
 def test_gateway_prefers_uploaded_file_uri(monkeypatch, tmp_path: Path):

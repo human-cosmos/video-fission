@@ -7,7 +7,7 @@ const fixture = resolve(
   "../../backend/tests/fixtures/sample-reference.mp4",
 )
 
-test("pauses after three script candidates, then continues once one is chosen", async ({
+test("generates three candidate videos, then finalizes the selected video", async ({
   page,
   request,
 }) => {
@@ -23,9 +23,14 @@ test("pauses after three script candidates, then continues once one is chosen", 
   await expect(page.getByTestId("user-message-video")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-progress-card")).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId("video-plan-card")).toBeVisible({ timeout: 180_000 })
-  await expect(page.getByTestId("video-progress-awaiting-script")).toBeVisible({ timeout: 60_000 })
-  await expect(page.getByTestId("video-script-choose")).toHaveCount(3)
-  await expect(page.getByTestId("video-output-card")).toHaveCount(0)
+  await expect(page.getByTestId("video-progress-awaiting-video")).toBeVisible({ timeout: 180_000 })
+  await expect(page.getByTestId("video-script-choose")).toHaveCount(0)
+  await expect(page.getByTestId("video-candidate-grid")).toBeVisible()
+  await expect(page.getByTestId("video-candidate-script_a")).toBeVisible()
+  await expect(page.getByTestId("video-candidate-script_b")).toBeVisible()
+  await expect(page.getByTestId("video-candidate-script_c")).toBeVisible()
+  await expect(page.getByTestId("video-candidate-select")).toHaveCount(3)
+  await expect(page.getByTestId("video-output-card")).toBeVisible()
   // Segments card may already show the decompose/replace plan; it is not
   // evidence that generate has started. Gate on status, clips, and output.
 
@@ -33,21 +38,26 @@ test("pauses after three script candidates, then continues once one is chosen", 
   const paused = await request.get(`/api/productions/${productionId}`)
   expect(paused.ok()).toBeTruthy()
   const pausedBody = await paused.json()
-  expect(pausedBody.status).toBe("awaiting_script_choice")
+  expect(pausedBody.status).toBe("awaiting_video_choice")
   expect((pausedBody.script_candidates || []).map((item) => item.id)).toEqual([
     "script_a",
     "script_b",
     "script_c",
   ])
   expect(pausedBody.selected_script_id == null || pausedBody.selected_script_id === "").toBeTruthy()
+  expect((pausedBody.candidate_videos || []).map((item) => item.id)).toEqual([
+    "script_a",
+    "script_b",
+    "script_c",
+  ])
   expect(pausedBody.clips || []).toHaveLength(0)
   expect(pausedBody.output == null || !pausedBody.output?.path).toBeTruthy()
 
-  await page.getByTestId("video-script-candidate-script_b").getByTestId("video-script-choose").click()
+  await page.getByTestId("video-candidate-script_b").getByTestId("video-candidate-select").click()
   await expect(page.getByTestId("video-segments-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-player")).toBeVisible()
-  await expect(page.getByTestId("video-script-selected")).toHaveText("已选用")
+  await expect(page.getByTestId("video-candidate-script_b")).toContainText("已选用")
   await expect
     .poll(async () => {
       const current = await request.get(`/api/productions/${productionId}`)

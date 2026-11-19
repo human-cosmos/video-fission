@@ -30,6 +30,8 @@ class ProviderCancelled(ProviderError):
 SEEDANCE_SUBMIT_PATH = "/acore/model/v1/task/generate/video"
 SEEDANCE_TASK_PATH = "/acore/model/v1/task/video/{task_id}"
 SEEDANCE_MODELS_PATH = "/acore/model/v1/models"
+SEEDANCE_MIN_DURATION_SECONDS = 4
+SEEDANCE_MAX_DURATION_SECONDS = 15
 
 
 def chat_completions(
@@ -344,10 +346,11 @@ def build_seedance_submit_payload(
     resolution: str = "720p",
     input_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    requested_duration, submitted_duration = seedance_duration_seconds(duration_ms)
     payload = {
         "model": _seedance_model(model),
         "prompt": prompt,
-        "duration": max(1, int(math.ceil(max(duration_ms, 1) / 1000))),
+        "duration": submitted_duration,
         "mode": "async_poll",
         "source": source or "video-fission",
         "aspect_ratio": _seedance_aspect_ratio(width, height),
@@ -361,7 +364,27 @@ def build_seedance_submit_payload(
     }
     if input_contents:
         payload["input_contents"] = list(input_contents)
+    if submitted_duration != requested_duration:
+        logger.warning(
+            "video.seedance_duration_adjusted model=%s requested_s=%s submitted_s=%s "
+            "supported=%s-%s",
+            payload["model"],
+            requested_duration,
+            submitted_duration,
+            SEEDANCE_MIN_DURATION_SECONDS,
+            SEEDANCE_MAX_DURATION_SECONDS,
+        )
     return payload
+
+
+def seedance_duration_seconds(duration_ms: int) -> tuple[int, int]:
+    """Return the requested and Seedance-supported whole-second durations."""
+    requested = max(1, int(math.ceil(max(int(duration_ms), 1) / 1000)))
+    submitted = min(
+        max(requested, SEEDANCE_MIN_DURATION_SECONDS),
+        SEEDANCE_MAX_DURATION_SECONDS,
+    )
+    return requested, submitted
 
 
 def generate_seedance_video(
@@ -399,13 +422,18 @@ def generate_seedance_video(
         resolution=resolution,
         input_contents=input_contents,
     )
+    requested_duration = max(1, int(math.ceil(max(duration_ms, 1) / 1000)))
+    submitted_duration = int(payload["duration"])
     submit_url = _seedance_endpoint(base_url, SEEDANCE_SUBMIT_PATH)
     logger.info(
         "video.seedance_submit_started endpoint=%s model=%s duration_ms=%s "
+        "requested_duration_s=%s submitted_duration_s=%s "
         "target=%sx%s resolution=%s prompt_chars=%s inputs=%s",
         safe_url(submit_url),
         payload.get("model"),
         duration_ms,
+        requested_duration,
+        submitted_duration,
         width,
         height,
         resolution,

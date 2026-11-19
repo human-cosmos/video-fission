@@ -39,6 +39,17 @@ export function outputVideoUrl(payload) {
   return withRevision(url, payload?.updated_at || payload?.output?.updated_at)
 }
 
+export function candidateVideoUrl(payload, candidate) {
+  const id = payload?.production_id
+  const url =
+    candidate?.video_url ||
+    candidate?.output?.video_url ||
+    (id && candidate?.video_path
+      ? productionArtifactUrl(id, String(candidate.video_path).split(/[\\/]/).pop())
+      : '')
+  return withRevision(url, payload?.updated_at)
+}
+
 export function sourceVideoUrl(payload) {
   const source = payload?.source_video || payload?.reference_video || {}
   if (source.url) return source.url

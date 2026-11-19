@@ -12,7 +12,6 @@ import {
   scriptCandidatesOf,
   shouldOfferRegenerateScripts,
   shouldOfferRegenerateVideo,
-  shouldOfferScriptChoice,
   shouldShowLanding,
   sharedPlanShots,
   voiceoverSummary,
@@ -22,11 +21,10 @@ import VideoOpeningRange from './VideoOpeningRange.vue'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
-  selecting: { type: Boolean, default: false },
   rerunning: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select-script', 'regenerate-scripts', 'regenerate-video'])
+const emit = defineEmits(['regenerate-scripts', 'regenerate-video'])
 
 const intent = computed(() => props.payload?.intent || {})
 const skeleton = computed(() => props.payload?.skeleton || {})
@@ -39,10 +37,9 @@ const landing = computed(() => landingPageOf(props.payload))
 const landingVisible = computed(() => shouldShowLanding(landing.value))
 const landingStatus = computed(() => landingParseStatus(landing.value))
 const candidates = computed(() => scriptCandidatesOf(props.payload))
-const canChoose = computed(() => shouldOfferScriptChoice(props.payload))
 const canRescript = computed(() => shouldOfferRegenerateScripts(props.payload))
 const canRegenVideo = computed(() => shouldOfferRegenerateVideo(props.payload))
-const busy = computed(() => props.selecting || props.rerunning)
+const busy = computed(() => props.rerunning)
 const productionId = computed(() => props.payload?.production_id || '')
 const showAgentPlan = computed(() => hasAgentTrace(props.payload))
 const agentPlan = computed(() => latestAgentPlan(props.payload))
@@ -56,11 +53,6 @@ function shotDuration(shot) {
   const end = Number(shot?.end_ms)
   if (Number.isFinite(end) && end > start) return end - start
   return 0
-}
-
-function choose(candidate) {
-  if (!canChoose.value || busy.value || !productionId.value || !candidate?.id) return
-  emit('select-script', { productionId: productionId.value, scriptId: candidate.id })
 }
 
 function rescript() {
@@ -146,7 +138,7 @@ function regenVideo() {
     <div v-if="candidates.length" class="script-candidates" data-testid="video-script-candidates">
       <header class="script-candidates-head">
         <strong>创意脚本</strong>
-        <span>{{ canChoose ? '请选择其中一个后再生成' : '已给出 3 个角度' }}</span>
+        <span>{{ payload.status === 'awaiting_video_choice' ? '3 条候选视频已生成' : '3 个创意将分别生成视频' }}</span>
       </header>
       <ol class="script-candidate-list">
         <li
@@ -168,16 +160,6 @@ function regenVideo() {
             class="script-selected-flag"
             data-testid="video-script-selected"
           >已选用</span>
-          <button
-            v-else-if="canChoose"
-            class="button primary compact"
-            type="button"
-            data-testid="video-script-choose"
-            :disabled="busy"
-            @click="choose(candidate)"
-          >
-            选用
-          </button>
         </li>
       </ol>
       <div v-if="canRescript || canRegenVideo" class="script-followups">

@@ -36,7 +36,13 @@ def configure(runtime_settings: Settings | None = None) -> None:
     )
     settings_store = SettingsStore(db, settings)
     productions = ProductionService(settings, db, settings_store)
-    tools = build_registry(db, settings.workspace, settings.artifacts_dir, productions)
+    tools = build_registry(
+        db,
+        settings.workspace,
+        settings.artifacts_dir,
+        productions,
+        skills,
+    )
     productions.agent = ProductionAgent(
         settings,
         db,

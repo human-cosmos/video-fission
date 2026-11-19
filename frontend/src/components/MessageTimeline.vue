@@ -36,7 +36,7 @@ const emit = defineEmits([
   'cancel-production',
   'rerun-selected',
   'rerun-brief',
-  'select-script',
+  'select-video',
   'regenerate-scripts',
   'regenerate-video',
   'use-prompt',
@@ -368,9 +368,7 @@ defineExpose({ scrollToBottom })
         <template v-else-if="item.item_type === 'video_plan'">
           <VideoPlanCard
             :payload="cardPayload(item)"
-            :selecting="selecting"
             :rerunning="rerunning"
-            @select-script="$emit('select-script', $event)"
             @regenerate-scripts="$emit('regenerate-scripts', $event)"
             @regenerate-video="$emit('regenerate-video', $event)"
           />
@@ -390,7 +388,11 @@ defineExpose({ scrollToBottom })
         </template>
 
         <template v-else-if="item.item_type === 'video_output'">
-          <VideoOutputCard :payload="cardPayload(item)" />
+          <VideoOutputCard
+            :payload="cardPayload(item)"
+            :selecting="selecting"
+            @select-video="$emit('select-video', $event)"
+          />
         </template>
 
         <template

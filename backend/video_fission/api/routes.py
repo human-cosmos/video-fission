@@ -539,6 +539,11 @@ class SelectScriptBody(BaseModel):
     script_id: str = Field(min_length=1, max_length=80)
 
 
+class SelectVideoBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    video_id: str = Field(min_length=1, max_length=80)
+
+
 def _production_error(exc: Exception) -> None:
     if isinstance(exc, ProductionNotFound):
         raise HTTPException(404, str(exc)) from exc
@@ -741,6 +746,22 @@ def select_production_script(
         return container.productions.select_script(
             production_id,
             body.script_id,
+            user_id=owner_id(current_user),
+        )
+    except Exception as exc:
+        _production_error(exc)
+
+
+@router.post("/productions/{production_id}/select-video")
+def select_production_video(
+    production_id: str,
+    body: SelectVideoBody,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        return container.productions.select_video(
+            production_id,
+            body.video_id,
             user_id=owner_id(current_user),
         )
     except Exception as exc:

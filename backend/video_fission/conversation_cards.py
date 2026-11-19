@@ -91,6 +91,13 @@ def _stage_state(public: dict[str, Any], stage_id: str) -> str:
         if index == script_index:
             return "awaiting"
         return "pending"
+    if status == "awaiting_video_choice":
+        compose_index = _stage_index("compose")
+        if index < compose_index:
+            return "done"
+        if index == compose_index:
+            return "awaiting"
+        return "pending"
     if status == "awaiting_creative_context":
         intent_index = _stage_index("intent")
         if index < intent_index:
@@ -284,6 +291,7 @@ def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[di
             ]
         )
     elif stage_id == "generate":
+        candidate_videos = public.get("candidate_videos") or []
         clips = public.get("clips") or []
         script = public.get("script") if isinstance(public.get("script"), dict) else {}
         shots = script.get("shots") or []
@@ -306,6 +314,10 @@ def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[di
         )
         rows.extend(
             [
+                _output_row(
+                    "候选视频",
+                    f"{len(candidate_videos)} / 3 条已输出" if candidate_videos else "",
+                ),
                 _output_row(
                     "片段结果",
                     f"{len(clips)} / {len(shots)} 个镜头已输出" if clips else "",
@@ -397,6 +409,8 @@ def _activity_item(
             text = f"执行失败：{message}" if message else "执行失败"
     elif kind == "awaiting_script_choice":
         text = message or "等待选择创意脚本"
+    elif kind == "awaiting_video_choice":
+        text = message or "等待选择候选视频"
     elif kind == "completed":
         text = "全部步骤完成，成片已生成"
     else:
@@ -606,13 +620,16 @@ def segments_payload(public: dict[str, Any], artifact_dir: Path | None = None) -
 def output_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     output = public.get("output")
     status = public.get("status")
-    if not output and status not in {"completed", "failed"}:
+    candidate_videos = list(public.get("candidate_videos") or [])
+    if not output and not candidate_videos and status not in {"completed", "failed"}:
         return None
     return {
         "production_id": public["id"],
         "status": status,
         "error": public.get("error"),
         "output": output,
+        "candidate_videos": candidate_videos,
+        "selected_script_id": public.get("selected_script_id"),
         "video_url": (output or {}).get("video_url") if isinstance(output, dict) else "",
         "updated_at": public.get("updated_at"),
     }

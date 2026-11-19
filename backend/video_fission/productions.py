@@ -154,6 +154,7 @@ class ProductionService:
                 "intent": None,
                 "skeleton": None,
                 "script": None,
+                "candidate_videos": [],
                 "clips": [],
                 "output": None,
                 "replace_policy": normalize_replace_policy(replace_policy),
@@ -201,6 +202,7 @@ class ProductionService:
                 raise ValueError("3 个脚本候选必须有互不相同的 id")
             updates["script_candidates"] = script_candidates
             updates["selected_script_id"] = None
+            updates["candidate_videos"] = []
         if not updates:
             return self.public(production_id, user_id=user_id)
         self.db.update_production(production_id, updates)
@@ -356,7 +358,8 @@ class ProductionService:
                 opening=(production.get("decomposition") or {}).get("opening"),
             )
             updates["replace_plan"] = plan
-        updates.update({"status": "running", "current_stage": resume or "ingest", "error": None})
+        stage = "compose" if resume == "finalize" else (resume or "ingest")
+        updates.update({"status": "running", "current_stage": stage, "error": None})
         self.db.update_production(production_id, updates)
         self.sync_conversation_cards(production_id)
         cancel = threading.Event()
@@ -394,7 +397,7 @@ class ProductionService:
         resume_from: str | None,
         segments: list[dict[str, Any]],
     ) -> str | None:
-        allowed = {"ingest", "decompose", "intent", "script", "generate"}
+        allowed = {"ingest", "decompose", "intent", "script", "generate", "finalize"}
         if resume_from:
             value = str(resume_from).strip()
             if value not in allowed:
@@ -402,12 +405,13 @@ class ProductionService:
             if value in {"intent", "script", "generate"} and not segments:
                 raise ValueError(f"还没有拆解结果，无法从 {value} 恢复")
             if value == "generate":
-                selected = bool(production.get("selected_script_id"))
-                awaiting = production.get("status") == "awaiting_script_choice" or (
-                    production.get("script_candidates") and not production.get("selected_script_id")
-                )
-                if not selected and (awaiting or not (production.get("script") or {}).get("shots")):
-                    raise ValueError("还没有选定脚本，无法从 generate 恢复")
+                if len(production.get("script_candidates") or []) != 3:
+                    raise ValueError("还没有 3 个脚本候选，无法生成候选视频")
+            if value == "finalize":
+                if not production.get("selected_script_id"):
+                    raise ValueError("还没有选定视频，无法继续最终合成")
+                if not production.get("candidate_videos"):
+                    raise ValueError("还没有可用于最终合成的候选视频")
             return value
         if not segments:
             return None
@@ -441,6 +445,48 @@ class ProductionService:
         )
         self.sync_conversation_cards(production_id)
         return self.run(production_id, wait=wait, resume_from="generate", user_id=user_id)
+
+    def select_video(
+        self,
+        production_id: str,
+        video_id: str,
+        wait: bool = False,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production["status"] == "running":
+            raise ProductionConflict("任务正在运行")
+        if production.get("status") != "awaiting_video_choice":
+            raise ProductionConflict("当前任务不在视频选择阶段")
+        chosen = next(
+            (
+                item
+                for item in production.get("candidate_videos") or []
+                if str(item.get("id") or "") == str(video_id or "")
+            ),
+            None,
+        )
+        if not chosen:
+            raise ValueError("候选视频不存在")
+        script = chosen.get("script") or {}
+        clips = chosen.get("clips") or []
+        output = chosen.get("output") or {}
+        if not clips or not output.get("video_path"):
+            raise ValueError("候选视频缺少可继续合成的片段或成片")
+        self.db.update_production(
+            production_id,
+            {
+                "script": script,
+                "selected_script_id": chosen["id"],
+                "clips": clips,
+                "output": output,
+                "error": None,
+            },
+        )
+        self.sync_conversation_cards(production_id)
+        return self.run(production_id, wait=wait, resume_from="finalize", user_id=user_id)
 
     def cancel(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
         production = self.db.get_production(production_id, user_id)
@@ -772,6 +818,31 @@ class ProductionService:
                 },
                 "video_url": output.get("video_url") or f"/api/productions/{production_id}/artifacts/final.mp4",
             }
+        candidate_videos = []
+        raw_candidate_videos = list(production.get("candidate_videos") or [])
+        visible_candidate_videos = raw_candidate_videos if len(raw_candidate_videos) == 3 else []
+        for item in visible_candidate_videos:
+            if not isinstance(item, dict):
+                continue
+            candidate_output = item.get("output") if isinstance(item.get("output"), dict) else {}
+            video_name = Path(str(candidate_output.get("video_path") or item.get("video_path") or "")).name
+            candidate_videos.append(
+                {
+                    "id": item.get("id"),
+                    "script_id": item.get("script_id") or item.get("id"),
+                    "title": item.get("title") or item.get("id"),
+                    "angle": item.get("angle") or "",
+                    "status": item.get("status") or "ready",
+                    "video_url": (
+                        candidate_output.get("video_url")
+                        or item.get("video_url")
+                        or (f"/api/productions/{production_id}/artifacts/{video_name}" if video_name else "")
+                    ),
+                    "duration_ms": int(item.get("duration_ms") or 0),
+                    "width": int(item.get("width") or 0),
+                    "height": int(item.get("height") or 0),
+                }
+            )
         return {
             "id": production["id"],
             "title": production["title"],
@@ -799,6 +870,7 @@ class ProductionService:
             "landing_page": production.get("landing_page"),
             "script_candidates": production.get("script_candidates") or [],
             "selected_script_id": production.get("selected_script_id"),
+            "candidate_videos": candidate_videos,
             "agent_trace": production.get("agent_trace") or [],
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],

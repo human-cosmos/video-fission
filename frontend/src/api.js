@@ -138,10 +138,10 @@ export const api = {
     ),
   cancelProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
-  selectScript: (id, scriptId) =>
+  selectVideo: (id, videoId) =>
     request(
-      `/productions/${encodeURIComponent(id)}/select-script`,
-      json('POST', { script_id: scriptId }),
+      `/productions/${encodeURIComponent(id)}/select-video`,
+      json('POST', { video_id: videoId }),
     ),
   deleteProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}`, { method: 'DELETE' }),

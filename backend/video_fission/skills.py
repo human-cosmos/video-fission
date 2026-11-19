@@ -135,6 +135,35 @@ class SkillManager:
                 }
         raise KeyError("Skill not found")
 
+    def read_resource(
+        self,
+        slug: str,
+        relative_path: str | None = None,
+    ) -> dict[str, Any]:
+        skill = self.get(slug)
+        if not skill.get("enabled"):
+            raise SkillValidationError("Skill 已停用")
+        root = Path(skill["path"]).parent.resolve()
+        requested = str(relative_path or "SKILL.md").strip().replace("\\", "/")
+        if not requested or requested.startswith("/") or re.match(r"^[A-Za-z]:", requested):
+            raise SkillValidationError("Skill 资源路径无效")
+        target = (root / requested).resolve()
+        if target != root and root not in target.parents:
+            raise SkillValidationError("Skill 资源路径越界")
+        if not target.is_file():
+            raise FileNotFoundError(f"Skill 资源不存在：{requested}")
+        if target.stat().st_size > 1_000_000:
+            raise SkillValidationError("Skill 资源超过 1 MB")
+        return {
+            "slug": skill["slug"],
+            "name": skill["name"],
+            "description": skill["description"],
+            "path": target.relative_to(root).as_posix(),
+            "absolute_path": str(target),
+            "content": target.read_text(encoding="utf-8", errors="replace"),
+            "source": skill["source"],
+        }
+
     @staticmethod
     def render(name: str, description: str, body: str) -> str:
         name = name.strip()

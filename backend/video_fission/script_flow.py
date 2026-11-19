@@ -83,7 +83,7 @@ def build_local_candidates(production: dict[str, Any], timeline: dict[str, Any])
     landing = production.get("landing_page") or {}
     points = [str(item).strip() for item in (landing.get("selling_points") or []) if str(item).strip()]
     product = str(landing.get("product") or "").strip() or "产品"
-    promise = str(((production.get("intent") or {}).get("promise") or "")).strip()
+    promise = str((production.get("intent") or {}).get("promise") or "").strip()
     brief = str(production.get("brief") or "").strip()
     creative = strip_rewrite_instructions(brief)
     hook_point = points[0] if points else (creative[:24] or "先抓住痛点")
@@ -156,7 +156,7 @@ def parse_script_selection(text: str, candidates: list[dict[str, Any]] | None = 
 
 
 def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
-    """Return ('select', script_id) or ('resume', stage)."""
+    """Return ('select', id), ('select_video', id), or ('resume', stage)."""
     status = str(production.get("status") or "")
     selected = str(production.get("selected_script_id") or "").strip()
     candidates = production.get("script_candidates") or []
@@ -164,6 +164,8 @@ def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
     rewrite = bool(_SCRIPT_REWRITE_RE.search(text or ""))
     generate = bool(_GENERATE_RE.search(text or ""))
     new_landing = bool(extract_urls(text or "")) or ("卖点" in (text or ""))
+    if choice and status == "awaiting_video_choice" and not rewrite:
+        return "select_video", choice
     if choice and not rewrite:
         return "select", choice
     if rewrite or new_landing:
@@ -189,7 +191,8 @@ def candidate_by_id(candidates: list[dict[str, Any]], script_id: str) -> dict[st
 
 def _rewrite_shot(shot: dict[str, Any], line: str, kind: str) -> None:
     existing = str(shot.get("voiceover") or "").strip()
-    shot["voiceover"] = line if not existing else f"{line}{'' if line.endswith(('。', '！', '？', '.', '!', '?')) else '。'}"
+    ending = "" if line.endswith(("。", "！", "？", ".", "!", "?")) else "。"
+    shot["voiceover"] = line if not existing else f"{line}{ending}"
     if kind in {"hook", "cta"} or not shot.get("on_screen_text"):
         shot["on_screen_text"] = line[:24]
     visual = str(shot.get("visual") or "").strip()

@@ -45,7 +45,7 @@ const uploading = ref(false)
 const sending = ref(false)
 const productions = ref([])
 const rerunning = ref(false)
-const selectingScript = ref(false)
+const selectingVideo = ref(false)
 const cancelling = ref(false)
 const videoInput = ref(null)
 const conversationQuery = ref('')
@@ -169,9 +169,11 @@ const isArchived = computed(() => Boolean(currentConversation.value?.is_archived
 const productionVideo = computed(() => attachments.value.find((file) => isVideoFile(file)))
 const otherAttachments = computed(() => attachments.value.filter((file) => !isVideoFile(file)))
 const needsBriefHint = computed(() => Boolean(productionVideo.value) && !composer.value.trim())
-const awaitingScriptChoice = computed(() =>
+const awaitingVideoChoice = computed(() =>
   (currentConversation.value?.items || []).some(
-    (item) => item?.item_type === 'video_progress' && item?.payload?.status === 'awaiting_script_choice',
+    (item) =>
+      ['video_progress', 'video_output'].includes(item?.item_type) &&
+      item?.payload?.status === 'awaiting_video_choice',
   ),
 )
 const canSend = computed(
@@ -884,19 +886,19 @@ async function rerunBrief(productionId) {
   }
 }
 
-async function selectScript({ productionId, scriptId }) {
-  if (!productionId || !scriptId) return
-  selectingScript.value = true
+async function selectVideo({ productionId, videoId }) {
+  if (!productionId || !videoId) return
+  selectingVideo.value = true
   try {
-    await api.selectScript(productionId, scriptId)
+    await api.selectVideo(productionId, videoId)
     await refreshCurrent()
     await loadProductions()
-    notify('已选用脚本，开始生成')
+    notify('已选用视频，开始最终合成')
   } catch (error) {
     notify(error.message)
     await refreshCurrent()
   } finally {
-    selectingScript.value = false
+    selectingVideo.value = false
   }
 }
 
@@ -1113,7 +1115,7 @@ onBeforeUnmount(() => {
         ref="timeline"
         :conversation="currentConversation"
         :rerunning="rerunning"
-        :selecting="selectingScript"
+        :selecting="selectingVideo"
         :cancelling="cancelling"
         @decide-approval="decideApproval"
         @answer-clarification="answerClarification"
@@ -1121,7 +1123,7 @@ onBeforeUnmount(() => {
         @cancel-production="cancelProduction"
         @rerun-selected="rerunSelected"
         @rerun-brief="rerunBrief"
-        @select-script="selectScript"
+        @select-video="selectVideo"
         @regenerate-scripts="regenerateScripts"
         @regenerate-video="regenerateVideo"
         @use-prompt="usePrompt"
@@ -1186,8 +1188,8 @@ onBeforeUnmount(() => {
                   ? '该对话已归档，取消归档后可继续发送'
                   : currentConversation?.status === 'running'
                   ? '追问当前执行，或补充新的限制…'
-                  : awaitingScriptChoice
-                  ? '改文案或卖点可再出 3 个脚本；输入「用第 2 个」也可挑选'
+                  : awaitingVideoChoice
+                  ? '三个候选视频已生成，请先选择一个视频'
                   : '描述你想拆解、策划或完成的视频任务…'
               "
               @keydown="insertLineBreak"
@@ -1236,11 +1238,11 @@ onBeforeUnmount(() => {
           补充创作说明后再发送
         </p>
         <p
-          v-else-if="awaitingScriptChoice"
+          v-else-if="awaitingVideoChoice"
           class="composer-hint"
-          data-testid="composer-hint-awaiting-script"
+          data-testid="composer-hint-awaiting-video"
         >
-          请先在规划卡选用一个脚本。改说明再发送会再出 3 个脚本；「用第 2 个」「选这个」视为挑选。
+          请先在上方候选视频中选择一条，选定后会继续最终替换与合成。
         </p>
         <p v-else class="composer-hint">
           <span>ENTER 发送 · SHIFT + ENTER 换行</span>

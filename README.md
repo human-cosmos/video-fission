@@ -19,7 +19,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 参考视频意图、UGC 脚本生成和 13 篇吹风机/除吹雪机参考脚本共享技能链
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
-- 单 Codex 编排出片：当前对话负责生成创意意图、骨架和三份脚本，Python 后台按确定性计划执行参考理解、检索、三脚本暂停、远端模型生成和 FFmpeg 合成；不再启动额外的 Production Codex 子进程，也不走 `PipelineEngine` 固定阶段循环
+- 单 Codex 编排出片：当前对话负责生成创意意图、骨架和三份脚本，Python 后台自动生成并合成三条候选视频，用户选定一条后执行最终合成；不再启动额外的 Production Codex 子进程，也不走 `PipelineEngine` 固定阶段循环
 - decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘。生产拆解仍要求真实 Gemini；出片 Tool 在无 Key 时可以做诚实的本地切分，但必须标明这是降级结果，不能写成模型理解
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
@@ -188,14 +188,15 @@ SQLite 保存以下数据：
 | `POST` | `/api/productions` | 创建草稿（`title`、`brief`、`video_upload_id`，可选 `replace_policy`） |
 | `GET` | `/api/productions` / `/api/productions/{id}` | 列表或详情；详情含只读 `replace_plan` |
 | `PATCH` | `/api/productions/{id}` | 更新 `title` / `brief` / `replace_policy`；运行中 409 |
-| `POST` | `/api/productions/{id}/run` | 启动或恢复后台确定性执行。空 body 兼容；可选 `{ replace_policy, resume_from }`。`resume_from` 允许 `ingest\|decompose\|intent\|script\|generate`；省略时按跟进消息分类，已有拆解时默认仍从 `intent` 重跑；运行中 409 |
-| `POST` | `/api/productions/{id}/select-script` | 在 `awaiting_script_choice` 时选用脚本（body：`{ "script_id" }`），随后从 generate 继续；选定前不会开始生成 |
+| `POST` | `/api/productions/{id}/run` | 启动或恢复后台确定性执行。空 body 兼容；可选 `{ replace_policy, resume_from }`。`resume_from` 允许 `ingest\|decompose\|intent\|script\|generate\|finalize`；省略时按跟进消息分类，已有拆解时默认仍从 `intent` 重跑；运行中 409 |
+| `POST` | `/api/productions/{id}/select-video` | 在 `awaiting_video_choice` 时选定候选视频（body：`{ "video_id" }`），随后进入最终合成与字幕烧录 |
+| `POST` | `/api/productions/{id}/select-script` | 旧版脚本选择入口，仅为后端兼容保留；当前界面不使用 |
 | `POST` | `/api/productions/{id}/cancel` | 取消 |
 | `DELETE` | `/api/productions/{id}` | 删除任务和产物；仍被引用的源视频不删 |
 | `GET` | `/api/productions/{id}/events?after_id=` | SSE 进度 |
 | `GET` | `/api/productions/{id}/artifacts/{name}` | 下载产物，禁止路径穿越 |
 
-出片采用单 Codex 两阶段架构：当前对话先通过 `prepare_video_production` 获得真实拆解与参考检索结果，再加载 `production-orchestration`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation` 生成 `intent`、`skeleton` 与恰好 3 个 `script_candidates`；随后通过 `run_video_production` 提交。`ProductionAgent` 只是后台确定性执行器，按状态和 `resume_from` 调用细粒度 Tool，不进行模型规划，也不会启动新的 `CodexAppServer`。常见顺序是准备上下文、锁定开场连续块、写入脚本候选并暂停在 `awaiting_script_choice`，选定后生成、分离音频、合成和可选硬烧字幕。音频分离结果会真正混入最终音轨。意图和脚本来自当前对话，不再另启 `VideoScriptAgent`。跟进留在同一 `production_id` 上，含糊的「再改一下」会先澄清，不会从 ingest 重来。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。`mode=selected` 未命中任何段时 `/run` 返回 400。任务公开载荷和出片卡片带有 `agent_trace`，生产事件包含 `agent_plan` / `skill_loaded` / `tool_started` / `tool_completed`。
+出片采用单 Codex 两阶段架构：当前对话先通过 `prepare_video_production` 获得真实拆解与参考检索结果，再加载 `production-orchestration`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation` 生成 `intent`、`skeleton` 与恰好 3 个 `script_candidates`；随后通过 `run_video_production` 提交。`ProductionAgent` 是后台确定性执行器，按状态和 `resume_from` 调用细粒度 Tool，不进行模型规划，也不会启动新的 `CodexAppServer`。当前流程不再选择脚本：`generate_candidate_videos` 会依次生成、分离音频并合成三条候选视频，完成后停在 `awaiting_video_choice`；用户选定一条后，后台从 `finalize` 继续，以该视频的脚本和片段执行最终合成与字幕烧录。音频分离结果会真正混入最终音轨。意图和脚本来自当前对话，不再另启 `VideoScriptAgent`。跟进留在同一 `production_id` 上，含糊的「再改一下」会先澄清，不会从 ingest 重来。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。`mode=selected` 未命中任何段时 `/run` 返回 400。任务公开载荷包含 `candidate_videos`，出片卡片展示三条候选项供选择，生产事件包含 `agent_plan` / `skill_loaded` / `tool_started` / `tool_completed` / `candidate_video_completed` / `awaiting_video_choice`。
 
 `VF_ALLOW_LOCAL_COPY_FALLBACK=1` 仅用于测试，不应在部署环境启用。
 
@@ -217,7 +218,7 @@ SQLite 保存以下数据：
 | `get_video_production` | 查询创作任务状态与产物 |
 | `run_video_production` | 执行或恢复已有后台创作任务，可按需更新创意内容 |
 
-出片能力另外注册在同一 `ToolRegistry` 上，但只有后台确定性执行器能调用：`ingest_reference_video`、`understand_reference_video`、`extract_landing_points`、`search_video_references`、`lock_timeline_opening`、`write_intent_and_scripts`、`get_production_state`、`update_production_progress`、`generate_video_shots`、`separate_audio`、`compose_timeline`、`burn_subtitles`、`handle_production_followup`。当前对话 Codex 只看到粗粒度入口 `prepare_video_production`、`run_video_production` 和状态查询工具。定义分别位于 `backend/video_fission/tools.py` 与 `production_tools.py`。
+出片能力另外注册在同一 `ToolRegistry` 上，但只有后台确定性执行器能调用：`ingest_reference_video`、`understand_reference_video`、`extract_landing_points`、`search_video_references`、`lock_timeline_opening`、`write_intent_and_scripts`、`get_production_state`、`update_production_progress`、`generate_candidate_videos`、`generate_video_shots`、`separate_audio`、`compose_timeline`、`burn_subtitles`、`handle_production_followup`。当前对话 Codex 只看到粗粒度入口 `prepare_video_production`、`run_video_production` 和状态查询工具。定义分别位于 `backend/video_fission/tools.py` 与 `production_tools.py`。
 
 ## Skill
 
@@ -229,7 +230,7 @@ SQLite 保存以下数据：
 | `creative-intent-script-skeleton` | 理解创作说明和参考视频拆解，先收敛意图、概念和 Hook/Value/CTA 骨架 |
 | `universal-ugc-video-script-generation` | 在骨架确认后生成镜头级分镜、片段复用/生成计划和音视频合成要求 |
 | `video-references` | 2 个品类、13 篇 UGC 参考脚本；供上述两个创作 Skill 共享检索 |
-| `production-orchestration` | 任务级出片编排：计划顺序、三脚本暂停点，以及开场连续块、未选定不得生成、诚实失败等不变量 |
+| `production-orchestration` | 任务级出片编排：三个创意全部生成候选视频、视频选择点，以及开场连续块、最终合成门禁、诚实失败等不变量 |
 
 参考脚本和全量索引导航位于 `skills/video-references/references/`。意图阶段读取首行骨架和注意项，完整脚本阶段读取至少 3 篇目标脚本全文。
 
@@ -243,6 +244,8 @@ skills
 ```
 
 `GET /api/runtime/skills` 会启动一个临时 Codex Runtime 并返回真实发现的 Skill，而不是只读取本地文件。
+对话 Agent 通过服务端 `read_skill` 工具读取已注册 Skill 的完整 `SKILL.md` 和目录内参考文件，
+不依赖终端命令或用户工作区路径。
 
 ## 测试
 

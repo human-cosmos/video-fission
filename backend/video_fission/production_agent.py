@@ -8,8 +8,8 @@ from typing import Any, Protocol
 
 from .config import Settings
 from .db import Database
-from .logging_utils import clip_text
 from .jobs import revision
+from .logging_utils import clip_text
 from .production_tools import (
     CAPABILITY_TOOLS,
     FORBIDDEN_CLAIMS,
@@ -73,7 +73,9 @@ class DeterministicPlanner:
                 "search_video_references",
             ]
         elif resume_from == "generate":
-            tools = ["generate_video_shots", "separate_audio", "compose_timeline", "burn_subtitles"]
+            tools = ["generate_candidate_videos"]
+        elif resume_from == "finalize":
+            tools = ["compose_timeline", "burn_subtitles"]
         elif resume_from == "decompose":
             tools = [
                 "understand_reference_video",
@@ -81,6 +83,7 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
+                "generate_candidate_videos",
             ]
         elif resume_from == "intent":
             tools = [
@@ -88,11 +91,13 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
+                "generate_candidate_videos",
             ]
         elif resume_from == "script":
             tools = [
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
+                "generate_candidate_videos",
             ]
         else:
             tools = [
@@ -102,6 +107,7 @@ class DeterministicPlanner:
                 "search_video_references",
                 "lock_timeline_opening",
                 "write_intent_and_scripts",
+                "generate_candidate_videos",
             ]
         return {
             "skills": list(VIDEO_CREATIVE_SKILLS),
@@ -164,6 +170,7 @@ class ProductionAgent:
                 "intent": production.get("intent"),
                 "skeleton": production.get("skeleton"),
                 "script_candidates": production.get("script_candidates") or [],
+                "candidate_videos": production.get("candidate_videos") or [],
             },
         }
         recovered_steps: list[str] = []
@@ -174,7 +181,7 @@ class ProductionAgent:
                 if index is None:
                     if not production.get("selected_script_id"):
                         raise ProductionAgentError("中断任务缺少可恢复计划")
-                    plan = DeterministicPlanner().plan({**context, "resume_from": "generate"})
+                    plan = DeterministicPlanner().plan({**context, "resume_from": "finalize"})
                 else:
                     saved = trace[index]
                     plan = {"steps": [{"tool": name} for name in saved["steps"]], "skills": saved.get("skills")}
@@ -250,10 +257,10 @@ class ProductionAgent:
                     arguments["skeleton"] = skeleton
                 if candidates and "script_candidates" not in arguments:
                     arguments["script_candidates"] = candidates
-            if name in {"generate_video_shots", "compose_timeline", "burn_subtitles"}:
+            if name in {"compose_timeline", "burn_subtitles"}:
                 current = self.db.get_production(production_id) or {}
                 if not current.get("selected_script_id"):
-                    message = "还没有选定脚本，不能生成视频"
+                    message = "还没有选定视频，不能继续最终合成"
                     self._fail(production_id, message)
                     raise ProductionAgentError(message)
             if name not in CAPABILITY_TOOLS and name not in {tool.name for tool in self.tools.all()}:
@@ -286,8 +293,8 @@ class ProductionAgent:
                 raise ProductionAgentError(message)
             completed_steps.append(name)
             current = self.db.get_production(production_id) or {}
-            if current.get("status") == "awaiting_script_choice":
-                self._emit(production_id, "awaiting_script_choice", {"message": "请选择创意脚本"})
+            if current.get("status") == "awaiting_video_choice":
+                self._emit(production_id, "awaiting_video_choice", {"message": "请选择候选视频"})
                 return current
             if current.get("status") in {"failed", "cancelled"}:
                 return current
@@ -320,12 +327,14 @@ class ProductionAgent:
             self.db.update_production(production_id, {"status": "cancelled"})
             return
         expected = [str(step.get("tool") or step.get("name") or "") for step in steps]
+        if not any(name in expected for name in ("compose_timeline", "burn_subtitles")):
+            return
         output = current.get("output") or {}
         path = Path(output.get("video_path") or "")
         jobs = [job for job in self.db.list_production_jobs(production_id)
                 if job["input_json"].get("revision") == revision(current)]
         error = None
-        if completed_steps != expected or not any(name in expected for name in ("compose_timeline", "burn_subtitles")):
+        if completed_steps != expected:
             error = "编排计划必做步骤未全部成功，不能使用旧成片"
         elif any(job["status"] != "succeeded" for job in jobs):
             if any(job["status"] == "cancelled" for job in jobs):
@@ -347,7 +356,8 @@ class ProductionAgent:
             return
         with self.db.transaction() as connection:
             updated = connection.execute(
-                "UPDATE productions SET status='completed',current_stage='done',error=NULL WHERE id=? AND status='running'",
+                "UPDATE productions SET status='completed',current_stage='done',error=NULL "
+                "WHERE id=? AND status='running'",
                 (production_id,),
             ).rowcount
         if updated:

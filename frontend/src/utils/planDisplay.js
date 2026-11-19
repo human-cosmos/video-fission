@@ -84,11 +84,22 @@ export function shouldOfferRegenerateScripts(payload) {
   if (!scriptCandidatesOf(payload).length && !payload?.production_id) return false
   const status = payload?.status
   if (status === 'running') return false
-  return isAwaitingScriptChoice(payload) || Boolean(selectedScriptIdOf(payload)) || status === 'completed'
+  return (
+    isAwaitingScriptChoice(payload) ||
+    status === 'awaiting_video_choice' ||
+    Boolean(selectedScriptIdOf(payload)) ||
+    status === 'completed'
+  )
 }
 
 export function shouldOfferRegenerateVideo(payload) {
-  if (payload?.status === 'running' || isAwaitingScriptChoice(payload)) return false
+  if (
+    payload?.status === 'running' ||
+    isAwaitingScriptChoice(payload) ||
+    payload?.status === 'awaiting_video_choice'
+  ) {
+    return false
+  }
   return Boolean(selectedScriptIdOf(payload))
 }
 

@@ -250,13 +250,35 @@ class PipelineEngine:
                     provider_name = provider
                     if input_contents is None and not job.get("external_task_id") and provider == "seedance":
                         input_contents = self._seedance_input_contents(production_id, public, secrets, warnings)
+                    model_duration_ms = duration_ms
+                    if provider_name == "seedance":
+                        requested_s, submitted_s = providers.seedance_duration_seconds(duration_ms)
+                        model_duration_ms = submitted_s * 1000
+                        if submitted_s != requested_s:
+                            warning = (
+                                f"{shot['id']} 请求 {requested_s} 秒，Seedance 单次仅支持 "
+                                f"{providers.SEEDANCE_MIN_DURATION_SECONDS}-"
+                                f"{providers.SEEDANCE_MAX_DURATION_SECONDS} 秒，"
+                                f"已按 {submitted_s} 秒生成并补齐到 {duration_ms}ms"
+                            )
+                            if warning not in warnings:
+                                warnings.append(warning)
+                                self._emit(
+                                    production_id,
+                                    "warning",
+                                    {"stage": "generate", "step": shot["id"], "message": warning},
+                                )
                     try:
                         providers.generate_remote_video(
                             provider_name,
                             vg.get("base_url") or "",
                             secrets.get("video_generator") or "",
                             vg.get("model") or "",
-                            self._shot_generate_prompt(shot, production),
+                            self._shot_generate_prompt(
+                                shot,
+                                production,
+                                duration_ms=model_duration_ms,
+                            ),
                             duration_ms,
                             width,
                             height,
@@ -563,9 +585,19 @@ class PipelineEngine:
 
         return landing_prompt_block(production.get("landing_page"))
 
-    def _shot_generate_prompt(self, shot: dict[str, Any], production: dict[str, Any]) -> str:
+    def _shot_generate_prompt(
+        self,
+        shot: dict[str, Any],
+        production: dict[str, Any],
+        *,
+        duration_ms: int | None = None,
+    ) -> str:
         voiceover = str(shot.get("voiceover") or "").strip()
         base = str(shot.get("prompt") or shot.get("visual") or production.get("brief") or "").strip()
+        target_duration_ms = int(duration_ms or shot.get("duration_ms") or 0)
+        timeline_duration_ms = int(shot.get("duration_ms") or 0)
+        if timeline_duration_ms > 0 and target_duration_ms != timeline_duration_ms:
+            base = base.replace(f"{timeline_duration_ms}ms", f"{target_duration_ms}ms")
         parts = [
             base,
             (
@@ -575,6 +607,10 @@ class PipelineEngine:
             "画面内不得生成字幕、标题、花字、说明文字或任何后期叠加文字。",
             self._landing_prompt(production),
         ]
+        if timeline_duration_ms > 0 and target_duration_ms != timeline_duration_ms:
+            parts.append(
+                f"本次模型输出时长为 {target_duration_ms}ms，请在该时长内完整完成镜头动作与口播。"
+            )
         return "\n".join(part for part in parts if part)
 
     def _seedance_input_contents(

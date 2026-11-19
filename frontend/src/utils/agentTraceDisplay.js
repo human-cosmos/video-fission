@@ -133,6 +133,7 @@ export function nextPlannedTool(payload) {
 export function currentAgentActionText(payload) {
   const status = payload?.status
   if (status === 'awaiting_script_choice') return '等待选择创意脚本'
+  if (status === 'awaiting_video_choice') return '等待选择候选视频'
   if (status === 'failed') {
     const failed = agentTraceItems(payload).find((item) => item.state === 'failed')
     return failed ? `${failed.label}失败` : ''

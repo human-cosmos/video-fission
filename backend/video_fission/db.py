@@ -309,6 +309,7 @@ class Database:
             self._ensure_column(connection, "productions", "landing_page", "TEXT")
             self._ensure_column(connection, "productions", "script_candidates", "TEXT")
             self._ensure_column(connection, "productions", "selected_script_id", "TEXT")
+            self._ensure_column(connection, "productions", "candidate_videos", "TEXT")
             self._ensure_column(connection, "productions", "audio_separation", "TEXT")
             self._ensure_column(connection, "productions", "subtitle_style", "TEXT")
             self._ensure_column(connection, "productions", "agent_trace", "TEXT")
@@ -1428,6 +1429,7 @@ class Database:
             "landing_page",
             "script_candidates",
             "selected_script_id",
+            "candidate_videos",
             "audio_separation",
             "subtitle_style",
             "agent_trace",
@@ -1445,6 +1447,7 @@ class Database:
             "replace_plan",
             "landing_page",
             "script_candidates",
+            "candidate_videos",
             "audio_separation",
             "subtitle_style",
             "agent_trace",
@@ -1554,6 +1557,7 @@ class Database:
             "landing_page": _load(_row_get(row, "landing_page"), None),
             "script_candidates": _load(_row_get(row, "script_candidates"), []),
             "selected_script_id": _row_get(row, "selected_script_id"),
+            "candidate_videos": _load(_row_get(row, "candidate_videos"), []),
             "audio_separation": _load(_row_get(row, "audio_separation"), None),
             "subtitle_style": _load(_row_get(row, "subtitle_style"), None),
             "agent_trace": _load(_row_get(row, "agent_trace"), []),

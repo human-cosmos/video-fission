@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers import create_production, seed_clips_from_fixture, stub_candidates
 from video_fission.pipeline import PipelineEngine
 from video_fission.production_tools import (
     CAPABILITY_TOOLS,
@@ -11,6 +10,8 @@ from video_fission.production_tools import (
     ProductionToolError,
     contains_forbidden_claim,
 )
+
+from tests.helpers import create_production, seed_clips_from_fixture, stub_candidates
 
 
 def _execute(app_env, name: str, production_id: str, **arguments):
@@ -42,6 +43,7 @@ def test_each_capability_tool_is_registered(app_env):
         "write_intent_and_scripts",
         "get_production_state",
         "update_production_progress",
+        "generate_candidate_videos",
         "generate_video_shots",
         "separate_audio",
         "burn_subtitles",
@@ -83,7 +85,7 @@ def test_opening_is_locked_as_one_continuous_block(app_env):
         cursor = start + int(shot.get("duration_ms") or 0)
 
 
-def test_write_intent_requires_exactly_three_candidates_and_pauses(app_env):
+def test_write_intent_requires_exactly_three_candidates_and_continues(app_env):
     production = create_production(app_env.productions)
     pid = production["id"]
     _payload(_execute(app_env, "ingest_reference_video", pid))
@@ -101,32 +103,23 @@ def test_write_intent_requires_exactly_three_candidates_and_pauses(app_env):
             script_candidates=stub_candidates(),
         )
     )
-    assert written["status"] == "awaiting_script_choice"
-    assert written["paused"] is True
+    assert written["status"] == "running"
+    assert written["paused"] is False
     production = app_env.db.get_production(pid)
-    assert production["status"] == "awaiting_script_choice"
+    assert production["status"] == "running"
     assert production.get("selected_script_id") is None
     assert len(production["script_candidates"]) == 3
+    assert production.get("candidate_videos") == []
 
 
-def test_generate_requires_selected_script_and_fails_honestly_without_key(app_env):
+def test_candidate_generation_fails_honestly_without_key(app_env):
     production = create_production(app_env.productions)
     pid = production["id"]
     _payload(_execute(app_env, "ingest_reference_video", pid))
     _payload(_execute(app_env, "understand_reference_video", pid))
     _payload(_execute(app_env, "lock_timeline_opening", pid))
     _payload(_execute(app_env, "write_intent_and_scripts", pid, script_candidates=stub_candidates()))
-    text = _fail(app_env, "generate_video_shots", pid)
-    assert "选定" in text or "选择" in text
-    chosen = stub_candidates()[0]["id"]
-    # lock_script already stored on candidates
-    production = app_env.db.get_production(pid)
-    selected = next(item for item in production["script_candidates"] if item["id"] == chosen)
-    app_env.db.update_production(
-        pid,
-        {"script": selected["script"], "selected_script_id": chosen, "status": "running"},
-    )
-    text = _fail(app_env, "generate_video_shots", pid)
+    text = _fail(app_env, "generate_candidate_videos", pid)
     assert "Key" in text or "base_url" in text or "无法出片" in text
     for phrase in FORBIDDEN_CLAIMS:
         assert phrase not in text
@@ -134,6 +127,122 @@ def test_generate_requires_selected_script_and_fails_honestly_without_key(app_en
     output_blob = str(production.get("output") or "") + str(production.get("error") or "")
     for phrase in FORBIDDEN_CLAIMS:
         assert phrase not in output_blob
+
+
+def test_candidate_generation_outputs_three_videos_and_pauses(app_env, monkeypatch):
+    production = create_production(app_env.productions)
+    pid = production["id"]
+    _payload(_execute(app_env, "ingest_reference_video", pid))
+    _payload(_execute(app_env, "understand_reference_video", pid))
+    _payload(_execute(app_env, "lock_timeline_opening", pid))
+    _payload(_execute(app_env, "write_intent_and_scripts", pid, script_candidates=stub_candidates()))
+    host = app_env.productions.tool_host
+    artifact_dir = app_env.productions.engine.artifact_dir(pid)
+
+    monkeypatch.setattr(
+        host,
+        "separate_audio",
+        lambda *args, **kwargs: {"production_id": pid, "usable": False},
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_video_generation",
+        lambda *args, **kwargs: ({}, {}, "fixture"),
+    )
+
+    def fake_generate(arguments, context):
+        current = app_env.db.get_production(pid)
+        clips = [
+            {
+                "shot_id": shot["id"],
+                "path": str(artifact_dir / f"{current['selected_script_id']}-{shot['id']}.mp4"),
+                "provider": "fixture",
+                "duration_ms": shot.get("duration_ms") or 1000,
+            }
+            for shot in (current.get("script") or {}).get("shots") or []
+        ]
+        app_env.db.update_production(pid, {"clips": clips})
+        return {"production_id": pid, "clips": clips}
+
+    def fake_compose(arguments, context):
+        current = app_env.db.get_production(pid)
+        candidate_id = current["selected_script_id"]
+        video_path = artifact_dir / f"candidate-{candidate_id}.mp4"
+        video_path.write_bytes(b"candidate-video")
+        output = {
+            "video_path": str(video_path),
+            "composed_video_path": str(video_path),
+            "video_url": f"/api/productions/{pid}/artifacts/{video_path.name}",
+        }
+        app_env.db.update_production(pid, {"output": output})
+        return {
+            "production_id": pid,
+            "video_path": str(video_path),
+            "video_url": output["video_url"],
+            "output": output,
+        }
+
+    monkeypatch.setattr(host, "generate_video_shots", fake_generate)
+    monkeypatch.setattr(host, "compose_timeline", fake_compose)
+
+    result = host.generate_candidate_videos({"production_id": pid}, {"production_id": pid})
+
+    assert result["status"] == "awaiting_video_choice"
+    current = app_env.db.get_production(pid)
+    assert current["status"] == "awaiting_video_choice"
+    assert current["selected_script_id"] is None
+    assert not current["output"]
+    assert len(current["candidate_videos"]) == 3
+    assert [item["id"] for item in current["candidate_videos"]] == [
+        "script_1",
+        "script_2",
+        "script_3",
+    ]
+
+
+def test_select_video_adopts_candidate_and_starts_finalize(app_env, monkeypatch):
+    production = create_production(app_env.productions)
+    pid = production["id"]
+    candidates = stub_candidates()
+    artifact_dir = app_env.productions.engine.artifact_dir(pid)
+    candidate_videos = []
+    for candidate in candidates:
+        video_path = artifact_dir / f"candidate-{candidate['id']}.mp4"
+        video_path.write_bytes(b"candidate")
+        candidate_videos.append(
+            {
+                **candidate,
+                "clips": [{"shot_id": "shot_opening", "path": str(video_path)}],
+                "output": {
+                    "video_path": str(video_path),
+                    "video_url": f"/api/productions/{pid}/artifacts/{video_path.name}",
+                },
+            }
+        )
+    app_env.db.update_production(
+        pid,
+        {
+            "script_candidates": candidates,
+            "candidate_videos": candidate_videos,
+            "status": "awaiting_video_choice",
+            "current_stage": "compose",
+        },
+    )
+    captured = {}
+
+    def fake_run(production_id, wait=False, replace_policy=None, resume_from=None, user_id=None):
+        captured["resume_from"] = resume_from
+        return app_env.db.get_production(production_id)
+
+    monkeypatch.setattr(app_env.productions, "run", fake_run)
+    result = app_env.productions.select_video(pid, "script_2")
+
+    assert result["selected_script_id"] == "script_2"
+    assert captured["resume_from"] == "finalize"
+    current = app_env.db.get_production(pid)
+    assert current["selected_script_id"] == "script_2"
+    assert current["script"] == candidates[1]["script"]
+    assert current["output"]["video_path"].endswith("candidate-script_2.mp4")
 
 
 def test_followup_stays_on_same_production_and_does_not_restart_ingest(app_env):
@@ -149,14 +258,14 @@ def test_followup_stays_on_same_production_and_does_not_restart_ingest(app_env):
     assert "ingest" not in (clarified.get("resume_from") or "")
     production = app_env.db.get_production(pid)
     assert production["id"] == pid
-    assert production["status"] == "awaiting_script_choice"
+    assert production["status"] == "running"
     selected = _payload(_execute(app_env, "handle_production_followup", pid, text="选方案 1"))
     assert selected["production_id"] == pid
     assert selected["action"] == "select"
     assert selected.get("paused") is True
     production = app_env.db.get_production(pid)
     assert production["selected_script_id"] == "script_1"
-    assert production["status"] == "awaiting_script_choice"
+    assert production["status"] == "running"
 
 
 def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):

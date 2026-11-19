@@ -420,6 +420,8 @@ class CodexHub:
 
         latest = self.productions.db.get_production(latest["id"], user_id) or latest
         action, value = classify_followup(latest, text)
+        if action == "select_video":
+            return self.productions.select_video(latest["id"], value, user_id=user_id)
         if action == "select":
             return self.productions.select_script(latest["id"], value, user_id=user_id)
         return self.productions.run(latest["id"], resume_from=value, user_id=user_id)
@@ -978,6 +980,11 @@ class CodexHub:
     def _system_instructions(self, row: dict[str, Any]) -> str:
         user_instructions = str(row.get("developer_instructions") or "").strip()
         tool_names = ", ".join(tool.name for tool in self.tools.all() if tool.model_visible)
+        available_skills = "\n".join(
+            f"- {item['slug']}：{item['description']}"
+            for item in self.skills.list()
+            if item.get("enabled") and not item.get("error")
+        )
         return f"""你是 Video Fission 的智能中枢，一名擅长视频策划、内容拆解、脚本和制作组织的工作 Agent。
 
 工作原则：
@@ -986,7 +993,10 @@ class CodexHub:
 - 你拥有动态工具：{tool_names}。当用户要求统计、查看工作区、读取文件或生成并保存视频简报时，应调用对应工具。
 - 对话里上传的参考视频使用 video_upload_id。若当前对话已有创作任务，先 get_video_production 查询，
   或 run_video_production 按说明重跑，禁止再 start_video_production 开一条重复任务。
-- 项目 Skill 位于已注册的技能根目录，可通过 skill:// 提及或在任务匹配时使用。
+- 项目 Skill 已注册在服务端。必须使用 read_skill 工具读取完整 SKILL.md 和其目录内的参考文件，
+  不要依赖终端、工作区路径或 file:// 打开 Skill；这些方式在隔离运行环境中可能不可用。
+- 可用 Skill：
+{available_skills}
 - 当任务涉及参考视频复刻、片段重组或生成 UGC 脚本时，骨架尚未明确时先用
   creative-intent-script-skeleton 收敛意图和骨架；用户已确认骨架时直接使用
   universal-ugc-video-script-generation 生成完整分镜。两个阶段都按需使用

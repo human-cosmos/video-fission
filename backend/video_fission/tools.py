@@ -10,6 +10,7 @@ from typing import Any
 
 from .db import Database
 from .paths import conversation_artifact_dir
+from .skills import SkillManager
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,13 @@ def _slug(text: str) -> str:
     return f"{value[:45] or 'brief'}-{stamp}"
 
 
-def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productions=None) -> ToolRegistry:
+def build_registry(
+    db: Database,
+    workspace: Path,
+    artifacts_dir: Path,
+    productions=None,
+    skills: SkillManager | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry(db, workspace.resolve(), artifacts_dir.resolve())
 
     def conversation_row(context: dict[str, Any]) -> dict[str, Any]:
@@ -174,6 +181,27 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             "path": str(path.relative_to(workspace_root)),
             "text": path.read_text(encoding="utf-8", errors="replace"),
         }
+
+    def read_skill(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if skills is None:
+            raise ValueError("Skill 服务尚未就绪")
+        raw_skill = str(
+            arguments.get("skill")
+            or arguments.get("slug")
+            or arguments.get("name")
+            or ""
+        ).strip()
+        skill_path = arguments.get("path")
+        if raw_skill.startswith("skill://"):
+            raw_skill = raw_skill.removeprefix("skill://").lstrip("/")
+            raw_skill, separator, embedded_path = raw_skill.partition("/")
+            if separator and not skill_path:
+                skill_path = embedded_path
+        slug = raw_skill
+        slug = slug.lstrip("$").strip("/")
+        if not slug:
+            raise ValueError("必须提供 skill")
+        return skills.read_resource(slug, skill_path)
 
     def conversation_metrics(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         conversation_id = str(context.get("conversation_id") or "")
@@ -289,6 +317,38 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 "additionalProperties": False,
             },
             handler=read_workspace_file,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="read_skill",
+            title="读取项目 Skill",
+            description=(
+                "Read a registered Video Fission project Skill directly from the server. "
+                "Use this instead of shell commands or workspace files when you need the full "
+                "SKILL.md or a reference file inside a Skill directory."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "skill": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "Skill slug such as production-orchestration or video-references",
+                    },
+                    "path": {
+                        "type": "string",
+                        "maxLength": 500,
+                        "description": (
+                            "Optional path relative to the Skill directory. "
+                            "Defaults to SKILL.md."
+                        ),
+                    },
+                },
+                "required": ["skill"],
+                "additionalProperties": False,
+            },
+            handler=read_skill,
         )
     )
     registry.register(

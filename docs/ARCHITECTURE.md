@@ -6,7 +6,7 @@
 
 系统仍是 FastAPI 后端 + Vue 3 对话工作台 + SQLite WAL。用户在现有 Codex 对话里上传参考视频、发送创作说明；对话侧继续由 `CodexHub` 和已有会话 Tool 驱动。
 
-出片不再走 `PipelineEngine` 的固定阶段循环，也不再启动第二个 Codex。当前对话 Codex 先调用 `prepare_video_production` 获取真实视频拆解和参考脚本检索结果，再生成意图、骨架和 3 个脚本候选；`run_video_production` 接收这些内容后，由 Python 后台确定性执行器调用细粒度 Tool。`ProductionService.prepare/run`、`start_from_tool`、`POST /run`、`POST /select-script` 以及会话工具 `run_video_production` 只负责状态推进和 Tool 执行，不发起模型规划。
+出片不再走 `PipelineEngine` 的固定阶段循环，也不再启动第二个 Codex。当前对话 Codex 先调用 `prepare_video_production` 获取真实视频拆解和参考脚本检索结果，再生成意图、骨架和 3 个脚本候选；`run_video_production` 接收这些内容后，由 Python 后台确定性执行器调用细粒度 Tool。`ProductionService.prepare/run`、`start_from_tool`、`POST /run`、`POST /select-video` 以及会话工具 `run_video_production` 只负责状态推进和 Tool 执行，不发起模型规划。
 
 `PipelineEngine` 仍保留切分、生成、合成等能力实现，供 Tool 调用；`PipelineEngine.run` 会直接抛错，不能再作为静默兜底入口。创意内容缺失时后台明确失败并要求先在当前对话生成，不会隐式启动新进程。
 
@@ -25,13 +25,14 @@
       → ProductionAgent（确定性执行器，无子进程）
         1. DeterministicPlanner 按状态和 resume_from 生成步骤
         2. 记录 plan 并调用 ToolRegistry
-        3. 写入 3 个脚本候选后暂停在 awaiting_script_choice
-        4. 选定脚本后生成 / 分离音频 / 合成 / 烧字幕
+        3. 写入 3 个脚本候选，并分别生成、分离音频、合成三条候选视频
+        4. 暂停在 awaiting_video_choice
+        5. 用户选定一条视频后，从 finalize 继续最终合成 / 烧字幕
 ```
 
 `DeterministicPlanner` 不调用模型，只根据当前 production 状态、`resume_from` 和已保存的创意内容生成固定步骤。测试仍可注入 `FakeCodexRuntime` 验证异常计划分支，但生产默认路径不会实例化 `CodexAppServer`。
 
-当前对话 Codex 加载 `skills/production-orchestration/SKILL.md`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`。`prepare_video_production` 返回的 `creative_context` 必须包含拆解 segments、opening 和实际检索到的 reference paths，脚本生成不得早于该阶段。
+当前对话 Codex 通过服务端 `read_skill` 工具读取 `skills/production-orchestration/SKILL.md`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`。该工具绕过受限工作区和终端，只允许读取已注册 Skill 目录内的文件。`prepare_video_production` 返回的 `creative_context` 必须包含拆解 segments、opening 和实际检索到的 reference paths，脚本生成不得早于该阶段。
 
 ## 出片 Tool
 
@@ -44,9 +45,10 @@
 | `extract_landing_points` | 抽取落地页卖点（无 URL 不阻断） |
 | `search_video_references` | 检索 `video-references` |
 | `lock_timeline_opening` | 锁定共享时间轴，并将 `[0, opening_end)` 合并为单个连续 `shot_opening` |
-| `write_intent_and_scripts` | 写入意图、骨架和恰好 3 个脚本候选，然后暂停等待选择；不会自动选定 |
+| `write_intent_and_scripts` | 写入意图、骨架和恰好 3 个脚本候选，随后继续生成候选视频 |
 | `get_production_state` | 读取状态、所选脚本和产物路径 |
 | `update_production_progress` | 更新进度或状态 |
+| `generate_candidate_videos` | 依次生成并合成 3 条候选视频，写入 `candidate_videos`，最后停在 `awaiting_video_choice` |
 | `generate_video_shots` | 仅在已选定脚本后生成；通道只允许 `seedance` / `openai_compatible` / `generic_http`。存在 generate 镜头但缺少 `base_url` 或 API Key 时明确失败，不使用本地关键帧伪生成 |
 | `separate_audio` | 分离参考人声/BGM；结果记录 `applied_to_output` |
 | `compose_timeline` | FFmpeg 拼接时间线，并把可用参考 BGM 以低音量混入最终音轨。内部写入 `production_jobs`；成功后只保存合成产物，不得把任务标为 completed |
@@ -63,19 +65,19 @@
 
 `ProductionService.cancel` 在现有取消事件之外，把该生产任务未完成作业标为 `cancelled`；轮询看到取消后停止且不得下载。启动恢复由 `container.configure` 调用 `ProductionService.recover_orphaned_runs`：继续轮询可恢复的远端任务，再从中断步骤续跑确定性计划，而不是从 ingest 重来；不得把带可续取 `external_task_id` 的作业标为失败。
 
-唯一可以把生产任务标为 `completed` 的入口是计划结束后的 `ProductionAgent._finalize`。必须同时满足：本计划必做步骤全部成功（`prepare_only` 与 `awaiting_script_choice` 暂停除外）；若计划含 `burn_subtitles`，最终成片路径必须是烧录后文件；成片存在且非空；该生产任务没有未完成或失败的相关作业。合成已有但计划中的烧字幕未跑或失败时，保持 `running` 或标 `failed`，不得 completed。
+唯一可以把生产任务标为 `completed` 的入口是计划结束后的 `ProductionAgent._finalize`。必须同时满足：本计划必做步骤全部成功（`prepare_only` 与 `awaiting_video_choice` 暂停除外）；若计划含 `burn_subtitles`，最终成片路径必须是烧录后文件；成片存在且非空；该生产任务没有未完成或失败的相关作业。合成已有但计划中的烧字幕未跑或失败时，保持 `running` 或标 `failed`，不得 completed。
 
 ## 必须守住的不变量
 
 这些规则写在 Tool 实现和 `production-orchestration` Skill 中，不只存在于提示词：
 
 - 开场 `[0, opening_end)` 是一个连续的 `shot_opening` 块，不得再切出 3000ms 钩子
-- 脚本阶段恰好 3 个候选，状态进入 `awaiting_script_choice`；聊天自动开跑不得代为选定或为了跑完而丢掉口播
+- 脚本阶段恰好 3 个候选；三条候选视频全部成功后才进入 `awaiting_video_choice`
 - `generate_video_shots` 要求已有 `selected_script_id`，不得把未选定的 `production.script.shots` 当作已选
 - 生成镜头只走远端视频模型通道
 - 无 Key、Tool 失败、占位或没有真实视频模型调用时，不得出现「已还原」「已按参考对齐」「已还原参考」这类表述
 - 追问留在同一条 `production_id`
-- `select-script` 只记录选择；生成需再进入后台执行器，不得在选定前偷偷开始生成
+- `select-video` 只接受当前任务的 `candidate_videos` 中的一项，并据此设置最终脚本、片段和成片
 - `compose_timeline` / `burn_subtitles` 不得把生产任务标为 completed；完成只发生在计划结束门禁
 - 计划含 `burn_subtitles` 时，最终 `output.video_path` 必须是烧录后文件，不能是烧录前的合成文件
 - 远端生成的 `external_task_id` 必须在提交后立刻落库；崩溃恢复只续取，不重提

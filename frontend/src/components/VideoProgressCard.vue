@@ -16,6 +16,7 @@ const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
 const awaitingCreativeContext = computed(() => status.value === 'awaiting_creative_context')
 const awaitingScript = computed(() => status.value === 'awaiting_script_choice')
+const awaitingVideo = computed(() => status.value === 'awaiting_video_choice')
 const latestActivityStage = computed(() => {
   const items = props.payload?.activity || []
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -93,6 +94,7 @@ const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
   if (awaitingScript.value) return '等待选择创意脚本'
+  if (awaitingVideo.value) return '3 个候选视频已生成，等待选择'
   if (agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value
     if (status.value === 'running') return agentActionText.value
@@ -345,10 +347,10 @@ function formatClock(value) {
       </li>
     </ol>
     <p
-      v-if="awaitingScript"
-      class="progress-awaiting-script"
-      data-testid="video-progress-awaiting-script"
-    >请选择创意脚本</p>
+      v-if="awaitingScript || awaitingVideo"
+      class="progress-awaiting-video"
+      data-testid="video-progress-awaiting-video"
+    >请选择候选视频</p>
     <p v-if="payload.error" class="page-error">{{ payload.error }}</p>
     <ul v-if="warnings.length" class="warning-list">
       <li v-for="(warning, index) in warnings" :key="index">{{ warning }}</li>

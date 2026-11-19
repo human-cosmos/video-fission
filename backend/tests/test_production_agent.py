@@ -3,6 +3,12 @@ from __future__ import annotations
 import json
 import threading
 
+from video_fission.production_agent import (
+    CODEX_UNAVAILABLE,
+    DeterministicPlanner,
+    FakeCodexRuntime,
+)
+
 from tests.helpers import (
     called_tools,
     create_production,
@@ -10,11 +16,6 @@ from tests.helpers import (
     plan_until_scripts,
     plan_with_premature_generate,
     stub_candidates,
-)
-from video_fission.production_agent import (
-    CODEX_UNAVAILABLE,
-    DeterministicPlanner,
-    FakeCodexRuntime,
 )
 
 
@@ -31,7 +32,7 @@ def test_run_goes_through_production_agent_not_pipeline_loop(app_env):
     result = app_env.productions.run(production["id"], wait=True)
     assert called == []
     assert runtime.plans
-    assert result["status"] == "awaiting_script_choice"
+    assert result["status"] == "running"
     assert result.get("selected_script_id") is None
     tools = called_tools(result)
     assert tools == [
@@ -54,7 +55,7 @@ def test_run_goes_through_production_agent_not_pipeline_loop(app_env):
     assert "tool_completed" in events
 
 
-def test_default_planner_runs_without_codex_process(app_env):
+def test_default_planner_attempts_all_candidate_videos_without_codex_process(app_env):
     production = create_production(app_env.productions)
     app_env.productions.update_creative_context(
         production["id"],
@@ -66,7 +67,8 @@ def test_default_planner_runs_without_codex_process(app_env):
     result = app_env.productions.run(production["id"], wait=True)
 
     assert isinstance(app_env.productions.agent.runtime, DeterministicPlanner)
-    assert result["status"] == "awaiting_script_choice"
+    assert result["status"] == "failed"
+    assert "Key" in (result.get("error") or "") or "base_url" in (result.get("error") or "")
     assert called_tools(result) == [
         "ingest_reference_video",
         "understand_reference_video",
@@ -74,8 +76,9 @@ def test_default_planner_runs_without_codex_process(app_env):
         "search_video_references",
         "lock_timeline_opening",
         "write_intent_and_scripts",
+        "generate_candidate_videos",
     ]
-    assert result["intent"]["references"]
+    assert result.get("selected_script_id") is None
 
 
 def test_prepare_builds_creative_context_before_scripts(app_env):
@@ -178,12 +181,16 @@ def test_start_and_run_tools_hand_off_to_agent(app_env):
     )
     assert resumed["success"]
     resume_payload = json.loads(resumed["contentItems"][0]["text"])
-    assert resume_payload["production"]["status"] == "awaiting_script_choice"
+    assert resume_payload["production"]["status"] == "failed"
+    assert "Key" in (resume_payload["production"].get("error") or "") or "base_url" in (
+        resume_payload["production"].get("error") or ""
+    )
+    assert "generate_candidate_videos" in called_tools(resume_payload["production"])
     assert "后台创作任务" in resume_payload["message"]
     assert engine_called == []
 
 
-def test_select_script_resumes_via_agent_and_refuses_generate_without_key(app_env):
+def test_candidate_generation_does_not_require_script_selection(app_env):
     production = create_production(app_env.productions)
     app_env.productions.update_creative_context(
         production["id"],
@@ -191,24 +198,23 @@ def test_select_script_resumes_via_agent_and_refuses_generate_without_key(app_en
         skeleton={"one_liner": "测试", "hook": "钩子", "value": "价值", "cta": "行动"},
         script_candidates=stub_candidates(),
     )
-    paused = app_env.productions.run(production["id"], wait=True)
-    assert paused["status"] == "awaiting_script_choice"
-    result = app_env.productions.select_script(production["id"], "script_1", wait=True)
+    result = app_env.productions.run(production["id"], wait=True)
     assert result["id"] == production["id"]
     assert result["status"] == "failed"
     error = result.get("error") or ""
     assert "Key" in error or "base_url" in error or "无法出片" in error
     for phrase in ("已还原参考", "已按参考对齐", "已还原"):
         assert phrase not in error
-    assert "generate_video_shots" in called_tools(result)
+    assert "generate_candidate_videos" in called_tools(result)
+    assert result.get("selected_script_id") is None
 
 
-def test_agent_pauses_before_generate_if_script_not_selected(app_env):
+def test_bulk_shot_generation_still_rejects_missing_selection(app_env):
     production = create_production(app_env.productions)
     inject_fake(app_env, plan_with_premature_generate())
     result = app_env.productions.run(production["id"], wait=True)
-    assert result["status"] == "awaiting_script_choice"
-    assert "generate_video_shots" not in called_tools(result)
+    assert result["status"] == "failed"
+    assert "选定" in (result.get("error") or "") or "选择" in (result.get("error") or "")
     assert result.get("selected_script_id") is None
 
 
@@ -243,7 +249,7 @@ def test_followup_tool_keeps_same_production(app_env):
     assert payload["action"] == "clarify"
     current = app_env.db.get_production(paused["id"])
     assert current["id"] == paused["id"]
-    assert current["status"] == "awaiting_script_choice"
+    assert current["status"] == "running"
 
 
 def test_fake_runtime_never_needs_codex_binary(app_env):

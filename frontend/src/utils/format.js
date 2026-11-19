@@ -63,6 +63,7 @@ export const STATUS_LABELS = {
   running: '进行中',
   awaiting_creative_context: '等待生成脚本',
   awaiting_script_choice: '待选择脚本',
+  awaiting_video_choice: '待选择视频',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
@@ -96,7 +97,11 @@ export function referenceLabel(path) {
 export function historyStatusText(item) {
   const status = STATUS_LABELS[item?.status] || item?.status || ''
   if (item?.status === 'completed' || item?.current_stage === 'done') return status
-  if (item?.status === 'awaiting_creative_context' || item?.status === 'awaiting_script_choice') {
+  if (
+    item?.status === 'awaiting_creative_context' ||
+    item?.status === 'awaiting_script_choice' ||
+    item?.status === 'awaiting_video_choice'
+  ) {
     return status
   }
   const stage = STAGE_LABELS[item?.current_stage] || item?.current_stage || ''

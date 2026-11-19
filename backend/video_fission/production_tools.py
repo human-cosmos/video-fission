@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from . import media
-from .jobs import JobRunner, digest, revision
 from .audio_separate import separate_reference_audio
+from .jobs import JobRunner, digest, revision
 from .pipeline import REMOTE_VIDEO_PROVIDERS, PipelineEngine, local_script
 from .references import ReferenceLibrary
 from .script_flow import (
@@ -37,6 +37,7 @@ CAPABILITY_TOOLS = (
     "write_intent_and_scripts",
     "get_production_state",
     "update_production_progress",
+    "generate_candidate_videos",
     "generate_video_shots",
     "separate_audio",
     "burn_subtitles",
@@ -292,17 +293,18 @@ class ProductionToolHost:
             "script": display,
             "script_candidates": locked_candidates,
             "selected_script_id": None,
-            "status": "awaiting_script_choice",
+            "candidate_videos": [],
+            "status": "running",
             "current_stage": "script",
             "error": None,
         }
         self.db.update_production(production_id, updates)
         return {
             "production_id": production_id,
-            "status": "awaiting_script_choice",
+            "status": "running",
             "candidate_ids": ids,
-            "paused": True,
-            "message": "请选择创意脚本，选定前不会开始生成。",
+            "paused": False,
+            "message": "3 个创意已写入，接下来会分别生成并合成候选视频。",
         }
 
     def get_production_state(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -317,6 +319,7 @@ class ProductionToolHost:
             "warnings": production.get("warnings") or [],
             "selected_script_id": production.get("selected_script_id"),
             "script_candidate_ids": [item.get("id") for item in (production.get("script_candidates") or [])],
+            "candidate_video_ids": [item.get("id") for item in (production.get("candidate_videos") or [])],
             "opening": (
                 (production.get("decomposition") or {}).get("opening")
                 or (production.get("script") or {}).get("opening")
@@ -354,6 +357,161 @@ class ProductionToolHost:
             "current_stage": production.get("current_stage"),
         }
 
+    def _validate_video_generation(
+        self,
+        production_id: str,
+        script: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, str], str]:
+        public, secrets = self.engine._settings_for_production(production_id)
+        vg = public.get("video_generator") or {}
+        provider = str(vg.get("provider") or "seedance")
+        if provider not in REMOTE_VIDEO_PROVIDERS:
+            raise ProductionToolError(
+                f"视频生成只支持远端模型通道，当前为 {provider}，不能用本地关键帧伪生成"
+            )
+        generate_shots = [
+            shot for shot in (script.get("shots") or []) if shot.get("action") == "generate"
+        ]
+        if generate_shots and not vg.get("base_url"):
+            raise ProductionToolError(f"视频生成 Provider {provider} 未配置 base_url，无法出片")
+        if generate_shots and not (secrets.get("video_generator") or ""):
+            raise ProductionToolError(f"视频生成 Provider {provider} 未配置 API Key，无法出片")
+        return public, secrets, provider
+
+    def generate_candidate_videos(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        production_id = self._pid(arguments, context)
+        production = self._production(production_id)
+        candidates = list(production.get("script_candidates") or [])
+        if len(candidates) != 3:
+            raise ProductionToolError("必须恰好有 3 个脚本候选才能生成候选视频")
+        for candidate in candidates:
+            self._validate_video_generation(
+                production_id,
+                candidate.get("script") or {},
+            )
+
+        existing = {
+            str(item.get("id") or ""): item
+            for item in (production.get("candidate_videos") or [])
+            if isinstance(item, dict)
+        }
+        if not (production.get("audio_separation") or {}).get("usable"):
+            self.separate_audio(arguments, context)
+
+        results_by_id: dict[str, dict[str, Any]] = {}
+        for index, candidate in enumerate(candidates, start=1):
+            candidate_id = str(candidate.get("id") or "")
+            script = candidate.get("script") or {}
+            previous = existing.get(candidate_id) or {}
+            previous_path = Path(str(previous.get("video_path") or ""))
+            if previous_path.is_file() and previous_path.stat().st_size > 0:
+                results_by_id[candidate_id] = previous
+                continue
+            self.engine._emit(
+                production_id,
+                "progress",
+                {
+                    "stage": "generate",
+                    "message": f"正在生成候选视频 {index}/3：{candidate.get('title') or candidate_id}",
+                },
+            )
+            self.db.update_production(
+                production_id,
+                {
+                    "script": script,
+                    "selected_script_id": candidate_id,
+                    "clips": [],
+                    "output": None,
+                    "status": "running",
+                    "current_stage": "generate",
+                    "error": None,
+                },
+            )
+            self.generate_video_shots(arguments, context)
+            composed = self.compose_timeline(arguments, context)
+            current = self._production(production_id)
+            output = dict(current.get("output") or composed.get("output") or {})
+            video_path = Path(str(output.get("composed_video_path") or composed.get("video_path") or ""))
+            if not video_path.is_file() or video_path.stat().st_size <= 0:
+                raise ProductionToolError(f"候选 {candidate_id} 的视频文件缺失或为空")
+            result = {
+                "id": candidate_id,
+                "script_id": candidate_id,
+                "title": candidate.get("title") or candidate_id,
+                "angle": candidate.get("angle") or "",
+                "status": "ready",
+                "script": script,
+                "clips": list(current.get("clips") or []),
+                "output": output,
+                "video_path": str(video_path),
+                "video_url": output.get("video_url") or composed.get("video_url") or "",
+                "duration_ms": int(script.get("total_duration_ms") or 0),
+                "width": int((current.get("source_video") or {}).get("width") or 0),
+                "height": int((current.get("source_video") or {}).get("height") or 0),
+            }
+            results_by_id[candidate_id] = result
+            ordered = [
+                results_by_id[str(item.get("id") or "")]
+                for item in candidates
+                if str(item.get("id") or "") in results_by_id
+            ]
+            self.db.update_production(production_id, {"candidate_videos": ordered})
+            self.engine._emit(
+                production_id,
+                "candidate_video_completed",
+                {
+                    "candidate_id": candidate_id,
+                    "number": index,
+                    "total": 3,
+                    "video_url": result["video_url"],
+                },
+            )
+
+        ordered = [
+            results_by_id[str(item.get("id") or "")]
+            for item in candidates
+            if str(item.get("id") or "") in results_by_id
+        ]
+        if len(ordered) != 3:
+            raise ProductionToolError("候选视频未全部生成，不能进入视频选择")
+        first_script = candidates[0].get("script") or production.get("script")
+        self.db.update_production(
+            production_id,
+            {
+                "candidate_videos": ordered,
+                "script": first_script,
+                "clips": [],
+                "output": None,
+                "selected_script_id": None,
+                "status": "awaiting_video_choice",
+                "current_stage": "compose",
+                "error": None,
+            },
+        )
+        self.engine._emit(
+            production_id,
+            "awaiting_video_choice",
+            {"message": "3 个候选视频已生成，请选择一个继续最终合成", "count": 3},
+        )
+        return {
+            "production_id": production_id,
+            "status": "awaiting_video_choice",
+            "candidate_videos": [
+                {
+                    "id": item["id"],
+                    "title": item["title"],
+                    "video_url": item["video_url"],
+                }
+                for item in ordered
+            ],
+            "paused": True,
+            "message": "3 个候选视频已生成，请选择其中一个继续最终合成。",
+        }
+
     def generate_video_shots(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         production_id = self._pid(arguments, context)
         production = self._production(production_id)
@@ -361,18 +519,15 @@ class ProductionToolHost:
             raise ProductionToolError("还没有选定脚本，不能生成视频")
         if production.get("status") == "awaiting_script_choice":
             raise ProductionToolError("还在等待选择脚本，不能生成视频")
-        public, secrets = self.engine._settings_for_production(production_id)
-        vg = public.get("video_generator") or {}
-        provider = str(vg.get("provider") or "seedance")
-        if provider not in REMOTE_VIDEO_PROVIDERS:
-            raise ProductionToolError(f"视频生成只支持远端模型通道，当前为 {provider}，不能用本地关键帧伪生成")
+        _public, _secrets, provider = self._validate_video_generation(
+            production_id,
+            production.get("script") or {},
+        )
         generate_shots = [
-            shot for shot in ((production.get("script") or {}).get("shots") or []) if shot.get("action") == "generate"
+            shot
+            for shot in ((production.get("script") or {}).get("shots") or [])
+            if shot.get("action") == "generate"
         ]
-        if generate_shots and not vg.get("base_url"):
-            raise ProductionToolError(f"视频生成 Provider {provider} 未配置 base_url，无法出片")
-        if generate_shots and not (secrets.get("video_generator") or ""):
-            raise ProductionToolError(f"视频生成 Provider {provider} 未配置 API Key，无法出片")
         warnings = self._warnings(production)
         self.engine._stage_generate(production_id, self._cancel(context), warnings)
         production = self._production(production_id)
@@ -420,7 +575,8 @@ class ProductionToolHost:
             style = {**style, "aligned": False, "method": style.get("method") or "default_safe"}
         srt = art / "final.srt"
         write_shot_srt(srt, list((production.get("script") or {}).get("shots") or []))
-        burned = art / f"final-burned-{digest([str(video), production.get("script")])[:16]}.mp4"
+        script_digest = digest([str(video), production.get("script")])[:16]
+        burned = art / f"final-burned-{script_digest}.mp4"
         media.burn_subtitles(video, srt, burned, style)
         output = {
             **output,
@@ -454,7 +610,10 @@ class ProductionToolHost:
                   "video_path": output.get("composed_video_path") or output.get("video_path")}
         result = runner.run("burn_subtitles", inputs, lambda job: self._burn_subtitles(arguments, context))
         runner.check_cancelled()
-        self.db.update_production(production_id, {"output": result["output"], "subtitle_style": result["subtitle_style"]})
+        self.db.update_production(
+            production_id,
+            {"output": result["output"], "subtitle_style": result["subtitle_style"]},
+        )
         return result
 
     def compose_timeline(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -504,6 +663,35 @@ class ProductionToolHost:
                 "message": "已停在当前任务等待澄清，不会从 ingest 重来。",
             }
         action, detail = classify_followup(production, text)
+        if action == "select_video":
+            chosen = next(
+                (
+                    item
+                    for item in production.get("candidate_videos") or []
+                    if str(item.get("id") or "") == detail
+                ),
+                None,
+            )
+            if not chosen:
+                raise ProductionToolError("候选视频不存在")
+            self.db.update_production(
+                production_id,
+                {
+                    "script": chosen.get("script") or production.get("script"),
+                    "selected_script_id": chosen["id"],
+                    "clips": chosen.get("clips") or [],
+                    "output": chosen.get("output") or {},
+                    "error": None,
+                },
+            )
+            return {
+                "action": "select_video",
+                "production_id": production_id,
+                "video_id": chosen["id"],
+                "paused": True,
+                "resume_from": "finalize",
+                "message": "已记录所选视频，继续最终合成即可出片。",
+            }
         if action == "select":
             chosen = candidate_by_id(production.get("script_candidates") or [], detail)
             if not chosen:
@@ -554,10 +742,14 @@ def register_production_tools(registry: ToolRegistry, host: ProductionToolHost) 
         ),
         "write_intent_and_scripts": (
             "写入意图与三脚本候选",
-            "Persist intent, skeleton, and exactly three script candidates, then pause for selection.",
+            "Persist intent, skeleton, and exactly three script candidates, then continue to video generation.",
         ),
         "get_production_state": ("查询任务状态与产物", "Read production status, selected script, and artifact paths."),
         "update_production_progress": ("更新任务进度", "Write progress, status, or a short progress message."),
+        "generate_candidate_videos": (
+            "生成三个候选视频",
+            "Generate and compose all three script candidates, then pause for final video selection.",
+        ),
         "generate_video_shots": (
             "生成视频镜头",
             "Generate selected-script shots via Seedance / OpenAI Compatible / Generic HTTP only.",

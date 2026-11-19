@@ -5578,6 +5578,111 @@ a.button.primary {
   display: none;
 }
 
+.candidate-video-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.candidate-video-head h3 {
+  margin-bottom: 4px;
+}
+
+.candidate-video-head p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.candidate-video-head > span {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.candidate-video-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.candidate-video-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.candidate-video-card.is-selected {
+  background: rgba(245, 158, 11, 0.04);
+  border-color: rgba(245, 158, 11, 0.5);
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.candidate-video-title {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.candidate-video-title > span {
+  color: var(--vf-accent);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.candidate-video-title > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.candidate-video-title strong,
+.candidate-video-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-video-title strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.candidate-video-title small {
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.candidate-video-card .player-frame {
+  background: #0f172a;
+}
+
+.candidate-video-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 34px;
+}
+
+.candidate-selected {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  color: #8a6d2f;
+  font-size: 11px;
+  font-weight: 650;
+}
+
 .app-shell.mode-chat .dock-tickets {
   display: flex;
   flex-wrap: wrap;
@@ -6059,6 +6164,10 @@ a.button.primary {
   .app-shell.mode-chat .composer-dock {
     width: calc(100% - 16px);
     padding-bottom: max(8px, env(safe-area-inset-bottom));
+  }
+
+  .candidate-video-grid {
+    grid-template-columns: 1fr;
   }
 
   .app-shell.mode-chat .dock-tickets {

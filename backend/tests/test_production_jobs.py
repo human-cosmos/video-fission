@@ -4,7 +4,6 @@ import threading
 from pathlib import Path
 
 import pytest
-
 from video_fission import media, providers
 from video_fission.db import Database
 from video_fission.production_agent import FakeCodexRuntime, ProductionAgentError
@@ -153,6 +152,41 @@ def test_script_reselection_never_reuses_old_job(app_env, monkeypatch):
     assert first != app_env.db.get_production(pid)["clips"][0]["path"]
 
 
+def test_long_seedance_shot_submits_supported_duration_and_warns(app_env, monkeypatch):
+    pid = remote_env(app_env, monkeypatch)
+    production = app_env.db.get_production(pid)
+    script = production["script"]
+    script["shots"][0]["duration_ms"] = 17103
+    app_env.db.update_production(pid, {"script": script})
+    monkeypatch.setattr(media, "probe", lambda path: {"duration_ms": 17103, "has_audio": True})
+    submitted = []
+
+    def request(url, key, *, timeout, payload=None):
+        if payload is not None:
+            submitted.append(payload)
+            return {"data": {"task_id": "duration-15"}}
+        return {
+            "data": {
+                "status": "completed",
+                "result": {"video": {"url": "https://fake.invalid/clip.mp4"}},
+            }
+        }
+
+    monkeypatch.setattr(providers, "_request_seedance", request)
+    monkeypatch.setattr(
+        providers,
+        "_download_seedance_video",
+        lambda url, dest, *args: dest.write_bytes(b"x" * 2000),
+    )
+
+    app_env.productions.engine._stage_generate(pid, threading.Event(), [])
+
+    assert submitted[0]["duration"] == 15
+    assert "15000ms" in submitted[0]["prompt"]
+    warnings = app_env.db.get_production(pid)["warnings"]
+    assert any("Seedance 单次仅支持 4-15 秒" in item for item in warnings)
+
+
 def test_cancel_jobs_and_stop_poll_without_download(app_env, monkeypatch):
     pid = remote_env(app_env, monkeypatch)
     cancel = threading.Event()
@@ -254,10 +288,29 @@ def test_related_unfinished_job_blocks_completion(app_env, monkeypatch, status):
 def test_compose_key_ignores_mutable_audio_progress(app_env, monkeypatch):
     pid = ready(app_env)
     fake_local(app_env, monkeypatch)
-    app_env.db.update_production(pid, {"audio_separation": {"bgm_path": "test.wav", "usable": True, "applied_to_output": False}})
+    app_env.db.update_production(
+        pid,
+        {
+            "audio_separation": {
+                "bgm_path": "test.wav",
+                "usable": True,
+                "applied_to_output": False,
+            }
+        },
+    )
     h = host(app_env)
     first = h.compose_timeline({"production_id": pid}, {})
-    app_env.db.update_production(pid, {"audio_separation": {"bgm_path": "test.wav", "usable": True, "applied_to_output": True, "applied_volume": 0.12}})
+    app_env.db.update_production(
+        pid,
+        {
+            "audio_separation": {
+                "bgm_path": "test.wav",
+                "usable": True,
+                "applied_to_output": True,
+                "applied_volume": 0.12,
+            }
+        },
+    )
     second = h.compose_timeline({"production_id": pid}, {})
     assert first["video_path"] == second["video_path"]
     assert len(app_env.db.list_production_jobs(pid)) == 1
@@ -266,4 +319,6 @@ def test_compose_key_ignores_mutable_audio_progress(app_env, monkeypatch):
 def test_default_plan_keeps_required_subtitles(app_env):
     from video_fission.production_agent import DeterministicPlanner
     assert [step["tool"] for step in DeterministicPlanner().plan({"resume_from": "generate"})["steps"]] == [
-        "generate_video_shots", "separate_audio", "compose_timeline", "burn_subtitles"]
+        "generate_candidate_videos"]
+    assert [step["tool"] for step in DeterministicPlanner().plan({"resume_from": "finalize"})["steps"]] == [
+        "compose_timeline", "burn_subtitles"]

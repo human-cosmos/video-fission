@@ -239,6 +239,7 @@ HTTP 401 或业务层错误使用 `RVoid`。
 
 - OpenAPI 请求体中的 `duration_ms`、`width`、`height`、`fps` 不属于该接口字段。
 - 视频时长使用秒级整数 `duration`。
+- `seedance-2-0-fast` 当前只接受 4–15 秒的整数时长。项目会先按镜头毫秒时长向上取整，再收敛到 4–15 秒；超过 15 秒的镜头按 15 秒提交，之后由本地标准化补齐到镜头时长。
 - 宽高比使用 `aspect_ratio`，分辨率使用 `options.resolution`。
 - 提交响应中的 `status_url` 可能是网关内部路径。当前项目固定使用正式的 `/acore/model/v1/task/video/{taskId}` 查询任务。
 - `seedance-2.0-flash` 不是该接口文档中的模型 ID。项目会将其映射为实际可用的 `seedance-2-0-fast`。

@@ -55,7 +55,7 @@ npm install --prefix frontend
 
 在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片。创建或重跑任务、选择脚本和追问都会交给 Production Agent 执行，而不是 Python 阶段循环。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；无 Key 时理解 Tool 可以诚实降级为本地切分，并明确标注不是模型结果。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。合成之后可以用 `burn_subtitles` Tool 写 SRT 并硬烧字幕；未对齐时使用安全默认位置，不会写成「已按参考对齐」。
 
-「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，Gemini 请求与观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
 视频生成支持 `seedance` 内网 Provider。默认地址为 `https://api.giikin.com`，Seedance 2.0 Flash 对应的协议模型名为 `seedance-2-0-fast`（也兼容输入 `seedance-2.0-flash`）。提交走 `/acore/model/v1/task/generate/video`，状态查询走 `/acore/model/v1/task/video/{taskId}`；下载后会统一转成项目要求的分辨率、帧率和精确时长。也可以使用 `npx dksk auth <key>` 登录后，在系统设置中保存同一认证 Key。
 

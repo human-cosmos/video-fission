@@ -70,8 +70,8 @@ def _append_warning(current: str, extra: str) -> str:
 VIDEO_INPUT_TOKEN_BUDGET = 14_000
 VIDEO_TOKENS_PER_SECOND = 85
 VIDEO_TOKEN_OVERHEAD = 256
-GEMINI_SPLIT_TIMEOUT_SECONDS = 120
-GEMINI_CLIP_TIMEOUT_SECONDS = 120
+GEMINI_SPLIT_TIMEOUT_SECONDS = 360
+GEMINI_CLIP_TIMEOUT_SECONDS = 360
 GEMINI_SPLIT_MAX_CANDIDATES = 2
 
 
@@ -1014,7 +1014,7 @@ def _call_understand(
     recorder: GeminiCallRecorder | None = None,
     label: str = "understand",
 ) -> tuple[Any, bool]:
-    timeout = int(timeout_seconds or mm.get("timeout_seconds") or 120)
+    timeout = int(timeout_seconds or mm.get("timeout_seconds") or 360)
     output_tokens = int(max_tokens or mm.get("max_tokens") or 12000)
     logged_tokens = output_tokens
     if provider == "gemini_gateway" and (video_path is not None or frames):

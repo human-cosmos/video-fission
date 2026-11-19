@@ -157,7 +157,7 @@ class PipelineEngine:
             api_key,
             mm.get("model") or "",
             [{"role": "user", "content": content}],
-            int(mm.get("timeout_seconds") or 120),
+            int(mm.get("timeout_seconds") or 360),
         )
         data = providers.extract_json(raw)
         duration_ms = int(production["source_video"]["duration_ms"])
@@ -868,7 +868,7 @@ class PipelineEngine:
             api_key=secrets.get("multimodal") or "",
             model=str(mm.get("model") or ""),
             source=str(mm.get("source") or ""),
-            timeout_seconds=int(mm.get("timeout_seconds") or 120),
+            timeout_seconds=int(mm.get("timeout_seconds") or 360),
         )
         logger.info(
             "generate.reference_upload_started endpoint=%s production_id=%s",

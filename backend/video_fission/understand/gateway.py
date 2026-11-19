@@ -139,7 +139,7 @@ class GeminiGatewayClient:
         source: str = "",
         max_tokens: int = 12000,
         max_retries: int = 2,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 360,
     ) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.upload_url = str(upload_url or "").strip()
@@ -149,7 +149,7 @@ class GeminiGatewayClient:
         self.source = str(source or "")
         self.max_tokens = max(int(max_tokens or 12000), 256)
         self.max_retries = max(int(max_retries), 0)
-        self.timeout_seconds = max(int(timeout_seconds or 120), 5)
+        self.timeout_seconds = max(int(timeout_seconds or 360), 5)
 
     def get_access_token(self, force: bool = False) -> str:
         if not self.token_url:
@@ -478,7 +478,7 @@ class GeminiGatewayClient:
                     self.upload_url,
                     files={"file": (upload_name, handle, mime)},
                     headers={"Authorization": token} if token else {},
-                    timeout=min(self.timeout_seconds, 120),
+                    timeout=self.timeout_seconds,
                     follow_redirects=True,
                 )
             response.raise_for_status()

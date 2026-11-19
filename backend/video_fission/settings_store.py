@@ -25,7 +25,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_key_set": False,
         "model": "",
         "max_tokens": 12000,
-        "timeout_seconds": 120,
+        "timeout_seconds": 360,
     },
     "video_generator": {
         "provider": "seedance",
@@ -345,9 +345,9 @@ class SettingsStore:
             and stored_multimodal.get("token_url") == defaults["multimodal"].get("token_url")
             and stored_multimodal.get("model") == defaults["multimodal"].get("model")
             and stored_multimodal.get("source") == defaults["multimodal"].get("source")
-            and int(stored_multimodal.get("timeout_seconds") or 120) == 360
+            and int(stored_multimodal.get("timeout_seconds") or 120) == 120
         ):
-            public["multimodal"]["timeout_seconds"] = 120
+            public["multimodal"]["timeout_seconds"] = 360
             migrated = True
         if (
             isinstance(stored_multimodal, dict)
@@ -384,7 +384,7 @@ class SettingsStore:
                     "token_url": runtime.gemini_token_url,
                     "model": runtime.gemini_model or "gemini-3.8-flash",
                     "source": runtime.gemini_source,
-                    "timeout_seconds": 120,
+                    "timeout_seconds": 360,
                 }
             )
         return defaults

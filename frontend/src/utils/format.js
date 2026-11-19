@@ -26,12 +26,6 @@ export const WORKSPACE_MODES = [
   { id: 'settings', label: '系统设置' },
 ]
 
-export const POLICY_MODES = [
-  { id: 'default', label: '默认 Hook+CTA', hint: '只新生成开场和结尾，中间尽量复用' },
-  { id: 'brief', label: '按说明判断', hint: '从创作说明里解析要重做的片段' },
-  { id: 'all', label: '全部重做', hint: '每一段都重新生成' },
-]
-
 export const VIDEO_ITEM_TYPES = [
   'video_progress',
   'video_understanding',

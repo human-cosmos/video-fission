@@ -46,7 +46,7 @@ test("composer requires a brief after a reference video is attached", async ({ p
   await expect(page.getByTestId("message-input")).toBeVisible()
   await page.getByTestId("composer-video-upload").setInputFiles(fixture)
   await expect(page.getByTestId("composer-video-preview")).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId("composer-policy-brief")).toBeChecked()
+  await expect(page.getByTestId("composer-policy")).toHaveCount(0)
   await expect(page.getByTestId("composer-hint-need-brief")).toBeVisible()
   await expect(page.getByTestId("send-message")).toBeDisabled()
   await page.getByTestId("message-input").fill("把第二段和结尾重新生成")
@@ -74,7 +74,7 @@ test("runs a production inside a conversation, then regenerates a selected segme
   await expect(page.getByTestId("message-input")).toBeVisible()
   await page.getByTestId("composer-video-upload").setInputFiles(fixture)
   await expect(page.getByTestId("composer-video-preview")).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId("composer-policy-brief")).toBeChecked()
+  await expect(page.getByTestId("composer-policy")).toHaveCount(0)
   await page.getByTestId("message-input").fill("把第二段和结尾重新生成")
   await page.getByTestId("send-message").click()
 

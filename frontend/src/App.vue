@@ -21,7 +21,6 @@ import {
 } from './utils/events'
 import {
   MAX_PRODUCTION_UPLOAD_BYTES,
-  POLICY_MODES,
   VIDEO_ACCEPT,
   WORKSPACE_MODES,
   formatDuration,
@@ -44,7 +43,6 @@ const composer = ref('')
 const attachments = ref([])
 const uploading = ref(false)
 const sending = ref(false)
-const policyMode = ref('brief')
 const productions = ref([])
 const rerunning = ref(false)
 const selectingScript = ref(false)
@@ -328,7 +326,6 @@ function revokePreview(file) {
 function clearAttachments() {
   for (const file of attachments.value) revokePreview(file)
   attachments.value = []
-  policyMode.value = 'brief'
 }
 
 function closeStream() {
@@ -782,7 +779,7 @@ async function send() {
       mentions: [],
     }
     if (productionVideo.value) {
-      payload.replace_policy = { mode: policyMode.value || 'brief' }
+      payload.replace_policy = { mode: 'brief' }
     }
     if (conversation.status === 'running') {
       await api.steer(conversation.id, payload)
@@ -1154,25 +1151,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
-          <fieldset v-if="productionVideo" class="composer-policy studio-policy" data-testid="composer-policy">
-            <legend>创作策略</legend>
-            <div class="studio-policy-options">
-              <label
-                v-for="option in POLICY_MODES"
-                :key="option.id"
-                :class="{ active: policyMode === option.id }"
-              >
-                <input
-                  v-model="policyMode"
-                  type="radio"
-                  name="composer-policy"
-                  :value="option.id"
-                  :data-testid="`composer-policy-${option.id}`"
-                />
-                <span>{{ option.label }}</span>
-              </label>
-            </div>
-          </fieldset>
           <div v-if="otherAttachments.length" class="composer-context">
             <span v-for="file in otherAttachments" :key="file.id" class="context-chip">
               {{ file.name }}

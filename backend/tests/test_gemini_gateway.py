@@ -132,7 +132,7 @@ def test_gateway_environment_seeds_and_migrates_settings(test_settings):
         gemini_api_url="https://gateway.example/chat",
         gemini_upload_url="https://gateway.example/upload",
         gemini_token_url="https://gateway.example/token",
-        gemini_model="gemini-3.8-flash",
+        gemini_model="gemini-3.0-flash",
         gemini_source="hot-product-system",
     )
     store = SettingsStore(database, runtime)
@@ -141,7 +141,7 @@ def test_gateway_environment_seeds_and_migrates_settings(test_settings):
     persisted = database.get_app_settings()["public"]
 
     assert public["multimodal"]["provider"] == "gemini_gateway"
-    assert public["multimodal"]["model"] == "gemini-3.8-flash"
+    assert public["multimodal"]["model"] == "gemini-3.0-flash"
     assert public["multimodal"]["upload_url"] == "https://gateway.example/upload"
     assert public["multimodal"]["max_tokens"] == 12000
     assert public["multimodal"]["timeout_seconds"] == 120
@@ -156,7 +156,7 @@ def test_gateway_environment_migrates_seeded_timeout_to_120(test_settings):
         gemini_api_url="https://gateway.example/chat",
         gemini_upload_url="https://gateway.example/upload",
         gemini_token_url="https://gateway.example/token",
-        gemini_model="gemini-3.8-flash",
+        gemini_model="gemini-3.0-flash",
         gemini_source="hot-product-system",
     )
     database.upsert_app_settings(
@@ -302,7 +302,7 @@ def test_gateway_prefers_uploaded_file_uri(monkeypatch, tmp_path: Path):
         base_url="https://gateway.example/chat",
         upload_url="https://gateway.example/upload",
         api_key="token",
-        model="gemini-3.8-flash",
+        model="gemini-3.0-flash",
     )
 
     client.call("分析视频", video_path=video)
@@ -523,7 +523,7 @@ def test_invalid_video_response_falls_back_to_frames(monkeypatch, tmp_path: Path
         "gemini_gateway",
         {
             "base_url": "https://gateway.example/chat",
-            "model": "gemini-3.8-flash",
+            "model": "gemini-3.0-flash",
             "max_tokens": 12000,
         },
         "token",
@@ -557,7 +557,7 @@ def test_understand_request_returns_when_cancelled(monkeypatch, tmp_path: Path):
             "gemini_gateway",
             {
                 "base_url": "https://gateway.example/chat",
-                "model": "gemini-3.8-flash",
+                "model": "gemini-3.0-flash",
                 "max_tokens": 12000,
             },
             "token",

@@ -368,7 +368,7 @@ class SettingsStore:
                     "base_url": runtime.gemini_api_url,
                     "upload_url": runtime.gemini_upload_url,
                     "token_url": runtime.gemini_token_url,
-                    "model": runtime.gemini_model or "gemini-3.8-flash",
+                    "model": runtime.gemini_model or "gemini-3.0-flash",
                     "source": runtime.gemini_source,
                     "timeout_seconds": 120,
                 }

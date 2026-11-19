@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 from tests.helpers import (
     called_tools,
@@ -10,7 +11,7 @@ from tests.helpers import (
     plan_with_premature_generate,
     stub_candidates,
 )
-from video_fission.production_agent import CODEX_UNAVAILABLE, FakeCodexRuntime
+from video_fission.production_agent import CODEX_UNAVAILABLE, FakeCodexRuntime, _prompt_context
 
 
 def test_run_goes_through_production_agent_not_pipeline_loop(app_env):
@@ -150,3 +151,16 @@ def test_fake_runtime_never_needs_codex_binary(app_env):
     plan = runtime.plan({"production_id": "prd_test"})
     assert plan["steps"]
     assert runtime.is_available()
+
+
+def test_prompt_context_excludes_cancel_event():
+    context = {
+        "production_id": "prd_test",
+        "cancel": threading.Event(),
+        "production": {"id": "prd_test", "brief": "测试出片"},
+    }
+
+    prompt_context = _prompt_context(context)
+
+    assert "cancel" not in prompt_context
+    assert json.loads(json.dumps(prompt_context, ensure_ascii=False)) == prompt_context

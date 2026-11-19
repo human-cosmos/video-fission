@@ -40,6 +40,11 @@ class ProductionAgentError(RuntimeError):
     pass
 
 
+def _prompt_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Strip runtime-only handles before serializing the planner prompt."""
+    return {key: value for key, value in context.items() if key != "cancel"}
+
+
 class AgentRuntime(Protocol):
     def is_available(self) -> bool: ...
 
@@ -127,7 +132,7 @@ class RealCodexRuntime:
             '"intent":{},"skeleton":{},"script_candidates":[]}.\n'
             "必须遵守开场连续块、三脚本暂停、未选定不得生成、诚实失败等不变量。\n"
             "不要再启动另一个 Agent。\n"
-            f"上下文：{json.dumps(context, ensure_ascii=False)}"
+            f"上下文：{json.dumps(_prompt_context(context), ensure_ascii=False)}"
         )
         runtime = CodexAppServer(
             self.settings.codex_bin,

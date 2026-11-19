@@ -45,7 +45,11 @@ npm install --prefix frontend
 ./scripts/dev.sh
 ```
 
-打开 `http://127.0.0.1:5174/`。
+开发服务器监听 `0.0.0.0:5174`，本机可打开 `http://127.0.0.1:5174/`，
+局域网设备可通过 `http://<本机局域网IP>:5174/` 访问。
+使用局域网 IP 时，还需要将该前端 Origin 加入 `VF_ALLOWED_ORIGINS`，例如
+`VF_ALLOWED_ORIGINS=http://192.168.1.59:5174`；启用企业 SSO 时同步设置
+`VF_SSO_FRONTEND_URL=http://192.168.1.59:5174`。
 
 工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 

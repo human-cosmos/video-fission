@@ -19,6 +19,7 @@ defineEmits(['cancel'])
 const status = computed(() => props.payload?.status || '')
 const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
+const awaitingCreativeContext = computed(() => status.value === 'awaiting_creative_context')
 const awaitingScript = computed(() => status.value === 'awaiting_script_choice')
 const stages = computed(() => {
   const provided = props.payload?.stages
@@ -66,6 +67,7 @@ const traceItems = computed(() => agentTraceItems(props.payload))
 const traceSummary = computed(() => agentTraceSummary(props.payload))
 const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
+  if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
   if (awaitingScript.value) return '等待选择创意脚本'
   if (showAgentTrace.value && agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value

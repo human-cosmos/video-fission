@@ -30,7 +30,6 @@ def test_settings(tmp_path: Path) -> Settings:
         port=18000,
         auth_required=False,
         allow_local_copy_fallback=False,
-        script_agent_timeout_seconds=30,
     )
     settings.ensure_directories()
     return settings

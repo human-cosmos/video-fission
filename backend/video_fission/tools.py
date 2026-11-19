@@ -19,6 +19,7 @@ class ToolDefinition:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+    model_visible: bool = True
 
     def spec(self) -> dict[str, Any]:
         return {
@@ -50,7 +51,11 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def specs(self) -> list[dict[str, Any]]:
-        return [tool.spec() for tool in self._tools.values()]
+        return [tool.spec() for tool in self._tools.values() if tool.model_visible]
+
+    def is_model_visible(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return bool(tool and tool.model_visible)
 
     def summary(self) -> list[dict[str, Any]]:
         return [
@@ -329,6 +334,44 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         )
     )
 
+    def prepare_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        if productions is None:
+            raise ValueError("视频创作管线尚未就绪")
+        brief = str(arguments.get("brief") or "").strip()
+        upload_id = str(arguments.get("video_upload_id") or "").strip() or None
+        source_path = str(arguments.get("source_path") or arguments.get("path") or "").strip() or None
+        policy = arguments.get("replace_policy")
+        conversation_id = str(arguments.get("conversation_id") or context.get("conversation_id") or "").strip() or None
+        user_id = conversation_user(context)
+        if conversation_id and not db.get_conversation(conversation_id, user_id):
+            raise ValueError("目标对话不存在")
+        kwargs: dict[str, Any] = {"prepare_only": True}
+        if user_id is not None:
+            kwargs["user_id"] = user_id
+        result = productions.start_from_tool(
+            brief,
+            video_upload_id=upload_id,
+            source_path=source_path,
+            replace_policy=policy if isinstance(policy, dict) else None,
+            conversation_id=conversation_id,
+            **kwargs,
+        )
+        intent = result.get("intent") or {}
+        return {
+            "production": result,
+            "creative_context": {
+                "brief": result.get("brief"),
+                "decomposition": result.get("decomposition"),
+                "opening": (result.get("decomposition") or {}).get("opening"),
+                "references": intent.get("references") or [],
+                "warnings": result.get("warnings") or [],
+            },
+            "next_action": (
+                "基于 creative_context 生成 intent、skeleton 和恰好 3 个 script_candidates，"
+                "然后调用 run_video_production，并传 resume_from=script。"
+            ),
+        }
+
     def start_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         if productions is None:
             raise ValueError("视频创作管线尚未就绪")
@@ -338,6 +381,13 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         policy = arguments.get("replace_policy")
         conversation_id = str(arguments.get("conversation_id") or context.get("conversation_id") or "").strip() or None
         user_id = conversation_user(context)
+        intent = arguments.get("intent")
+        skeleton = arguments.get("skeleton")
+        script_candidates = arguments.get("script_candidates")
+        if not isinstance(intent, dict) or not isinstance(skeleton, dict):
+            raise ValueError("开始视频创作前必须提供 intent 和 skeleton")
+        if not isinstance(script_candidates, list) or len(script_candidates) != 3:
+            raise ValueError("开始视频创作前必须提供恰好 3 个 script_candidates")
         if conversation_id:
             owned = db.get_conversation(conversation_id, user_id)
             if not owned:
@@ -351,11 +401,14 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             source_path=source_path,
             replace_policy=policy if isinstance(policy, dict) else None,
             conversation_id=conversation_id,
+            intent=intent,
+            skeleton=skeleton,
+            script_candidates=script_candidates,
             **call_kwargs,
         )
         return {
             "production": result,
-            "message": f"已交给 Production Agent 启动创作任务 {result['id']}，状态 {result['status']}",
+            "message": f"已启动后台创作任务 {result['id']}，状态 {result['status']}",
         }
 
     def get_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -383,21 +436,36 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         }
         if user_id is not None:
             run_kwargs["user_id"] = user_id
+        current = productions.db.get_production(production_id, user_id)
+        if not current:
+            raise ValueError("创作任务不存在")
+        creative_keys = ("intent", "skeleton", "script_candidates")
+        if any(key in arguments for key in creative_keys):
+            productions.update_creative_context(
+                production_id,
+                intent=arguments.get("intent"),
+                skeleton=arguments.get("skeleton"),
+                script_candidates=arguments.get("script_candidates"),
+                user_id=user_id,
+            )
+        if current.get("status") == "awaiting_creative_context":
+            if not all(key in arguments for key in creative_keys):
+                raise ValueError("任务等待创意内容，请传入 intent、skeleton 和 3 个 script_candidates")
+            run_kwargs["resume_from"] = run_kwargs.get("resume_from") or "script"
         result = productions.run(production_id, **run_kwargs)
         return {
             "production": result,
-            "message": f"已交给 Production Agent 执行或恢复创作任务 {result['id']}，状态 {result['status']}",
+            "message": f"已执行或恢复后台创作任务 {result['id']}，状态 {result['status']}",
         }
 
     registry.register(
         ToolDefinition(
-            name="start_video_production",
-            title="开始视频创作",
+            name="prepare_video_production",
+            title="准备视频创作上下文",
             description=(
-                "Create and start a video production from a creative brief and a video_upload_id "
-                "from a video uploaded in the conversation. An allowed local source_path also works. "
-                "If this conversation already started a matching task, return that existing production "
-                "instead of creating a duplicate."
+                "Create a production, ingest and understand the reference video, retrieve reference "
+                "scripts, then return the complete creative context. Call this before generating intent "
+                "and script candidates."
             ),
             input_schema={
                 "type": "object",
@@ -419,7 +487,51 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 "required": ["brief"],
                 "additionalProperties": False,
             },
+            handler=prepare_video_production,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="start_video_production",
+            title="开始视频创作",
+            description=(
+                "Create and start a video production from a creative brief and a video_upload_id "
+                "from a video uploaded in the conversation. An allowed local source_path also works. "
+                "Generate intent, skeleton, and exactly three script candidates in the current Codex "
+                "conversation and pass them in the same call. "
+                "If this conversation already started a matching task, return that existing production "
+                "instead of creating a duplicate."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "brief": {"type": "string", "maxLength": 20000},
+                    "video_upload_id": {"type": "string", "maxLength": 80},
+                    "source_path": {"type": "string", "maxLength": 500},
+                    "conversation_id": {"type": "string", "maxLength": 80},
+                    "intent": {"type": "object"},
+                    "skeleton": {"type": "object"},
+                    "script_candidates": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {"type": "object"},
+                    },
+                    "replace_policy": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"type": "string"},
+                            "roles": {"type": "array", "items": {"type": "string"}},
+                            "segment_ids": {"type": "array", "items": {"type": "string"}},
+                            "time_ranges": {"type": "array"},
+                        },
+                    },
+                },
+                "required": ["brief", "intent", "skeleton", "script_candidates"],
+                "additionalProperties": False,
+            },
             handler=start_video_production,
+            model_visible=False,
         )
     )
     registry.register(
@@ -443,7 +555,9 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             name="run_video_production",
             title="重跑视频创作",
             description=(
-                "Hand an existing video production to the Production Agent to execute or resume. "
+                "Submit creative content and execute or resume an existing video production. "
+                "When the production is awaiting_creative_context, pass intent, skeleton, and exactly "
+                "three script candidates; resume_from defaults to script. "
                 "Optional resume_from (ingest|decompose|intent|script|generate) and replace_policy. "
                 "Does not run the Python PipelineEngine stage loop."
             ),
@@ -452,6 +566,14 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
                 "properties": {
                     "production_id": {"type": "string", "maxLength": 80},
                     "resume_from": {"type": "string", "maxLength": 20},
+                    "intent": {"type": "object"},
+                    "skeleton": {"type": "object"},
+                    "script_candidates": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {"type": "object"},
+                    },
                     "replace_policy": {
                         "type": "object",
                         "properties": {

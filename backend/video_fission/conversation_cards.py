@@ -91,6 +91,13 @@ def _stage_state(public: dict[str, Any], stage_id: str) -> str:
         if index == script_index:
             return "awaiting"
         return "pending"
+    if status == "awaiting_creative_context":
+        intent_index = _stage_index("intent")
+        if index < intent_index:
+            return "done"
+        if index == intent_index:
+            return "awaiting"
+        return "pending"
     if status in {"failed", "cancelled"}:
         if current_index < 0:
             return "pending"

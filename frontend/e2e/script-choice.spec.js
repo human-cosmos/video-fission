@@ -15,13 +15,6 @@ test("pauses after three script candidates, then continues once one is chosen", 
   await page.goto("/")
   await page.getByTestId("new-conversation").click()
   await expect(page.getByTestId("message-input")).toBeVisible()
-  // Wait until selectConversation finishes; it increments uploadGeneration
-  // and clears attachments, which otherwise races the reference upload.
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("video-fission.activeConversation")),
-    )
-    .toBeTruthy()
   await page.getByTestId("composer-video-upload").setInputFiles(fixture)
   await expect(page.getByTestId("composer-video-preview")).toBeVisible({ timeout: 30_000 })
   await page.getByTestId("message-input").fill("按原片风格做一条短视频")
@@ -55,6 +48,12 @@ test("pauses after three script candidates, then continues once one is chosen", 
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-player")).toBeVisible()
   await expect(page.getByTestId("video-script-selected")).toHaveText("已选用")
+  await expect
+    .poll(async () => {
+      const current = await request.get(`/api/productions/${productionId}`)
+      return (await current.json()).status
+    })
+    .toBe("completed")
 
   const finished = await request.get(`/api/productions/${productionId}`)
   expect(finished.ok()).toBeTruthy()

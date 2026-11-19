@@ -352,32 +352,50 @@ class CodexHub:
         title = self._fallback_title(text, files)
         self.db.update_conversation(conversation_id, {"title": title})
 
-    def _start_production_from_message(
+    def _start_e2e_production(
         self,
         conversation_id: str,
-        item: dict[str, Any],
         text: str,
         files: list[dict[str, Any]],
-        replace_policy: dict[str, Any] | None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        if not self.productions:
-            raise RuntimeUnavailable("视频创作管线尚未就绪")
-        existing = self.db.find_production_by_source_item(item["id"], user_id)
-        if existing:
-            return self.productions.public(existing["id"], user_id=user_id)
+        from .pipeline import local_script
+        from .script_flow import build_local_candidates
+
         video = next((file for file in files if file.get("kind") == "production_video"), None)
         if not video:
             raise ValueError("缺少创作参考视频")
-        policy = replace_policy if isinstance(replace_policy, dict) else {"mode": "brief"}
-        return self.productions.start_from_tool(
+        prepared = self.productions.start_from_tool(
             text,
             video_upload_id=str(video.get("id") or ""),
-            replace_policy=policy,
             conversation_id=conversation_id,
-            source_item_id=item["id"],
+            user_id=user_id,
+            prepare_only=True,
+        )
+        current = self.db.get_production(prepared["id"], user_id) or prepared
+        timeline = local_script(current)
+        candidates = build_local_candidates(current, timeline)
+        intent = {
+            "goal": text[:200],
+            "audience": "目标受众",
+            "promise": "用参考结构完成短视频",
+            "assumptions": ["E2E 使用确定性创意内容"],
+        }
+        first_shot = (timeline.get("shots") or [{}])[0]
+        skeleton = {
+            "one_liner": text[:120],
+            "hook": str(first_shot.get("voiceover") or "开场"),
+            "value": "展示核心卖点",
+            "cta": "完成行动引导",
+        }
+        self.productions.update_creative_context(
+            prepared["id"],
+            intent=intent,
+            skeleton=skeleton,
+            script_candidates=candidates,
             user_id=user_id,
         )
+        return self.productions.run(prepared["id"], resume_from="script", user_id=user_id)
 
     def _rerun_latest_from_brief(
         self,
@@ -428,16 +446,13 @@ class CodexHub:
         mentions = payload.get("mentions") or []
         latest_production = self._latest_production(conversation_id, row.get("user_id"))
 
-        # 视频 + 说明：同一请求内自动创建并启动 production，不依赖 Codex。
-        if production_videos and text:
-            item = self._append_user_message(conversation_id, text, files, mentions)
+        if production_videos and text and self.settings.e2e_fake_creative_context:
+            self._append_user_message(conversation_id, text, files, mentions)
             self._maybe_retitle(row, conversation_id, text, files)
-            production = self._start_production_from_message(
+            production = self._start_e2e_production(
                 conversation_id,
-                item,
                 text,
                 files,
-                replace_policy,
                 user_id=row.get("user_id"),
             )
             return {
@@ -498,7 +513,7 @@ class CodexHub:
                         "请查询 get_video_production，或按用户说明调用 run_video_production 重跑。]"
                     )
                 )
-            item = self._append_user_message(conversation_id, text, files, mentions)
+            self._append_user_message(conversation_id, text, files, mentions)
             updates: dict[str, Any] = {
                 "status": "running",
                 "turn_generation": generation,
@@ -885,6 +900,13 @@ class CodexHub:
         for index, file in enumerate(files, start=1):
             name = str(file.get("name") or f"附件 {index}")
             path = str(file.get("path") or "")
+            if file.get("kind") == "production_video":
+                lines.append(
+                    f"{index}. {name} — video_upload_id=`{file.get('id')}`"
+                    f"（{int(file.get('duration_ms') or 0)}ms，"
+                    f"{int(file.get('width') or 0)}x{int(file.get('height') or 0)}）"
+                )
+                continue
             if path:
                 lines.append(f"{index}. {name} — `{path}`")
         return "\n\n".join(lines)
@@ -955,7 +977,7 @@ class CodexHub:
 
     def _system_instructions(self, row: dict[str, Any]) -> str:
         user_instructions = str(row.get("developer_instructions") or "").strip()
-        tool_names = ", ".join(tool.name for tool in self.tools.all())
+        tool_names = ", ".join(tool.name for tool in self.tools.all() if tool.model_visible)
         return f"""你是 Video Fission 的智能中枢，一名擅长视频策划、内容拆解、脚本和制作组织的工作 Agent。
 
 工作原则：
@@ -969,6 +991,11 @@ class CodexHub:
   creative-intent-script-skeleton 收敛意图和骨架；用户已确认骨架时直接使用
   universal-ugc-video-script-generation 生成完整分镜。两个阶段都按需使用
   video-references，不得声称检索过实际未读取的参考脚本。
+- 当用户上传参考视频并提出创作要求时，先调用 prepare_video_production。该 Tool 会完成接入、
+  视频拆解、落地页提取和参考脚本检索，并返回 creative_context。必须基于返回的拆解与参考结果
+  生成 intent、skeleton 和恰好 3 个 script_candidates，然后调用 run_video_production，
+  传入 production_id 和创意内容，并设置 resume_from=script。不要再启动另一个 Codex 或
+  Production Agent 进程。
 - 文件附件可能是绝对路径；读取前先判断是否真的需要。
 - 用中文回答，代码、命令、路径和标识保持原样。
 
@@ -1281,6 +1308,11 @@ class CodexHub:
         namespace = str(params.get("namespace") or "").strip("/")
         if namespace and not name.startswith(f"{namespace}/"):
             name = f"{namespace}/{name}"
+        if not self.tools.is_model_visible(name):
+            return {
+                "success": False,
+                "contentItems": [{"type": "inputText", "text": f"Tool is not available to the conversation: {name}"}],
+            }
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         result = self.tools.execute(
             name,

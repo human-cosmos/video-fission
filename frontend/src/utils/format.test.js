@@ -54,6 +54,9 @@ describe('format helpers', () => {
   it('drops a redundant completed stage in history status', () => {
     expect(historyStatusText({ status: 'completed', current_stage: 'done' })).toBe('已完成')
     expect(historyStatusText({ status: 'running', current_stage: 'generate' })).toBe('进行中 · 生成')
+    expect(historyStatusText({ status: 'awaiting_creative_context', current_stage: 'intent' })).toBe(
+      '等待生成脚本',
+    )
     expect(historyStatusText({ status: 'awaiting_script_choice', current_stage: 'script' })).toBe('待选择脚本')
   })
 

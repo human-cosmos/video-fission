@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
 from tests.helpers import create_production, seed_clips_from_fixture, stub_candidates
 from video_fission.pipeline import PipelineEngine
-from video_fission.production_tools import FORBIDDEN_CLAIMS, ProductionToolError, contains_forbidden_claim
+from video_fission.production_tools import (
+    CAPABILITY_TOOLS,
+    FORBIDDEN_CLAIMS,
+    ProductionToolError,
+    contains_forbidden_claim,
+)
 
 
 def _execute(app_env, name: str, production_id: str, **arguments):
@@ -41,10 +47,16 @@ def test_each_capability_tool_is_registered(app_env):
         "burn_subtitles",
         "compose_timeline",
         "handle_production_followup",
+        "prepare_video_production",
         "start_video_production",
         "run_video_production",
     }
     assert expected <= names
+    model_visible = {spec["name"] for spec in app_env.tools.specs()}
+    assert "prepare_video_production" in model_visible
+    assert "run_video_production" in model_visible
+    assert "start_video_production" not in model_visible
+    assert not (set(CAPABILITY_TOOLS) & model_visible)
 
 
 def test_opening_is_locked_as_one_continuous_block(app_env):
@@ -173,8 +185,11 @@ def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):
         assert phrase not in str(separated)
     seed_clips_from_fixture(app_env, pid)
     composed = _payload(_execute(app_env, "compose_timeline", pid))
-    assert composed["status"] == "completed"
+    assert composed["status"] == "running"
     assert composed.get("video_path")
+    production = app_env.db.get_production(pid)
+    assert production["audio_separation"]["applied_to_output"] is True
+    assert Path(production["audio_separation"]["bgm_path"]).is_file()
     burned = _payload(_execute(app_env, "burn_subtitles", pid))
     assert burned.get("srt_path")
     assert burned.get("video_path")
@@ -184,12 +199,14 @@ def test_ffmpeg_separate_compose_and_burn_use_official_fixture(app_env):
         assert phrase not in str(burned)
     state = _payload(_execute(app_env, "get_production_state", pid))
     assert state["artifacts"]["video_path"]
-    progressed = _payload(_execute(app_env, "update_production_progress", pid, message="合成完成", current_stage="done"))
+    progressed = _payload(
+        _execute(app_env, "update_production_progress", pid, message="合成完成", current_stage="done")
+    )
     assert progressed["current_stage"] == "done"
 
 
 def test_pipeline_engine_run_is_no_longer_an_entry(app_env):
-    with pytest.raises(RuntimeError, match="Production Agent"):
+    with pytest.raises(RuntimeError, match="确定性执行器"):
         app_env.productions.engine.run("prd_unused")
 
 

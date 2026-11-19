@@ -167,6 +167,46 @@ class ProductionService:
         self.sync_conversation_cards(production_id)
         return public
 
+    def update_creative_context(
+        self,
+        production_id: str,
+        *,
+        intent: dict[str, Any] | None = None,
+        skeleton: dict[str, Any] | None = None,
+        script_candidates: list[dict[str, Any]] | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production.get("status") == "running":
+            raise ProductionConflict("任务正在运行")
+        updates: dict[str, Any] = {}
+        if intent is not None:
+            if not isinstance(intent, dict):
+                raise ValueError("intent 必须是对象")
+            updates["intent"] = intent
+        if skeleton is not None:
+            if not isinstance(skeleton, dict):
+                raise ValueError("skeleton 必须是对象")
+            updates["skeleton"] = skeleton
+        if script_candidates is not None:
+            if not isinstance(script_candidates, list) or len(script_candidates) != 3:
+                raise ValueError("script_candidates 必须恰好包含 3 个脚本")
+            ids = [
+                str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+                for item in script_candidates
+            ]
+            if any(not item_id for item_id in ids) or len(set(ids)) != 3:
+                raise ValueError("3 个脚本候选必须有互不相同的 id")
+            updates["script_candidates"] = script_candidates
+            updates["selected_script_id"] = None
+        if not updates:
+            return self.public(production_id, user_id=user_id)
+        self.db.update_production(production_id, updates)
+        self.sync_conversation_cards(production_id)
+        return self.public(production_id, user_id=user_id)
+
     def patch(
         self,
         production_id: str,
@@ -250,6 +290,36 @@ class ProductionService:
 
     def public(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
         return self.get(production_id, user_id=user_id)
+
+    def prepare(
+        self,
+        production_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        production = self.db.get_production(production_id, user_id)
+        if not production:
+            raise ProductionNotFound("创作任务不存在")
+        if production.get("status") == "running":
+            raise ProductionConflict("任务正在运行")
+        self.db.update_production(
+            production_id,
+            {"status": "running", "current_stage": "ingest", "error": None},
+        )
+        self.sync_conversation_cards(production_id)
+        cancel = threading.Event()
+        with self._lock:
+            self._cancels[production_id] = cancel
+        try:
+            logger.info("production.prepare_started")
+            self._orchestrator().run(production_id, cancel, prepare_only=True)
+        except Exception:
+            logger.exception("production.prepare_failed")
+            raise
+        finally:
+            with self._lock:
+                self._cancels.pop(production_id, None)
+            self.sync_conversation_cards(production_id)
+        return self.public(production_id, user_id=user_id)
 
     def run(
         self,
@@ -461,6 +531,10 @@ class ProductionService:
         conversation_id: str | None = None,
         source_item_id: str | None = None,
         user_id: str | None = None,
+        intent: dict[str, Any] | None = None,
+        skeleton: dict[str, Any] | None = None,
+        script_candidates: list[dict[str, Any]] | None = None,
+        prepare_only: bool = False,
     ) -> dict[str, Any]:
         if not video_upload_id and source_path:
             video_upload_id = self._register_existing_path(source_path, user_id)
@@ -490,6 +564,15 @@ class ProductionService:
             source_item_id=source_item_id,
             user_id=user_id,
         )
+        self.update_creative_context(
+            production["id"],
+            intent=intent,
+            skeleton=skeleton,
+            script_candidates=script_candidates,
+            user_id=user_id,
+        )
+        if prepare_only:
+            return self.prepare(production["id"], user_id=user_id)
         return self.run(production["id"], user_id=user_id)
 
     def upload_media_path(
@@ -635,7 +718,7 @@ class ProductionService:
     def _orchestrator(self):
         agent = getattr(self, "agent", None)
         if agent is None:
-            raise RuntimeError("Production Agent 尚未就绪，无法编排出片")
+            raise RuntimeError("后台创作执行器尚未就绪，无法出片")
         return agent
 
     def _run_thread(self, production_id: str, cancel: threading.Event, resume_from: str | None = None) -> None:

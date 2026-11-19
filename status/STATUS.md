@@ -1,5 +1,8 @@
 # 状态：Codex Agent 编排出片（已收口）
 
+- 最新架构：2026-11-19 单 Codex 编排改造已完成。当前对话生成 `intent` / `skeleton` / 3 个 `script_candidates`，`ProductionAgent` 改为后台确定性执行器，不再实例化 `CodexAppServer` 或启动第二个 Codex 子进程。
+- 最新验证：完整后端 `uv run pytest -q` 为 `22 passed, 2 skipped`；生产主流程和脚本三选一 Playwright 均通过；前端 `45 passed` 且生产构建成功；相关 Ruff 检查通过。
+- 风险修复（2026-11-19 晚）：新增 `prepare_video_production` 两阶段上下文链路；`separate_audio` 的参考 BGM 已实际混入最终音轨；删除 `VideoScriptAgent`、`_stage_intent` 和 `_stage_script` 历史路径；新增 opt-in 真实 Gemini/Seedance 探活和 5174 浏览器冒烟测试。
 - 更新时间：2026-11-19 11:11 Asia/Shanghai
 - 任务书：`docs/TASKS-CODEX-AGENT-ORCHESTRATION.md`（已锁定）
 - 基线：`725ecc9`，未 git 提交，未改本机仓库，未配置 Key，未启动或重启 8000 / 5174，未碰 5173

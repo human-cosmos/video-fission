@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-import copy
 import logging
 import re
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
 from . import media, providers
 from .config import Settings
 from .db import Database
-from .logging_utils import clip_text, file_summary, log_context, safe_url
+from .logging_utils import clip_text, file_summary, safe_url
 from .paths import production_artifact_dir
 from .references import ReferenceLibrary
-from .replace import apply_replace_plan, resolve_replace_plan, strip_rewrite_instructions
+from .replace import apply_replace_plan, strip_rewrite_instructions
 from .settings_store import SettingsStore
-from .script_agent import ScriptAgentError
 from .understand.opening import opening_block_generate
 
 logger = logging.getLogger(__name__)
@@ -35,7 +32,6 @@ class PipelineEngine:
         self.db = db
         self.store = store
         self.library = ReferenceLibrary(settings.project_root)
-        self.script_agent = None
 
     def artifact_dir(self, production_id: str) -> Path:
         production = self.db.get_production(production_id)
@@ -70,7 +66,7 @@ class PipelineEngine:
         resume_from: str | None = None,
     ) -> dict[str, Any]:
         raise RuntimeError(
-            "出片编排已改由 Production Agent 负责，PipelineEngine 阶段循环不再作为执行入口"
+            "出片已改由后台确定性执行器负责，PipelineEngine 阶段循环不再作为执行入口"
         )
 
     def _stage_ingest(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
@@ -176,279 +172,6 @@ class PipelineEngine:
             "model": mm.get("model") or "",
             "segments": cleaned,
         }
-
-    def _stage_intent(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
-        self._prepare_landing(production_id, warnings)
-        production = self._get(production_id)
-        decomposition = production.get("decomposition") or {}
-        segments = decomposition.get("segments") or []
-        plan = resolve_replace_plan(
-            production.get("replace_policy"),
-            segments,
-            production.get("brief") or "",
-            opening=decomposition.get("opening"),
-        )
-        logger.info(
-            "pipeline.intent_plan mode=%s resolved_segments=%s reasons=%s",
-            (plan.get("policy") or {}).get("mode") or "-",
-            len(plan.get("resolved_segment_ids") or []),
-            len(plan.get("reasons") or []),
-        )
-        self.db.update_production(production_id, {"replace_plan": plan})
-        production = self._get(production_id)
-        refs = self.library.retrieve(production["brief"])
-        logger.info("pipeline.intent_references count=%s", len(refs))
-        for item in refs:
-            path = self.settings.project_root / item["path"]
-            if not path.is_file():
-                raise ValueError(f"参考文件不存在: {item['path']}")
-        if self.script_agent is not None:
-            try:
-                production_for_agent = {
-                    **production,
-                    "_artifact_dir": str(self.artifact_dir(production_id)),
-                }
-                data = self.script_agent.generate_intent(
-                    production_for_agent,
-                    refs,
-                    cancel=cancel,
-                )
-                intent, skeleton = self._validate_agent_intent(data)
-            except Exception as exc:
-                if cancel.is_set():
-                    raise PipelineCancelled("任务已取消") from exc
-                if self.settings.allow_local_copy_fallback:
-                    warnings.append(f"测试兼容模式：脚本 Agent 失败，回退本地规划器：{exc.__class__.__name__}")
-                    intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
-                    logger.warning("pipeline.intent_agent_failed test_fallback=local", exc_info=True)
-                else:
-                    logger.exception("pipeline.intent_agent_failed")
-                    raise ScriptAgentError(f"Agent 意图生成失败：{str(exc)[:500]}") from exc
-        elif self.settings.allow_local_copy_fallback:
-            warnings.append("测试兼容模式：intent 使用本地文案规划器")
-            intent, skeleton = local_intent(production["brief"], production.get("decomposition") or {}, refs)
-        else:
-            raise ScriptAgentError("intent 必须由 Codex Agent 使用项目 Skills 生成")
-        # Strip excerpts before persisting references (contract only has path/why)
-        intent["references"] = [{"path": item["path"], "why": item["why"]} for item in refs]
-        logger.info(
-            "pipeline.intent_completed goal_chars=%s audience_chars=%s promise_chars=%s skeleton_chars=%s",
-            len(str(intent.get("goal") or "")),
-            len(str(intent.get("audience") or "")),
-            len(str(intent.get("promise") or "")),
-            len(str(skeleton)),
-        )
-        self.db.update_production(production_id, {"intent": intent, "skeleton": skeleton, "warnings": warnings})
-
-    @staticmethod
-    def _validate_agent_intent(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        intent = data.get("intent") or {}
-        skeleton = data.get("skeleton") or {}
-        required_intent = {
-            "goal": str(intent.get("goal") or "").strip(),
-            "audience": str(intent.get("audience") or "").strip(),
-            "promise": str(intent.get("promise") or "").strip(),
-        }
-        missing = [key for key, value in required_intent.items() if not value]
-        assumptions = [str(item).strip() for item in (intent.get("assumptions") or []) if str(item).strip()]
-        if not assumptions:
-            missing.append("assumptions")
-        required_skeleton = {
-            key: str(skeleton.get(key) or "").strip()
-            for key in ("one_liner", "hook", "value", "cta")
-        }
-        missing.extend(
-            [f"skeleton.{key}" for key, value in required_skeleton.items() if not value]
-        )
-        if missing:
-            raise ScriptAgentError(f"Agent 意图字段不完整：{', '.join(missing)}")
-        merged_intent = {**required_intent, "assumptions": assumptions}
-        merged_skeleton = required_skeleton
-        logger.info(
-            "agent.intent_completed goal_chars=%s promise_chars=%s assumptions=%s",
-            len(merged_intent["goal"]),
-            len(merged_intent["promise"]),
-            len(merged_intent["assumptions"]),
-        )
-        return merged_intent, merged_skeleton
-
-    def _stage_script(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
-        from .script_flow import build_local_candidates, lock_script_to_timeline
-
-        self._prepare_landing(production_id, warnings)
-        production = self._get(production_id)
-        refs = (production.get("intent") or {}).get("references") or []
-        full_texts: list[str] = []
-        for item in refs[: max(3, len(refs))]:
-            try:
-                full_texts.append(self.library.read_full(item["path"])[:8000])
-            except Exception:
-                continue
-        if len(full_texts) < 3 and refs:
-            extra = self.library.retrieve(production["brief"])
-            for item in extra:
-                if len(full_texts) >= 3:
-                    break
-                try:
-                    full_texts.append(self.library.read_full(item["path"])[:8000])
-                except Exception:
-                    continue
-        if len(full_texts) < 3:
-            warnings.append("完整参考脚本不足 3 篇，已尽可能读取现有参考")
-            self._emit(production_id, "warning", {"stage": "script", "message": warnings[-1]})
-        logger.info(
-            "pipeline.script_inputs references=%s full_texts=%s reference_chars=%s",
-            len(refs),
-            len(full_texts),
-            sum(len(text) for text in full_texts),
-        )
-        timeline = local_script(production)
-        if self.script_agent is not None:
-            try:
-                production_for_agent = {
-                    **production,
-                    "_artifact_dir": str(self.artifact_dir(production_id)),
-                }
-                data = self.script_agent.generate_script_candidates(
-                    production_for_agent,
-                    timeline,
-                    [item.get("path") or "" for item in refs],
-                    cancel=cancel,
-                )
-                candidates = self._normalize_agent_candidates(data, timeline)
-            except Exception as exc:
-                if cancel.is_set():
-                    raise PipelineCancelled("任务已取消") from exc
-                if self.settings.allow_local_copy_fallback:
-                    warnings.append(f"测试兼容模式：脚本 Agent 失败，回退本地规划器：{exc.__class__.__name__}")
-                    candidates = build_local_candidates(production, timeline)
-                    logger.warning("pipeline.script_agent_failed test_fallback=local", exc_info=True)
-                else:
-                    logger.exception("pipeline.script_agent_failed")
-                    raise ScriptAgentError(f"Agent 分镜生成失败：{str(exc)[:500]}") from exc
-        elif self.settings.allow_local_copy_fallback:
-            warnings.append("测试兼容模式：script 使用本地文案规划器")
-            candidates = build_local_candidates(production, timeline)
-        else:
-            raise ScriptAgentError("script 必须由 Codex Agent 使用项目 Skills 生成")
-        for item in candidates:
-            locked = lock_script_to_timeline(
-                item.get("script") or timeline,
-                timeline,
-                strict=not self.settings.allow_local_copy_fallback,
-            )
-            item["script"] = apply_replace_plan(locked, production)
-        display = (candidates[0]["script"] if candidates else timeline)
-        logger.info(
-            "pipeline.script_completed candidates=%s shots=%s display_duration_ms=%s",
-            len(candidates),
-            len(display.get("shots") or []),
-            display.get("total_duration_ms"),
-        )
-        self.db.update_production(
-            production_id,
-            {
-                "script": display,
-                "script_candidates": candidates,
-                "selected_script_id": None,
-                "warnings": warnings,
-                "status": "awaiting_script_choice",
-                "current_stage": "script",
-                "error": None,
-            },
-        )
-
-    def _normalize_agent_candidates(
-        self,
-        data: dict[str, Any],
-        timeline: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        from .script_flow import CANDIDATE_SPECS
-
-        incoming = data.get("candidates") or data.get("scripts") or []
-        if not isinstance(incoming, list) or len(incoming) < len(CANDIDATE_SPECS):
-            raise ScriptAgentError(f"Agent 必须返回 {len(CANDIDATE_SPECS)} 个候选")
-        merged = []
-        for index, spec in enumerate(CANDIDATE_SPECS):
-            source = incoming[index]
-            if not isinstance(source, dict):
-                raise ScriptAgentError(f"第 {index + 1} 个候选不是对象")
-            merged.append(
-                {
-                    "id": spec["id"],
-                    "title": self._required_agent_text(source.get("title"), f"candidates[{index}].title"),
-                    "angle": self._required_agent_text(source.get("angle"), f"candidates[{index}].angle"),
-                    "script": self._agent_candidate_script(
-                        source.get("script") or source,
-                        timeline,
-                        index,
-                    ),
-                }
-            )
-        logger.info(
-            "agent.script_candidates_completed raw_candidates=%s candidates=%s",
-            len(incoming),
-            len(merged),
-        )
-        return merged
-
-    @staticmethod
-    def _required_agent_text(value: Any, field: str) -> str:
-        text = strip_duration_phrase(str(value or "")).strip()
-        if not text or _is_template_copy(text):
-            raise ScriptAgentError(f"Agent 字段缺失或仍是模板：{field}")
-        return text
-
-    def _agent_candidate_script(
-        self,
-        source: Any,
-        timeline: dict[str, Any],
-        candidate_index: int,
-    ) -> dict[str, Any]:
-        if not isinstance(source, dict):
-            raise ScriptAgentError(f"第 {candidate_index + 1} 个候选的 script 不是对象")
-        incoming = source.get("shots")
-        timeline_shots = timeline.get("shots") or []
-        if not isinstance(incoming, list) or len(incoming) < len(timeline_shots):
-            raise ScriptAgentError(
-                f"第 {candidate_index + 1} 个 Agent 候选镜头数不足：需要 {len(timeline_shots)}，"
-                f"实际 {len(incoming) if isinstance(incoming, list) else 0}"
-            )
-        by_id = {
-            str(item.get("id") or ""): item
-            for item in incoming
-            if isinstance(item, dict) and item.get("id")
-        }
-        locked = copy.deepcopy(timeline)
-        for index, shot in enumerate(locked.get("shots") or []):
-            item = by_id.get(str(shot.get("id") or "")) or incoming[index]
-            if not isinstance(item, dict):
-                raise ScriptAgentError(f"第 {candidate_index + 1} 个候选镜头 {index + 1} 无效")
-            field_base = f"candidates[{candidate_index}].shots[{index}]"
-            visual = self._required_agent_text(item.get("visual"), f"{field_base}.visual")
-            role = str(shot.get("role") or "other")
-            voiceover = strip_duration_phrase(str(item.get("voiceover") or "")).strip()
-            on_screen_text = strip_duration_phrase(str(item.get("on_screen_text") or "")).strip()
-            if role != "other":
-                if not voiceover or _is_template_copy(voiceover):
-                    raise ScriptAgentError(f"Agent 口播缺失或仍是模板：{field_base}.voiceover")
-                if not on_screen_text or on_screen_text.lower() in _GENERIC_ON_SCREEN:
-                    raise ScriptAgentError(f"Agent 花字缺失或仍是模板：{field_base}.on_screen_text")
-            prompt = str(item.get("prompt") or "").strip()
-            if shot.get("action") == "generate" and not prompt:
-                raise ScriptAgentError(f"生成镜头缺少视频 prompt：{field_base}.prompt")
-            shot["visual"] = visual
-            shot["voiceover"] = voiceover if role != "other" else ""
-            shot["on_screen_text"] = on_screen_text if role != "other" else ""
-            shot["prompt"] = prompt if shot.get("action") == "generate" else ""
-        locked["total_duration_ms"] = sum(int(shot["duration_ms"]) for shot in locked["shots"])
-        audio_plan = source.get("audio_plan")
-        locked["audio_plan"] = {
-            "voiceover_language": str((audio_plan or {}).get("voiceover_language") or "zh"),
-            "bgm": "model_generated",
-            "subtitles": False,
-        }
-        return locked
 
     def _stage_generate(self, production_id: str, cancel: threading.Event, warnings: list[str]) -> None:
         production = self._get(production_id)
@@ -691,6 +414,29 @@ class PipelineEngine:
         media.concat_clips(faded, concat_path)
         current = concat_path
         logger.info("compose.concat_completed clips=%s output=%s", len(faded), file_summary(concat_path))
+        audio_separation = dict(production.get("audio_separation") or {})
+        bgm_path = Path(str(audio_separation.get("bgm_path") or ""))
+        if audio_separation.get("usable") and bgm_path.is_file():
+            bgm_volume = min(max(float(audio_separation.get("bgm_volume") or 0.12), 0.0), 1.0)
+            mixed_path = art / "with-bgm.mp4"
+            try:
+                media.mix_bgm(current, bgm_path, mixed_path, bgm_volume, total_ms)
+                current = mixed_path
+                audio_separation["applied_to_output"] = True
+                audio_separation["applied_volume"] = bgm_volume
+                self._emit(
+                    production_id,
+                    "audio_mix",
+                    {"source": "separated_bgm", "volume": bgm_volume, "path": str(mixed_path)},
+                )
+            except Exception as exc:
+                warnings.append(f"参考 BGM 混入失败，保留镜头原音：{exc.__class__.__name__}")
+                audio_separation["applied_to_output"] = False
+                self._emit(production_id, "warning", {"stage": "compose", "message": warnings[-1]})
+            self.db.update_production(production_id, {"audio_separation": audio_separation})
+        elif audio_separation:
+            audio_separation["applied_to_output"] = False
+            self.db.update_production(production_id, {"audio_separation": audio_separation})
         self._emit(
             production_id,
             "stage_completed",

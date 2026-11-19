@@ -62,6 +62,7 @@ test("runs a production inside a conversation, then regenerates a selected segme
       video_generator: {
         provider: "generic_http",
         base_url: "http://127.0.0.1:8002",
+        api_key: "e2e-video-key",
         model: "e2e-video",
         resolution: "480p",
         timeout_seconds: 120,
@@ -98,6 +99,12 @@ test("runs a production inside a conversation, then regenerates a selected segme
   await expect(page.getByTestId("video-production-step-compose")).toContainText("成片文件")
 
   const productionId = (await page.getByTestId("video-production-id").innerText()).trim()
+  await expect
+    .poll(async () => {
+      const current = await request.get(`/api/productions/${productionId}`)
+      return (await current.json()).status
+    })
+    .toBe("completed")
   const detail = await request.get(`/api/productions/${productionId}`)
   expect(detail.ok()).toBeTruthy()
   const production = await detail.json()

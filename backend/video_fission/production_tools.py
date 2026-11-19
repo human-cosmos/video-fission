@@ -1,4 +1,4 @@
-"""Fine-grained production tools for the task-level Production Agent."""
+"""Fine-grained production tools for the deterministic backend runner."""
 
 from __future__ import annotations
 
@@ -315,7 +315,10 @@ class ProductionToolHost:
             "warnings": production.get("warnings") or [],
             "selected_script_id": production.get("selected_script_id"),
             "script_candidate_ids": [item.get("id") for item in (production.get("script_candidates") or [])],
-            "opening": ((production.get("decomposition") or {}).get("opening") or (production.get("script") or {}).get("opening")),
+            "opening": (
+                (production.get("decomposition") or {}).get("opening")
+                or (production.get("script") or {}).get("opening")
+            ),
             "artifacts": {
                 "video_path": output.get("video_path"),
                 "srt_path": output.get("srt_path"),
@@ -390,6 +393,8 @@ class ProductionToolHost:
             raise ProductionToolError("参考视频不存在，无法分离音频")
         dest = self.engine.artifact_dir(production_id)
         result = separate_reference_audio(source, dest)
+        result["bgm_volume"] = 0.12
+        result["applied_to_output"] = False
         method = str(result.get("method") or "")
         if method in {"placeholder", "local_ms"}:
             result["note"] = "这是本地或占位分离，不是已确认的模型分轨结果。"
@@ -443,11 +448,16 @@ class ProductionToolHost:
         output = production.get("output") or {}
         self.db.update_production(
             production_id,
-            {"status": "completed", "current_stage": "done", "error": None, "warnings": production.get("warnings") or warnings},
+            {
+                "status": "running",
+                "current_stage": "compose",
+                "error": None,
+                "warnings": production.get("warnings") or warnings,
+            },
         )
         result = {
             "production_id": production_id,
-            "status": "completed",
+            "status": "running",
             "video_path": output.get("video_path"),
             "video_url": output.get("video_url") or self.engine.artifact_url(production_id, "final.mp4"),
         }
@@ -458,8 +468,14 @@ class ProductionToolHost:
         production_id = self._pid(arguments, context)
         production = self._production(production_id)
         text = str(arguments.get("text") or arguments.get("brief") or production.get("brief") or "")
-        if _VAGUE_FOLLOWUP_RE.search(text) and not parse_script_selection(text, production.get("script_candidates") or []):
-            self.engine._emit(production_id, "clarification.requested", {"message": "请补充想改的文案、节奏或画面", "production_id": production_id})
+        vague = _VAGUE_FOLLOWUP_RE.search(text)
+        selected = parse_script_selection(text, production.get("script_candidates") or [])
+        if vague and not selected:
+            self.engine._emit(
+                production_id,
+                "clarification.requested",
+                {"message": "请补充想改的文案、节奏或画面", "production_id": production_id},
+            )
             return {
                 "action": "clarify",
                 "production_id": production_id,
@@ -498,19 +514,40 @@ class ProductionToolHost:
 
 def register_production_tools(registry: ToolRegistry, host: ProductionToolHost) -> None:
     specs = {
-        "ingest_reference_video": ("接入参考视频", "Copy and probe the reference video into the production artifact directory."),
-        "understand_reference_video": ("理解并切分参考视频", "Decompose the reference video and finalize the opening block. Missing keys degrade honestly."),
-        "extract_landing_points": ("提取落地页卖点", "Extract landing-page selling points when a URL or pasted body is present."),
+        "ingest_reference_video": (
+            "接入参考视频",
+            "Copy and probe the reference video into the production artifact directory.",
+        ),
+        "understand_reference_video": (
+            "理解并切分参考视频",
+            "Decompose the reference video and finalize the opening block. Missing keys degrade honestly.",
+        ),
+        "extract_landing_points": (
+            "提取落地页卖点",
+            "Extract landing-page selling points when a URL or pasted body is present.",
+        ),
         "search_video_references": ("检索参考脚本", "Retrieve video-references for this production brief."),
-        "lock_timeline_opening": ("锁定时间轴和开场连续块", "Lock the shared timeline and the continuous shot_opening block."),
-        "write_intent_and_scripts": ("写入意图与三脚本候选", "Persist intent, skeleton, and exactly three script candidates, then pause for selection."),
+        "lock_timeline_opening": (
+            "锁定时间轴和开场连续块",
+            "Lock the shared timeline and the continuous shot_opening block.",
+        ),
+        "write_intent_and_scripts": (
+            "写入意图与三脚本候选",
+            "Persist intent, skeleton, and exactly three script candidates, then pause for selection.",
+        ),
         "get_production_state": ("查询任务状态与产物", "Read production status, selected script, and artifact paths."),
         "update_production_progress": ("更新任务进度", "Write progress, status, or a short progress message."),
-        "generate_video_shots": ("生成视频镜头", "Generate selected-script shots via Seedance / OpenAI Compatible / Generic HTTP only."),
+        "generate_video_shots": (
+            "生成视频镜头",
+            "Generate selected-script shots via Seedance / OpenAI Compatible / Generic HTTP only.",
+        ),
         "separate_audio": ("分离参考音频", "Split reference audio into vocals and BGM."),
         "burn_subtitles": ("硬烧字幕", "Burn subtitles onto the current final video."),
         "compose_timeline": ("合成时间线", "Concatenate generated or reused clips into final.mp4 with FFmpeg."),
-        "handle_production_followup": ("处理同一任务追问", "Classify and apply a follow-up on the same production: clarify, select, or resume."),
+        "handle_production_followup": (
+            "处理同一任务追问",
+            "Classify and apply a follow-up on the same production: clarify, select, or resume.",
+        ),
     }
     handlers = {name: getattr(host, name) for name in CAPABILITY_TOOLS}
     for name, (title, description) in specs.items():
@@ -550,5 +587,6 @@ def register_production_tools(registry: ToolRegistry, host: ProductionToolHost) 
                     "additionalProperties": True,
                 },
                 handler=handlers[name],
+                model_visible=False,
             )
         )

@@ -1,30 +1,20 @@
-"""Task-level Production Agent: plan, load skills, call tools, pause at checkpoints."""
+"""Deterministic production runner: plan locally, call tools, pause at checkpoints."""
 
 from __future__ import annotations
 
-import json
-import logging
 import threading
-import time
 from typing import Any, Protocol
 
-from .app_server import CodexAppServer, CodexAppServerError
 from .config import Settings
 from .db import Database
 from .logging_utils import clip_text
-from .paths import user_workspace
 from .production_tools import (
     CAPABILITY_TOOLS,
     FORBIDDEN_CLAIMS,
-    ProductionToolError,
     contains_forbidden_claim,
 )
-from .protocol import build_input, extract_item_id, flatten_text, text_delta
 from .skills import SkillManager
 from .tools import ToolRegistry
-from .understand.normalize import extract_json
-
-logger = logging.getLogger(__name__)
 
 ORCHESTRATION_SKILL = "production-orchestration"
 VIDEO_CREATIVE_SKILLS = (
@@ -33,16 +23,11 @@ VIDEO_CREATIVE_SKILLS = (
     "creative-intent-script-skeleton",
     "universal-ugc-video-script-generation",
 )
-CODEX_UNAVAILABLE = "Codex 不可用，无法编排出片。请检查 Codex CLI 是否已安装并配置。"
+CODEX_UNAVAILABLE = "Codex 不可用，无法生成新的创意脚本。"
 
 
 class ProductionAgentError(RuntimeError):
     pass
-
-
-def _prompt_context(context: dict[str, Any]) -> dict[str, Any]:
-    """Strip runtime-only handles before serializing the planner prompt."""
-    return {key: value for key, value in context.items() if key != "cancel"}
 
 
 class AgentRuntime(Protocol):
@@ -69,145 +54,60 @@ class FakeCodexRuntime:
         raise ProductionAgentError("测试运行时没有提供编排计划")
 
 
-class RealCodexRuntime:
-    def __init__(self, settings: Settings, db: Database, skills: SkillManager):
-        self.settings = settings
-        self.db = db
-        self.skills = skills
+class DeterministicPlanner:
+    """Build the production plan locally. Creative content comes from the conversation turn."""
 
     def is_available(self) -> bool:
-        return bool(self.settings.codex_bin)
+        return True
 
     def plan(self, context: dict[str, Any]) -> dict[str, Any]:
-        if not self.settings.codex_bin:
-            raise ProductionAgentError(CODEX_UNAVAILABLE)
         production = context.get("production") or {}
-        cwd = str(user_workspace(self.settings.workspace, production.get("user_id")).resolve())
-        conversation = self.db.get_conversation(
-            str(production.get("conversation_id") or ""),
-            production.get("user_id"),
-        ) or {}
-        done = threading.Event()
-        state: dict[str, Any] = {"error": "", "messages": {}}
-
-        def on_notification(method: str, params: dict[str, Any]) -> None:
-            if method == "item/agentMessage/delta":
-                item_id = extract_item_id(params) or "agent"
-                messages = state["messages"]
-                messages[item_id] = str(messages.get(item_id) or "") + text_delta(params)
-            elif method == "item/completed":
-                item = params.get("item") if isinstance(params.get("item"), dict) else params
-                if str(item.get("type") or "") == "agentMessage":
-                    item_id = extract_item_id(params) or "agent"
-                    text = flatten_text(item)
-                    if text:
-                        state["messages"][item_id] = text
-            elif method == "turn/completed":
-                turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-                if str(turn.get("status") or "completed") == "failed":
-                    state["error"] = flatten_text(turn) or "Agent turn failed"
-                done.set()
-            elif method == "error":
-                state["error"] = str(
-                    params.get("message") or (params.get("error") or {}).get("message") or "Agent runtime error"
-                )
-                done.set()
-
-        def on_server_request(message: dict[str, Any]) -> Any:
-            method = str(message.get("method") or "")
-            if method in {"item/skill/requestApproval", "skillApproval"}:
-                return {"decision": "acceptForSession"}
-            if method in {"item/commandExecution/requestApproval", "execCommandApproval"}:
-                return {"decision": "acceptForSession"}
-            if method in {"item/fileChange/requestApproval", "applyPatchApproval"}:
-                return {"decision": "decline"}
-            return {}
-
-        prompt = (
-            "请使用 skill://production-orchestration 编排这一条出片任务。"
-            "先给出计划，再说明要加载的 Skill 和要调用的 Tool。"
-            "只返回一个严格 JSON 对象，不要 Markdown。\n"
-            '结构：{"skills":["production-orchestration"],'
-            '"steps":[{"tool":"ingest_reference_video","arguments":{}}],'
-            '"intent":{},"skeleton":{},"script_candidates":[]}.\n'
-            "必须遵守开场连续块、三脚本暂停、未选定不得生成、诚实失败等不变量。\n"
-            "不要再启动另一个 Agent。\n"
-            f"上下文：{json.dumps(_prompt_context(context), ensure_ascii=False)}"
-        )
-        runtime = CodexAppServer(
-            self.settings.codex_bin,
-            cwd=cwd,
-            timeout_seconds=max(int(self.settings.script_agent_timeout_seconds), 60),
-            on_notification=on_notification,
-            on_server_request=on_server_request,
-            on_exit=lambda _runtime, detail: (state.update(error=f"Agent runtime exited: {detail}"), done.set()),
-        )
-        try:
-            runtime.start().initialize()
-            try:
-                runtime.set_skill_roots(self.skills.runtime_roots())
-            except Exception:
-                logger.warning("production_agent.skill_roots_unavailable", exc_info=True)
-            thread_result = runtime.start_thread(
-                {
-                    "cwd": cwd,
-                    "sandbox": "read-only",
-                    "approvalPolicy": "never",
-                    "ephemeral": True,
-                    "historyMode": "paginated",
-                    "model": conversation.get("model"),
-                    "developerInstructions": (
-                        "你是任务级视频出片编排 Agent。只为当前 production 制定计划并给出 Tool 调用，"
-                        "不要再拉起另一个 Agent，最终消息只能包含一个严格 JSON 对象。"
-                    ),
-                }
-            )
-            thread = thread_result.get("thread") or {}
-            thread_id = str(thread.get("id") or "")
-            if not thread_id:
-                raise ProductionAgentError("Production Agent 未返回 thread id")
-            mentions = [{"name": slug, "path": f"skill://{slug}"} for slug in VIDEO_CREATIVE_SKILLS]
-            turn_result = runtime.start_turn(
-                {
-                    "threadId": thread_id,
-                    "cwd": cwd,
-                    "input": build_input(prompt, mentions),
-                    "model": conversation.get("model"),
-                    "effort": conversation.get("reasoning_effort"),
-                    "approvalPolicy": "never",
-                    "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
-                    "clientUserMessageId": f"production-agent-{time.time_ns()}",
-                }
-            )
-            turn = turn_result.get("turn") or {}
-            if str(turn.get("status") or "") == "completed":
-                done.set()
-            deadline = time.monotonic() + max(int(self.settings.script_agent_timeout_seconds), 60)
-            cancel = context.get("cancel")
-            while not done.wait(0.25):
-                if isinstance(cancel, threading.Event) and cancel.is_set():
-                    try:
-                        if turn.get("id"):
-                            runtime.interrupt(thread_id, str(turn["id"]))
-                    finally:
-                        raise ProductionAgentError("任务已取消")
-                if time.monotonic() >= deadline:
-                    raise ProductionAgentError("Production Agent 规划超时")
-                if not runtime.running:
-                    raise ProductionAgentError(state.get("error") or "Agent 运行时已退出")
-            if state.get("error"):
-                raise ProductionAgentError(str(state["error"]))
-            raw_text = "\n".join(
-                str(text).strip() for text in state["messages"].values() if str(text).strip()
-            ).strip()
-            data = extract_json(raw_text)
-            if not isinstance(data, dict):
-                raise ProductionAgentError("Agent 未返回可解析的编排计划：" + clip_text(raw_text or "<empty>", 500))
-            return data
-        except CodexAppServerError as exc:
-            raise ProductionAgentError(f"Production Agent 运行失败：{exc}") from exc
-        finally:
-            runtime.close()
+        resume_from = str(context.get("resume_from") or "ingest")
+        if context.get("prepare_only"):
+            tools = [
+                "ingest_reference_video",
+                "understand_reference_video",
+                "extract_landing_points",
+                "search_video_references",
+            ]
+        elif resume_from == "generate":
+            tools = ["generate_video_shots", "separate_audio", "compose_timeline", "burn_subtitles"]
+        elif resume_from == "decompose":
+            tools = [
+                "understand_reference_video",
+                "extract_landing_points",
+                "search_video_references",
+                "lock_timeline_opening",
+                "write_intent_and_scripts",
+            ]
+        elif resume_from == "intent":
+            tools = [
+                "extract_landing_points",
+                "search_video_references",
+                "lock_timeline_opening",
+                "write_intent_and_scripts",
+            ]
+        elif resume_from == "script":
+            tools = [
+                "lock_timeline_opening",
+                "write_intent_and_scripts",
+            ]
+        else:
+            tools = [
+                "ingest_reference_video",
+                "understand_reference_video",
+                "extract_landing_points",
+                "search_video_references",
+                "lock_timeline_opening",
+                "write_intent_and_scripts",
+            ]
+        return {
+            "skills": list(VIDEO_CREATIVE_SKILLS),
+            "steps": [{"tool": name, "arguments": {}} for name in tools],
+            "intent": production.get("intent"),
+            "skeleton": production.get("skeleton"),
+            "script_candidates": production.get("script_candidates") or [],
+        }
 
 
 class ProductionAgent:
@@ -226,13 +126,14 @@ class ProductionAgent:
         self.skills = skills
         self.tools = tools
         self.engine = engine
-        self.runtime = runtime if runtime is not None else RealCodexRuntime(settings, db, skills)
+        self.runtime = runtime if runtime is not None else DeterministicPlanner()
 
     def run(
         self,
         production_id: str,
         cancel: threading.Event | None = None,
         resume_from: str | None = None,
+        prepare_only: bool = False,
     ) -> dict[str, Any]:
         cancel = cancel or threading.Event()
         production = self.db.get_production(production_id)
@@ -245,6 +146,7 @@ class ProductionAgent:
         context = {
             "production_id": production_id,
             "resume_from": resume_from,
+            "prepare_only": prepare_only,
             "brief": production.get("brief"),
             "status": production.get("status"),
             "selected_script_id": production.get("selected_script_id"),
@@ -257,6 +159,9 @@ class ProductionAgent:
                 "status": production.get("status"),
                 "current_stage": production.get("current_stage"),
                 "selected_script_id": production.get("selected_script_id"),
+                "intent": production.get("intent"),
+                "skeleton": production.get("skeleton"),
+                "script_candidates": production.get("script_candidates") or [],
             },
         }
         try:
@@ -265,14 +170,30 @@ class ProductionAgent:
             self._fail(production_id, str(exc))
             raise
         except Exception as exc:
-            message = f"Production Agent 规划失败：{exc}"
+            message = f"创作编排计划生成失败：{exc}"
             self._fail(production_id, message)
             raise ProductionAgentError(message) from exc
 
         skills = list(plan.get("skills") or [ORCHESTRATION_SKILL])
         steps = list(plan.get("steps") or [])
         trace = list(production.get("agent_trace") or [])
-        trace.append({"type": "plan", "skills": skills, "steps": [step.get("tool") for step in steps], "resume_from": resume_from})
+        needs_scripts = any(
+            str(step.get("tool") or step.get("name") or "") == "write_intent_and_scripts"
+            for step in steps
+        )
+        candidates = plan.get("script_candidates") or production.get("script_candidates") or []
+        if needs_scripts and len(candidates) != 3:
+            message = "缺少创意内容：请先在当前 Codex 对话中生成 intent、skeleton 和 3 个脚本候选。"
+            self._fail(production_id, message)
+            raise ProductionAgentError(message)
+        trace.append(
+            {
+                "type": "plan",
+                "skills": skills,
+                "steps": [step.get("tool") for step in steps],
+                "resume_from": resume_from,
+            }
+        )
         self._emit(production_id, "agent_plan", {"skills": skills, "steps": [step.get("tool") for step in steps]})
         for slug in skills:
             trace.append({"type": "skill", "name": slug})
@@ -293,12 +214,16 @@ class ProductionAgent:
             arguments = dict(raw_step.get("arguments") or {})
             arguments.setdefault("production_id", production_id)
             if name == "write_intent_and_scripts":
-                if plan.get("intent") and "intent" not in arguments:
-                    arguments["intent"] = plan["intent"]
-                if plan.get("skeleton") and "skeleton" not in arguments:
-                    arguments["skeleton"] = plan["skeleton"]
-                if plan.get("script_candidates") and "script_candidates" not in arguments:
-                    arguments["script_candidates"] = plan["script_candidates"]
+                current = self.db.get_production(production_id) or {}
+                intent = current.get("intent") or plan.get("intent")
+                skeleton = current.get("skeleton") or plan.get("skeleton")
+                candidates = plan.get("script_candidates") or current.get("script_candidates")
+                if intent and "intent" not in arguments:
+                    arguments["intent"] = intent
+                if skeleton and "skeleton" not in arguments:
+                    arguments["skeleton"] = skeleton
+                if candidates and "script_candidates" not in arguments:
+                    arguments["script_candidates"] = candidates
             if name in {"generate_video_shots", "compose_timeline", "burn_subtitles"}:
                 current = self.db.get_production(production_id) or {}
                 if not current.get("selected_script_id"):
@@ -309,7 +234,8 @@ class ProductionAgent:
                 message = f"未知工具：{name}"
                 self._fail(production_id, message)
                 raise ProductionAgentError(message)
-            self._emit(production_id, "tool_started", {"tool": name, "arguments": {k: v for k, v in arguments.items() if k != "script_candidates"}})
+            tool_arguments = {key: value for key, value in arguments.items() if key != "script_candidates"}
+            self._emit(production_id, "tool_started", {"tool": name, "arguments": tool_arguments})
             result = self.tools.execute(name, arguments, tool_context)
             text = _tool_text(result)
             if contains_forbidden_claim(text):
@@ -317,7 +243,11 @@ class ProductionAgent:
                 self._fail(production_id, message)
                 raise ProductionAgentError(message)
             success = bool(result.get("success"))
-            self._emit(production_id, "tool_completed", {"tool": name, "success": success, "text": clip_text(text, 800)})
+            self._emit(
+                production_id,
+                "tool_completed",
+                {"tool": name, "success": success, "text": clip_text(text, 800)},
+            )
             trace.append({"type": "tool", "name": name, "success": success})
             self._save_trace(production_id, trace)
             if not success:
@@ -334,10 +264,28 @@ class ProductionAgent:
         current = self.db.get_production(production_id)
         if not current:
             raise ProductionAgentError("创作任务在完成后丢失")
+        if prepare_only:
+            self.db.update_production(
+                production_id,
+                {
+                    "status": "awaiting_creative_context",
+                    "current_stage": "intent",
+                    "error": None,
+                },
+            )
+            self._emit(
+                production_id,
+                "awaiting_creative_context",
+                {"message": "参考视频拆解与脚本检索已完成，等待创意内容"},
+            )
+            return self.db.get_production(production_id) or current
         if current.get("status") == "running":
             # A plan that ends without compose should not pretend the film is done.
             if (current.get("output") or {}).get("video_path"):
-                self.db.update_production(production_id, {"status": "completed", "current_stage": "done", "error": None})
+                self.db.update_production(
+                    production_id,
+                    {"status": "completed", "current_stage": "done", "error": None},
+                )
                 self._emit(production_id, "completed", {"stage": "done"})
             else:
                 self.db.update_production(production_id, {"status": "failed", "error": "编排计划已结束但还没有成片"})

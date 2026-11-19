@@ -1,5 +1,7 @@
 # 任务书：Codex Agent 编排出片链路
 
+> 架构更新（2026-11-19）：本文件保留为历史任务合同。当前实现已改为单 Codex：当前对话生成创意内容，后台使用确定性执行器，不再启动独立 Production Codex 子进程。以 `docs/ARCHITECTURE.md` 为准。
+
 - 状态：已锁定
 - 锁定时间：2026-11-19 10:35 Asia/Shanghai
 - 基线提交：`725ecc9`（`chore: remove backend test suite`）

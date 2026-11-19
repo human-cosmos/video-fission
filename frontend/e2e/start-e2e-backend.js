@@ -29,6 +29,7 @@ const child = spawn(
     env: {
       ...process.env,
       VF_AUTH_REQUIRED: 'false',
+      VF_E2E_FAKE_CREATIVE_CONTEXT: '1',
       VF_DATA_DIR: dataDir,
       VF_LOG_FILE: '0',
       VF_GEMINI_API_URL: '',

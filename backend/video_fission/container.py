@@ -4,6 +4,7 @@ from .config import Settings
 from .config import settings as default_settings
 from .db import Database
 from .productions import ProductionService
+from .production_agent import ProductionAgent
 from .script_agent import VideoScriptAgent
 from .service import CodexHub
 from .settings_store import SettingsStore
@@ -39,6 +40,13 @@ def configure(runtime_settings: Settings | None = None) -> None:
     if not settings.allow_local_copy_fallback:
         productions.engine.script_agent = VideoScriptAgent(settings, db, skills)
     tools = build_registry(db, settings.workspace, settings.artifacts_dir, productions)
+    productions.agent = ProductionAgent(
+        settings,
+        db,
+        skills,
+        tools,
+        engine=productions.engine,
+    )
     hub = CodexHub(settings, db, skills, tools, productions=productions)
 
 

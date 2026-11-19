@@ -355,7 +355,7 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         )
         return {
             "production": result,
-            "message": f"已启动创作任务 {result['id']}，状态 {result['status']}",
+            "message": f"已交给 Production Agent 启动创作任务 {result['id']}，状态 {result['status']}",
         }
 
     def get_video_production(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -386,7 +386,7 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
         result = productions.run(production_id, **run_kwargs)
         return {
             "production": result,
-            "message": f"已重跑创作任务 {result['id']}，状态 {result['status']}",
+            "message": f"已交给 Production Agent 执行或恢复创作任务 {result['id']}，状态 {result['status']}",
         }
 
     registry.register(
@@ -443,9 +443,9 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             name="run_video_production",
             title="重跑视频创作",
             description=(
-                "Re-run an existing video production with the same POST /run body: "
-                "optional resume_from (ingest|decompose|intent|script|generate) and replace_policy. "
-                "Use this when the conversation already has a production_id and the user wants a follow-up."
+                "Hand an existing video production to the Production Agent to execute or resume. "
+                "Optional resume_from (ingest|decompose|intent|script|generate) and replace_policy. "
+                "Does not run the Python PipelineEngine stage loop."
             ),
             input_schema={
                 "type": "object",
@@ -468,4 +468,11 @@ def build_registry(db: Database, workspace: Path, artifacts_dir: Path, productio
             handler=run_video_production,
         )
     )
+    from .production_tools import ProductionToolHost, register_production_tools
+
+    host = getattr(productions, "tool_host", None)
+    if host is None:
+        host = ProductionToolHost(productions.engine)
+        productions.tool_host = host
+    register_production_tools(registry, host)
     return registry

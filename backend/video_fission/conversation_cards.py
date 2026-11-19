@@ -465,6 +465,7 @@ def progress_payload(
         "cancellable": status == "running",
         "stages": stages,
         "activity": activity[-120:],
+        "agent_trace": public.get("agent_trace") or [],
     }
 
 
@@ -512,7 +513,7 @@ def _media_duration_ms(public: dict[str, Any]) -> int:
 def plan_payload(public: dict[str, Any]) -> dict[str, Any] | None:
     if not any(
         public.get(key)
-        for key in ("intent", "skeleton", "script", "replace_plan", "script_candidates", "landing_page")
+        for key in ("intent", "skeleton", "script", "replace_plan", "script_candidates", "landing_page", "agent_trace")
     ):
         return None
     decomposition = public.get("decomposition") or {}
@@ -530,6 +531,7 @@ def plan_payload(public: dict[str, Any]) -> dict[str, Any] | None:
         "landing_page": public.get("landing_page"),
         "script_candidates": public.get("script_candidates") or [],
         "selected_script_id": public.get("selected_script_id"),
+        "agent_trace": public.get("agent_trace") or [],
     }
     if duration_ms > 0:
         payload["duration_ms"] = duration_ms

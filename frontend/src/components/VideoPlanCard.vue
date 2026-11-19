@@ -16,6 +16,7 @@ import {
   sharedPlanShots,
   voiceoverSummary,
 } from '../utils/planDisplay'
+import { agentPlanSkills, agentPlanTools, hasAgentTrace, latestAgentPlan, skillLabel, toolLabel } from '../utils/agentTraceDisplay'
 import VideoOpeningRange from './VideoOpeningRange.vue'
 
 const props = defineProps({
@@ -42,6 +43,10 @@ const canRescript = computed(() => shouldOfferRegenerateScripts(props.payload))
 const canRegenVideo = computed(() => shouldOfferRegenerateVideo(props.payload))
 const busy = computed(() => props.selecting || props.rerunning)
 const productionId = computed(() => props.payload?.production_id || '')
+const showAgentPlan = computed(() => hasAgentTrace(props.payload))
+const agentPlan = computed(() => latestAgentPlan(props.payload))
+const planSkills = computed(() => agentPlanSkills(agentPlan.value).map((name) => ({ name, label: skillLabel(name) })))
+const planTools = computed(() => agentPlanTools(agentPlan.value).map((name) => ({ name, label: toolLabel(name) })))
 
 function shotDuration(shot) {
   const explicit = Number(shot?.duration_ms)
@@ -71,6 +76,22 @@ function regenVideo() {
 <template>
   <section class="video-card studio-card" data-testid="video-plan-card">
     <h3>任务规划</h3>
+    <section v-if="showAgentPlan" class="agent-trace" data-testid="video-plan-agent-trace">
+      <header class="agent-trace-head">
+        <strong>编排计划</strong>
+        <span v-if="planTools.length">{{ planTools.length }} 个工具步骤</span>
+      </header>
+      <p v-if="planSkills.length" class="agent-trace-skills" data-testid="video-plan-agent-skills">
+        Skill：{{ planSkills.map((item) => item.label).join('、') }}
+      </p>
+      <ol v-if="planTools.length" class="agent-trace-list" data-testid="video-plan-agent-steps">
+        <li v-for="(step, index) in planTools" :key="`${step.name}-${index}`">
+          <span>{{ index + 1 }}</span>
+          <strong>{{ step.label }}</strong>
+          <code>{{ step.name }}</code>
+        </li>
+      </ol>
+    </section>
     <section
       v-if="landingVisible"
       class="landing-summary"

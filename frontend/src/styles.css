@@ -4614,6 +4614,74 @@ a.button.primary {
   font-weight: 600;
 }
 
+.agent-trace {
+  margin: 0.8rem 0 0.4rem;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink, #111) 3%, transparent);
+}
+
+.agent-trace-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.agent-trace-head span,
+.agent-trace-skills {
+  margin: 0 0 8px;
+  color: var(--ink-muted, #6b7280);
+  font-size: 12px;
+}
+
+.agent-trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-trace-list li,
+.agent-trace-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.agent-trace-kind,
+.agent-trace-list li > span:first-child {
+  min-width: 1.5rem;
+  color: var(--ink-muted, #6b7280);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.agent-trace-item code,
+.agent-trace-list code {
+  color: var(--ink-muted, #6b7280);
+  font-size: 11px;
+}
+
+.agent-trace-item small,
+.agent-trace-item em {
+  color: var(--ink-muted, #6b7280);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.agent-trace-item.is-failed em {
+  color: #b45309;
+  font-weight: 600;
+}
+
 /* Selection-assistant visual language for the creative workspace.
    The layout follows the source page; the content stays specific to video. */
 .app-shell.mode-chat {
@@ -5459,6 +5527,7 @@ a.button.primary {
 .app-shell.mode-chat .landing-summary,
 .app-shell.mode-chat .opening-block,
 .app-shell.mode-chat .script-candidate,
+.app-shell.mode-chat .agent-trace,
 .app-shell.mode-chat .dropzone {
   background: #f8fafc;
   border-color: var(--line);

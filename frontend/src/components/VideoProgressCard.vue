@@ -2,6 +2,12 @@
 import { Check, ChevronRight, LoaderCircle, X } from '@lucide/vue'
 import { computed } from 'vue'
 import { STAGE_LABELS, STAGE_ORDER, STATUS_LABELS } from '../utils/format'
+import {
+  agentTraceItems,
+  agentTraceSummary,
+  currentAgentActionText,
+  hasAgentTrace,
+} from '../utils/agentTraceDisplay'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
@@ -55,8 +61,16 @@ const allStagesDone = computed(
     pipelineStages.value.length > 0 &&
     pipelineStages.value.every((stage) => stage.state === 'done'),
 )
+const showAgentTrace = computed(() => hasAgentTrace(props.payload))
+const traceItems = computed(() => agentTraceItems(props.payload))
+const traceSummary = computed(() => agentTraceSummary(props.payload))
+const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingScript.value) return '等待选择创意脚本'
+  if (showAgentTrace.value && agentActionText.value) {
+    if (status.value === 'failed') return agentActionText.value
+    if (status.value === 'running') return agentActionText.value
+  }
   if (status.value === 'failed') {
     return activeStage.value ? `${activeStage.value.label}阶段失败` : '视频任务执行失败'
   }
@@ -74,6 +88,7 @@ const statusTitle = computed(() => {
   }[currentStage.value] || '正在推进视频任务'
 })
 const stageProgressText = computed(() => {
+  if (showAgentTrace.value && traceSummary.value) return traceSummary.value
   if (allStagesDone.value) return `${pipelineStages.value.length} 个阶段已完成`
   if (!activeStage.value) return STATUS_LABELS[status.value] || '等待下一阶段'
   return `${activeStage.value.label} · ${activeStageIndex.value}/${pipelineStages.value.length}`
@@ -160,6 +175,28 @@ function formatClock(value) {
       <span>{{ currentActivity.text }}</span>
       <small v-if="currentActivity.detail">{{ currentActivity.detail }}</small>
     </div>
+    <section v-if="showAgentTrace" class="agent-trace" data-testid="video-progress-agent-trace">
+      <header class="agent-trace-head">
+        <strong>执行轨迹</strong>
+        <span v-if="traceSummary">{{ traceSummary }}</span>
+      </header>
+      <ol class="agent-trace-list">
+        <li
+          v-for="item in traceItems"
+          :key="item.key"
+          :class="`agent-trace-item agent-trace-item--${item.kind} is-${item.state}`"
+          :data-testid="item.kind === 'plan' ? 'video-progress-agent-plan' : `video-progress-agent-${item.kind}-${item.name}`"
+        >
+          <span class="agent-trace-kind">{{ item.kind === 'plan' ? '计划' : (item.kind === 'skill' ? 'Skill' : '工具') }}</span>
+          <strong>{{ item.label }}</strong>
+          <small v-if="item.kind === 'plan'">{{ item.detail }}</small>
+          <code v-else-if="item.detail">{{ item.detail }}</code>
+          <em v-if="item.state === 'failed'">失败</em>
+          <em v-else-if="item.state === 'loaded'">已加载</em>
+          <em v-else-if="item.state === 'done'">完成</em>
+        </li>
+      </ol>
+    </section>
 
     <details v-if="allStagesDone" class="production-completed-summary">
       <summary>

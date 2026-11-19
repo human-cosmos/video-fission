@@ -19,8 +19,8 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 参考视频意图、UGC 脚本生成和 13 篇吹风机/除吹雪机参考脚本共享技能链
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
-- 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、远端模型视频生成、ffmpeg 拼接；生成镜头只允许 Seedance / OpenAI Compatible / Generic HTTP，不再使用本地关键帧伪生成
-- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘；缺依赖或无 Key 时自动退化，不中断出片
+- 任务级 Production Agent 编排出片：在现有对话工作台内把参考理解、检索、三脚本暂停、远端模型生成和 FFmpeg 合成变成可调用 Tool；生成镜头只允许 Seedance / OpenAI Compatible / Generic HTTP，不再使用本地关键帧伪生成，也不再走 `PipelineEngine` 固定阶段循环
+- decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘。生产拆解仍要求真实 Gemini；出片 Tool 在无 Key 时可以做诚实的本地切分，但必须标明这是降级结果，不能写成模型理解
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
 
@@ -29,7 +29,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - Python 3.11+
 - Node.js 20+
 - ffmpeg / ffprobe（本机已验证 7.1.x）
-- 已安装并登录官方 Codex CLI（仅对话工作台需要；本地视频管线不依赖 Codex 或 API Key）
+- 已安装并登录官方 Codex CLI（对话工作台和任务级出片编排都需要；单测使用可注入的 Fake 运行时，不启动真实 `codex`）
 - 当前已验证版本：`codex-cli 0.169.0`
 
 ```bash
@@ -45,7 +45,7 @@ npm install --prefix frontend
 ./scripts/dev.sh
 ```
 
-打开 `http://127.0.0.1:5173`。
+打开 `http://127.0.0.1:5174/`。
 
 工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 
@@ -53,7 +53,7 @@ npm install --prefix frontend
 
 ### 视频创作
 
-在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；本地降级只保留给自动化测试。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。当前阶段不额外生成或烧录字幕。
+在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片。创建或重跑任务、选择脚本和追问都会交给 Production Agent 执行，而不是 Python 阶段循环。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；无 Key 时理解 Tool 可以诚实降级为本地切分，并明确标注不是模型结果。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。合成之后可以用 `burn_subtitles` Tool 写 SRT 并硬烧字幕；未对齐时使用安全默认位置，不会写成「已按参考对齐」。
 
 「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
@@ -188,24 +188,24 @@ SQLite 保存以下数据：
 | `POST` | `/api/productions` | 创建草稿（`title`、`brief`、`video_upload_id`，可选 `replace_policy`） |
 | `GET` | `/api/productions` / `/api/productions/{id}` | 列表或详情；详情含只读 `replace_plan` |
 | `PATCH` | `/api/productions/{id}` | 更新 `title` / `brief` / `replace_policy`；运行中 409 |
-| `POST` | `/api/productions/{id}/run` | 启动或重跑管线。空 body 兼容；可选 `{ replace_policy, resume_from }`。`resume_from` 允许 `ingest\|decompose\|intent\|script\|generate`；省略时按跟进消息分类，已有拆解时默认仍从 `intent` 重跑；运行中 409 |
-| `POST` | `/api/productions/{id}/select-script` | 在 `awaiting_script_choice` 时选用脚本（body：`{ "script_id" }`），随后从 generate 继续 |
+| `POST` | `/api/productions/{id}/run` | 交给 Production Agent 启动或恢复出片。空 body 兼容；可选 `{ replace_policy, resume_from }`。`resume_from` 允许 `ingest\|decompose\|intent\|script\|generate`；省略时按跟进消息分类，已有拆解时默认仍从 `intent` 重跑；运行中 409 |
+| `POST` | `/api/productions/{id}/select-script` | 在 `awaiting_script_choice` 时选用脚本（body：`{ "script_id" }`），随后把任务交回 Production Agent 从 generate 继续；选定前不会开始生成 |
 | `POST` | `/api/productions/{id}/cancel` | 取消 |
 | `DELETE` | `/api/productions/{id}` | 删除任务和产物；仍被引用的源视频不删 |
 | `GET` | `/api/productions/{id}/events?after_id=` | SSE 进度 |
 | `GET` | `/api/productions/{id}/artifacts/{name}` | 下载产物，禁止路径穿越 |
 
-阶段顺序：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。`decompose` 必须使用真实 Gemini 整片与片段理解结果。`intent` 和 `script` 由隔离的 Codex Agent 完成，Agent 必须实际加载 `video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`，不再使用本地文案模板作为生产兜底。Agent 原始最终消息写入产物目录的 `agent_intent.txt` / `agent_script.txt`。`script` 产出 3 个候选后暂停，需选用后才生成；跟进可再出脚本或在已选脚本上再生成。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。`mode=selected` 未命中任何段时 `/run` 返回 400。
+出片由任务级 Production Agent 编排，不再执行 `PipelineEngine` 阶段循环。Agent 先计划并加载 `production-orchestration`、`video-references`、`creative-intent-script-skeleton` 和 `universal-ugc-video-script-generation`，再按需调用细粒度 Tool。常见顺序仍是接入参考、理解切分、检索与锁定开场连续块、写入恰好 3 个脚本候选后暂停在 `awaiting_script_choice`，选定后再生成、分离音频、合成和可选硬烧字幕。生产拆解必须使用真实 Gemini；无 Key 时理解 Tool 只允许诚实的本地降级。意图和脚本由同一个 Production Agent 写出，不再另启 `VideoScriptAgent`，也不再用本地文案模板作为生产兜底。Codex 不可用时任务必须明确失败。跟进留在同一 `production_id` 上，含糊的「再改一下」会先澄清，不会从 ingest 重来。brief 中的落地页 URL 会安全抽取卖点，没有 URL 不阻止出片。关键帧落在 `data/artifacts/productions/{id}/{seg_id}_frame_01.jpg`（可有 `_02` / `_03`）。`replace_policy.mode` 为 `default|all|selected|brief`；未点名片段时保持默认 Hook/CTA 生成、中间复用。`mode=selected` 未命中任何段时 `/run` 返回 400。任务公开载荷和出片卡片带有 `agent_trace`，生产事件包含 `agent_plan` / `skill_loaded` / `tool_started` / `tool_completed`。
 
 `VF_ALLOW_LOCAL_COPY_FALLBACK=1` 仅用于测试，不应在部署环境启用。`VF_SCRIPT_AGENT_TIMEOUT_SECONDS` 控制单次 Agent 意图或分镜生成超时，默认 900 秒。
 
 配置 `gemini_gateway` 后，整片理解与片段分析的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/` 和 `gemini_api_calls/clip_analysis/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
 
-远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。视频生成失败会直接失败，不回退本地关键帧。语音、音乐和环境音由视频模型直接生成并随片段音轨返回；缺少音轨的生成片段视为失败。当前阶段不生成 sidecar SRT，也不硬烧字幕。
+远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。视频生成失败会直接失败，不回退本地关键帧。存在 generate 镜头但未配置 `base_url` 或 API Key 时，生成 Tool 必须明确失败，且不得出现「已还原」「已按参考对齐」这类表述。语音、音乐和环境音由视频模型直接生成并随片段音轨返回；缺少音轨的生成片段视为失败。合成之后可用 `burn_subtitles` 生成 SRT 并硬烧字幕。
 
 ## Tool
 
-默认注册 6 个动态 Tool：
+对话工作台仍注册这些会话 Tool：
 
 | Tool | 用途 |
 | --- | --- |
@@ -213,10 +213,11 @@ SQLite 保存以下数据：
 | `read_workspace_file` | 读取受控工作区文本文件 |
 | `conversation_metrics` | 查询当前会话的持久化统计 |
 | `create_video_brief` | 生成并保存 Markdown 视频简报 |
-| `start_video_production` | 按创作说明和参考视频启动管线 |
+| `start_video_production` | 按创作说明和参考视频，交给 Production Agent 启动出片 |
 | `get_video_production` | 查询创作任务状态与产物 |
+| `run_video_production` | 把已有任务交给 Production Agent 执行或恢复 |
 
-Tool 定义位于 `backend/video_fission/tools.py`。新增 Tool 时注册名称、描述、JSON Schema 和执行函数；会话创建 Thread 时会自动把 Tool 契约下发给 Codex。
+出片能力另外注册在同一 `ToolRegistry` 上，供 Production Agent 调用：`ingest_reference_video`、`understand_reference_video`、`extract_landing_points`、`search_video_references`、`lock_timeline_opening`、`write_intent_and_scripts`、`get_production_state`、`update_production_progress`、`generate_video_shots`、`separate_audio`、`compose_timeline`、`burn_subtitles`、`handle_production_followup`。定义分别位于 `backend/video_fission/tools.py` 与 `production_tools.py`。新增 Tool 时注册名称、描述、JSON Schema 和执行函数；会话创建 Thread 时会自动把 Tool 契约下发给 Codex。
 
 ## Skill
 
@@ -228,6 +229,7 @@ Tool 定义位于 `backend/video_fission/tools.py`。新增 Tool 时注册名称
 | `creative-intent-script-skeleton` | 理解创作说明和参考视频拆解，先收敛意图、概念和 Hook/Value/CTA 骨架 |
 | `universal-ugc-video-script-generation` | 在骨架确认后生成镜头级分镜、片段复用/生成计划和音视频合成要求 |
 | `video-references` | 2 个品类、13 篇 UGC 参考脚本；供上述两个创作 Skill 共享检索 |
+| `production-orchestration` | 任务级出片编排：计划顺序、三脚本暂停点，以及开场连续块、未选定不得生成、诚实失败等不变量 |
 
 参考脚本和全量索引导航位于 `skills/video-references/references/`。意图阶段读取首行骨架和注意项，完整脚本阶段读取至少 3 篇目标脚本全文。
 
@@ -247,7 +249,7 @@ skills
 基础测试：
 
 ```bash
-uv run pytest -q
+cd backend && uv run pytest -q
 npm test --prefix frontend
 npm run build --prefix frontend
 ```

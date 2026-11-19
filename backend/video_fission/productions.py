@@ -47,6 +47,7 @@ class ProductionService:
         self.db = db
         self.store = store
         self.engine = PipelineEngine(settings, db, store)
+        self.agent = None
         self.engine.on_after_emit = self.sync_conversation_cards
         self._lock = threading.Lock()
         self._cancels: dict[str, threading.Event] = {}
@@ -294,7 +295,9 @@ class ProductionService:
         if wait:
             try:
                 logger.info("production.run_wait_started resume_from=%s", resume or "-")
-                self.engine.run(production_id, cancel, resume_from=resume)
+                self._orchestrator().run(production_id, cancel, resume_from=resume)
+            except Exception:
+                logger.exception("production.run_wait_failed")
             finally:
                 with self._lock:
                     self._cancels.pop(production_id, None)
@@ -629,11 +632,17 @@ class ProductionService:
         )
         return upload_id
 
+    def _orchestrator(self):
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            raise RuntimeError("Production Agent 尚未就绪，无法编排出片")
+        return agent
+
     def _run_thread(self, production_id: str, cancel: threading.Event, resume_from: str | None = None) -> None:
         thread = threading.current_thread()
         logger.info("production.run_thread_started resume_from=%s", resume_from or "-")
         try:
-            self.engine.run(production_id, cancel, resume_from=resume_from)
+            self._orchestrator().run(production_id, cancel, resume_from=resume_from)
         except Exception:
             logger.exception("production.run_thread_failed")
             pass
@@ -684,6 +693,7 @@ class ProductionService:
             "landing_page": production.get("landing_page"),
             "script_candidates": production.get("script_candidates") or [],
             "selected_script_id": production.get("selected_script_id"),
+            "agent_trace": production.get("agent_trace") or [],
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],
         }

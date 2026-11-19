@@ -292,6 +292,7 @@ class Database:
             self._ensure_column(connection, "productions", "selected_script_id", "TEXT")
             self._ensure_column(connection, "productions", "audio_separation", "TEXT")
             self._ensure_column(connection, "productions", "subtitle_style", "TEXT")
+            self._ensure_column(connection, "productions", "agent_trace", "TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_productions_conversation ON productions(conversation_id)"
             )
@@ -1347,6 +1348,7 @@ class Database:
             "selected_script_id",
             "audio_separation",
             "subtitle_style",
+            "agent_trace",
         }
         json_fields = {
             "warnings",
@@ -1363,6 +1365,7 @@ class Database:
             "script_candidates",
             "audio_separation",
             "subtitle_style",
+            "agent_trace",
         }
         values: dict[str, Any] = {}
         for key, value in fields.items():
@@ -1471,6 +1474,7 @@ class Database:
             "selected_script_id": _row_get(row, "selected_script_id"),
             "audio_separation": _load(_row_get(row, "audio_separation"), None),
             "subtitle_style": _load(_row_get(row, "subtitle_style"), None),
+            "agent_trace": _load(_row_get(row, "agent_trace"), []),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

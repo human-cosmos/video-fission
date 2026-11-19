@@ -50,8 +50,8 @@ export function selectedScriptIdOf(payload) {
   return value || ''
 }
 
-export function isAwaitingScriptChoice(payload) {
-  return payload?.status === 'awaiting_script_choice'
+export function isAwaitingScriptChoice(_payload) {
+  return false
 }
 
 export function candidateScript(candidate) {
@@ -85,7 +85,6 @@ export function shouldOfferRegenerateScripts(payload) {
   const status = payload?.status
   if (status === 'running') return false
   return (
-    isAwaitingScriptChoice(payload) ||
     status === 'awaiting_video_choice' ||
     Boolean(selectedScriptIdOf(payload)) ||
     status === 'completed'
@@ -95,7 +94,6 @@ export function shouldOfferRegenerateScripts(payload) {
 export function shouldOfferRegenerateVideo(payload) {
   if (
     payload?.status === 'running' ||
-    isAwaitingScriptChoice(payload) ||
     payload?.status === 'awaiting_video_choice'
   ) {
     return false

@@ -13,7 +13,7 @@ from .normalize import get_lens_data, validate_segments
 logger = logging.getLogger(__name__)
 
 _BASE_DEPENDENCIES = {
-    "cv2": "opencv-python-headless",
+    "cv2": "opencv-python",
     "scenedetect": "scenedetect",
 }
 

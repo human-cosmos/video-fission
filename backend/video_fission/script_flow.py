@@ -156,7 +156,7 @@ def parse_script_selection(text: str, candidates: list[dict[str, Any]] | None = 
 
 
 def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
-    """Return ('select', id), ('select_video', id), or ('resume', stage)."""
+    """Return ('select_video', id) or ('resume', stage). Scripts no longer pause for selection."""
     status = str(production.get("status") or "")
     selected = str(production.get("selected_script_id") or "").strip()
     candidates = production.get("script_candidates") or []
@@ -167,14 +167,12 @@ def classify_followup(production: dict[str, Any], text: str) -> tuple[str, str]:
     if choice and status == "awaiting_video_choice" and not rewrite:
         return "select_video", choice
     if choice and not rewrite:
-        return "select", choice
+        return "resume", "script" if candidates else "intent"
     if rewrite or new_landing:
         return "resume", "intent" if new_landing else "script"
     if generate and selected:
         return "resume", "generate"
     if status == "awaiting_script_choice":
-        if choice:
-            return "select", choice
         return "resume", "script"
     if selected:
         return "resume", "generate"

@@ -94,7 +94,6 @@ def remote_env(env, monkeypatch):
     monkeypatch.setattr(engine, "_settings_for_production", lambda pid: (
         {"video_generator": {"provider": "seedance", "base_url": "https://fake.invalid", "model": "test"}},
         {"video_generator": "unit-test-placeholder"}))
-    monkeypatch.setattr(engine, "_seedance_input_contents", lambda *a: [])
     monkeypatch.setattr(media, "probe", lambda path: {"duration_ms": 1000, "has_audio": True})
     monkeypatch.setattr(media, "normalize_video_clip", lambda src, dest, *a: dest.write_bytes(src.read_bytes()))
     return pid
@@ -103,9 +102,15 @@ def remote_env(env, monkeypatch):
 def test_submit_id_persisted_then_crash_resume_and_idempotency(app_env, monkeypatch):
     pid = remote_env(app_env, monkeypatch)
     calls = []
+    test_thread_id = threading.get_ident()
     def request(url, key, **kwargs):
+        if threading.get_ident() != test_thread_id:
+            if kwargs.get("payload") is not None:
+                return {"data": {"task_id": "background-ignored"}}
+            return {"data": {"status": "completed", "video_url": "https://fake.invalid/background.mp4"}}
         calls.append(kwargs.get("payload"))
         if kwargs.get("payload") is not None:
+            assert "input_contents" not in kwargs["payload"]
             return {"data": {"task_id": "remote-42"}}
         job = app_env.db.list_production_jobs(pid)[0]
         assert job["external_task_id"] == "remote-42"
@@ -120,6 +125,8 @@ def test_submit_id_persisted_then_crash_resume_and_idempotency(app_env, monkeypa
     assert pid in app_env.db.recover_production_jobs()
     assert app_env.db.list_production_jobs(pid)[0]["status"] == "running"
     def poll(url, key, **kwargs):
+        if threading.get_ident() != test_thread_id:
+            return {"data": {"status": "completed", "video_url": "https://fake.invalid/background.mp4"}}
         assert kwargs.get("payload") is None
         assert "remote-42" in url
         calls.append(None)

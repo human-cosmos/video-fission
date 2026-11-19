@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 from video_fission.production_agent import (
     CODEX_UNAVAILABLE,
@@ -97,6 +98,14 @@ def test_prepare_builds_creative_context_before_scripts(app_env):
     assert prepared["decomposition"]["segments"]
     assert prepared["intent"]["references"]
     assert prepared["script_candidates"] == []
+    context_path = Path(prepared["creative_context"]["context_path"])
+    timeline_path = Path(prepared["creative_context"]["timeline_path"])
+    assert context_path.is_file()
+    assert timeline_path.is_file()
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    assert context["production_id"] == production["id"]
+    assert len(context["segments"]) == len(prepared["decomposition"]["segments"])
+    assert all(str(segment["id"]) in timeline_path.read_text(encoding="utf-8") for segment in context["segments"])
 
 
 def test_missing_creative_content_fails_before_media_tools(app_env):
@@ -167,6 +176,8 @@ def test_start_and_run_tools_hand_off_to_agent(app_env):
     assert prepared_payload["production"]["status"] == "awaiting_creative_context"
     assert prepared_payload["creative_context"]["decomposition"]["segments"]
     assert prepared_payload["creative_context"]["references"]
+    assert Path(prepared_payload["creative_context"]["context_path"]).is_file()
+    assert Path(prepared_payload["creative_context"]["timeline_path"]).is_file()
 
     resumed = app_env.tools.execute(
         "run_video_production",
@@ -207,6 +218,38 @@ def test_candidate_generation_does_not_require_script_selection(app_env):
         assert phrase not in error
     assert "generate_candidate_videos" in called_tools(result)
     assert result.get("selected_script_id") is None
+
+
+def test_recovery_migrates_legacy_script_choice_to_all_candidate_generation(app_env, monkeypatch):
+    production = create_production(app_env.productions)
+    app_env.db.update_production(
+        production["id"],
+        {
+            "status": "awaiting_script_choice",
+            "current_stage": "script",
+            "script_candidates": stub_candidates(),
+        },
+    )
+    captured = {}
+
+    class Runtime:
+        def run(self, production_id, cancel, resume_from=None):
+            captured.update(
+                {
+                    "production_id": production_id,
+                    "resume_from": resume_from,
+                    "cancel": cancel,
+                }
+            )
+
+    monkeypatch.setattr(app_env.productions, "_orchestrator", lambda: Runtime())
+
+    assert app_env.productions.recover_orphaned_runs(wait=True) == [production["id"]]
+    assert captured["production_id"] == production["id"]
+    assert captured["resume_from"] == "generate"
+    current = app_env.db.get_production(production["id"])
+    assert current["status"] == "running"
+    assert current["current_stage"] == "generate"
 
 
 def test_bulk_shot_generation_still_rejects_missing_selection(app_env):

@@ -13,8 +13,10 @@ description: 在当前 Codex 对话中完成视频创意意图、骨架和三份
 2. 使用 `read_skill` 按需读取 `video-references`、`creative-intent-script-skeleton` 和
    `universal-ugc-video-script-generation` 的完整 `SKILL.md`。不要依赖终端、工作区相对路径或
    `file://` 读取 Skill；需要参考脚本全文时，也通过 `read_skill` 的 `path` 参数读取对应文件。
-3. 先调用 `prepare_video_production`，等待它返回拆解 segments、opening 和真实参考脚本路径。
-4. 基于 `creative_context` 在当前对话中生成 `intent`、`skeleton` 和恰好 3 个 `script_candidates`。
+3. 先调用 `prepare_video_production`，等待它返回拆解 segments、opening、真实参考脚本路径，以及
+   已落盘的 `creative_context.context_path` / `creative_context.timeline_path`。
+4. 直接读取这两个工作区文件获取完整片段时间轴与摘要，不要查询数据库或要求人工审批。随后基于
+   `creative_context` 在当前对话中生成 `intent`、`skeleton` 和恰好 3 个 `script_candidates`。
 5. 调用 `run_video_production`，传入 `production_id` 和创意内容，并设置 `resume_from=script`。
 6. 后台确定性执行器会锁定时间轴、写入 3 个脚本，并自动生成与合成 3 条候选视频；不要自行再调用细粒度 Tool，也不要把任务交给另一个模型进程。
 

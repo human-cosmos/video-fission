@@ -15,6 +15,7 @@ from .conversation_cards import VIDEO_CARD_TYPES, cards_for, stable_item_id, upl
 from .db import Database
 from .paths import production_artifact_dir, user_artifact_root, user_upload_root, user_workspace
 from .pipeline import PipelineEngine
+from .production_context import creative_context_paths
 from .replace import normalize_replace_policy, resolve_replace_plan
 from .script_flow import candidate_by_id, classify_followup
 from .settings_store import SettingsStore
@@ -771,19 +772,37 @@ class ProductionService:
     def recover_orphaned_runs(self, *, wait: bool = False) -> list[str]:
         """Called after agent wiring; resume saved plans, never re-ingest generated tasks."""
         recovered = []
-        for production_id in self.db.recover_production_jobs():
+        orphaned = self.db.recover_production_jobs()
+        legacy_script_choice = self.db.legacy_script_choice_productions()
+        legacy_ids = set(legacy_script_choice)
+        recoveries = [
+            (production_id, None)
+            for production_id in orphaned
+            if production_id not in legacy_ids
+        ]
+        recoveries.extend((production_id, "generate") for production_id in legacy_script_choice)
+        for production_id, resume_from in recoveries:
             with self._lock:
                 if production_id in self._cancels:
                     continue
+                if resume_from == "generate":
+                    self.db.update_production(
+                        production_id,
+                        {
+                            "status": "running",
+                            "current_stage": "generate",
+                            "error": None,
+                        },
+                    )
                 cancel = threading.Event()
                 self._cancels[production_id] = cancel
                 thread = threading.Thread(target=self._run_thread,
-                                          args=(production_id, cancel, "recover"),
+                                          args=(production_id, cancel, resume_from or "recover"),
                                           name=f"production-recover-{production_id}", daemon=True)
                 self._threads[production_id] = thread
             recovered.append(production_id)
             if wait:
-                self._run_thread(production_id, cancel, "recover")
+                self._run_thread(production_id, cancel, resume_from or "recover")
                 with self._lock:
                     self._threads.pop(production_id, None)
             else:
@@ -808,6 +827,7 @@ class ProductionService:
 
     def _to_public(self, production: dict[str, Any]) -> dict[str, Any]:
         production_id = production["id"]
+        context_paths = creative_context_paths(self.settings, production)
         output = production.get("output") or None
         if isinstance(output, dict):
             output = {
@@ -871,6 +891,7 @@ class ProductionService:
             "script_candidates": production.get("script_candidates") or [],
             "selected_script_id": production.get("selected_script_id"),
             "candidate_videos": candidate_videos,
+            "creative_context": context_paths,
             "agent_trace": production.get("agent_trace") or [],
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],

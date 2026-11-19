@@ -15,7 +15,6 @@ const status = computed(() => props.payload?.status || '')
 const currentStage = computed(() => props.payload?.current_stage || '')
 const isRunning = computed(() => status.value === 'running')
 const awaitingCreativeContext = computed(() => status.value === 'awaiting_creative_context')
-const awaitingScript = computed(() => status.value === 'awaiting_script_choice')
 const awaitingVideo = computed(() => status.value === 'awaiting_video_choice')
 const latestActivityStage = computed(() => {
   const items = props.payload?.activity || []
@@ -93,7 +92,6 @@ const allStagesDone = computed(
 const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
-  if (awaitingScript.value) return '等待选择创意脚本'
   if (awaitingVideo.value) return '3 个候选视频已生成，等待选择'
   if (agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value
@@ -151,7 +149,7 @@ function stageStatusText(state) {
   return {
     done: '已完成',
     active: '进行中',
-    awaiting: '等待选择',
+    awaiting: '等待继续',
     failed: '失败',
     cancelled: '已取消',
     pending: '待执行',
@@ -324,7 +322,13 @@ function formatClock(value) {
             "
             class="production-step-pending"
           >
-            {{ activeStage.state === 'awaiting' ? '等待选择脚本后继续' : '正在处理，结果完成后显示' }}
+            {{
+              activeStage.state === 'awaiting'
+                ? awaitingVideo
+                  ? '等待选择候选视频后继续'
+                  : '后台正在自动推进'
+                : '正在处理，结果完成后显示'
+            }}
           </p>
           <dl v-if="activeStage.outputs?.length" class="production-step-output">
             <div v-for="row in activeStage.outputs" :key="row.label">
@@ -347,10 +351,10 @@ function formatClock(value) {
       </li>
     </ol>
     <p
-      v-if="awaitingScript || awaitingVideo"
+      v-if="awaitingVideo"
       class="progress-awaiting-video"
       data-testid="video-progress-awaiting-video"
-    >请选择候选视频</p>
+    >3 个候选视频已生成，请选择一条继续</p>
     <p v-if="payload.error" class="page-error">{{ payload.error }}</p>
     <ul v-if="warnings.length" class="warning-list">
       <li v-for="(warning, index) in warnings" :key="index">{{ warning }}</li>

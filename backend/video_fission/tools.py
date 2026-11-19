@@ -417,6 +417,10 @@ def build_registry(
             **kwargs,
         )
         intent = result.get("intent") or {}
+        from .production_context import write_creative_context
+
+        stored = productions.db.get_production(result["id"])
+        context_paths = write_creative_context(productions.settings, stored) if stored else {}
         return {
             "production": result,
             "creative_context": {
@@ -425,10 +429,12 @@ def build_registry(
                 "opening": (result.get("decomposition") or {}).get("opening"),
                 "references": intent.get("references") or [],
                 "warnings": result.get("warnings") or [],
+                **context_paths,
             },
             "next_action": (
-                "基于 creative_context 生成 intent、skeleton 和恰好 3 个 script_candidates，"
-                "然后调用 run_video_production，并传 resume_from=script。"
+                "读取 creative_context.context_path 或 timeline_path 获取完整片段时间轴与摘要，"
+                "生成 intent、skeleton 和恰好 3 个 script_candidates，然后调用 "
+                "run_video_production 并传 resume_from=script。不要查询数据库，也不要请求人工审批。"
             ),
         }
 

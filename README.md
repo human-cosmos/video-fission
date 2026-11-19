@@ -55,19 +55,24 @@ npm install --prefix frontend
 
 在对话中上传参考视频（最大 500MB）并填写创作说明后发送。当前对话 Codex 先调用 `prepare_video_production`，由后台完成接入、拆解、落地页提取和参考脚本检索，并把完整 `creative_context` 返回给当前对话；Codex 再基于这些真实结果生成 `intent`、`skeleton` 和恰好 3 个 `script_candidates`，通过 `run_video_production` 提交，设置 `resume_from=script`。后台只运行细粒度 Tool，不再创建第二个 Codex 进程。时间线会展示理解、规划、片段和成片卡片。生产模式下视频理解、镜头拆分和片段理解必须使用真实 `gemini_gateway` 结果，默认模型为 `gemini-3.8-flash`；无 Key 时理解 Tool 可以诚实降级为本地切分，并明确标注不是模型结果。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。音频分离结果会作为参考 BGM 以低音量混入最终音轨；合成之后可以用 `burn_subtitles` Tool 写 SRT 并硬烧字幕；未对齐时使用安全默认位置，不会写成「已按参考对齐」。
 
+完整片段时间轴与摘要会落到用户工作区的 `productions/{production_id}/creative-context.json` 和 `timeline-summary.md`，供当前对话直接读取，不需要查询数据库。Codex app-server 的只读查询和执行审批由后端自动允许，前端不再展示人工审批卡。
+
 「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，Gemini 请求与观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
 视频生成支持 `seedance` 内网 Provider。默认地址为 `https://api.giikin.com`，Seedance 2.0 Flash 对应的协议模型名为 `seedance-2-0-fast`（也兼容输入 `seedance-2.0-flash`）。提交走 `/acore/model/v1/task/generate/video`，状态查询走 `/acore/model/v1/task/video/{taskId}`；下载后会统一转成项目要求的分辨率、帧率和精确时长。也可以使用 `npx dksk auth <key>` 登录后，在系统设置中保存同一认证 Key。
 
-Seedance 的参考视频优先使用 `media_public_base_url` 直链。未配置或该地址指向本机/内网时，管线会自动使用多模态设置中的 GCloud `upload_url` 和 `token_url` 上传参考视频，并以返回的存储 URL 提交；只有上传地址缺失、换票失败或上传失败时才写 warning。人声和 BGM 不再单独传给 Seedance，统一由视频模型按提示词生成。
+Seedance 只接收文本提示词，不接收参考视频、参考音频或 `input_contents`。参考视频仅用于本地拆解、片段复用和脚本生成，不会再经 `media_public_base_url` 或 GCloud 上传给视频模型。人声和 BGM 由视频模型按提示词直接生成。
 
-默认安装会同时安装转场检测依赖：
+默认安装会同时安装基础转场检测依赖：
 
 ```bash
-uv sync --extra dev --extra shot-detect
+uv sync --extra dev
 ```
 
-`shot-detect` 包含 CPU 可跑的 `torch`、`opencv-python`、`numpy`、`scenedetect`，以及包内约 30MB 的 TransNetV2 权重。PySceneDetect 是基础转场检测，TransNetV2 缺失时仍可使用 PySceneDetect；基础依赖也缺失或检测失败时才退化为 ffmpeg 场景切分，并在任务事件和日志中写明缺失包名或异常详情。
+基础依赖包含 `opencv-python`、`numpy` 和 `scenedetect`，因此默认环境直接使用 PySceneDetect。PySceneDetect 本身固定依赖 `opencv-python`，不要再额外安装 `opencv-python-headless`，避免两套 OpenCV 同时进入环境。包内另有约 30MB 的 TransNetV2 权重；需要 CNN 加分时可额外安装 `uv sync --extra shot-detect` 获取 CPU 版 `torch`。PySceneDetect 失败时才退化为 ffmpeg 场景切分，并在任务事件和日志中写明异常详情。
+
+如果旧环境曾同时安装两套 OpenCV，升级时执行一次
+`uv sync --extra dev --reinstall-package opencv-python`，避免卸载 headless 包时一起移除共享的 `cv2` 文件。
 
 也可以分别启动：
 

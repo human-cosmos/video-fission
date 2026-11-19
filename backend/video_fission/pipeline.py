@@ -9,7 +9,7 @@ from typing import Any
 from . import media, providers
 from .config import Settings
 from .db import Database
-from .logging_utils import clip_text, file_summary, safe_url
+from .logging_utils import file_summary, safe_url
 from .paths import production_artifact_dir
 from .references import ReferenceLibrary
 from .replace import apply_replace_plan, strip_rewrite_instructions
@@ -191,16 +191,14 @@ class PipelineEngine:
         generate_shots = [shot for shot in script.get("shots") or [] if shot.get("action") == "generate"]
         if generate_shots and not vg.get("base_url"):
             raise ValueError(f"视频生成 Provider {provider} 未配置 base_url")
-        input_contents: list[dict[str, Any]] | None = None
         logger.info(
             "pipeline.generate_config provider=%s model=%s target=%sx%s "
-            "fps=%.3f reference_inputs=%s shots=%s generated=%s",
+            "fps=%.3f shots=%s generated=%s",
             provider,
             vg.get("model") or "-",
             width,
             height,
             fps,
-            ",".join(str(item.get("role") or item.get("type") or "?") for item in (input_contents or [])) or "-",
             len(script.get("shots") or []),
             len(generate_shots),
         )
@@ -232,7 +230,6 @@ class PipelineEngine:
                 },
             )
             def execute_shot(job):
-                nonlocal input_contents
                 start_ms, _end_ms, segment = _reuse_range(shot, segments, production)
                 if shot["action"] == "reuse":
                     if _end_ms <= start_ms:
@@ -248,8 +245,6 @@ class PipelineEngine:
                     )
                 else:
                     provider_name = provider
-                    if input_contents is None and not job.get("external_task_id") and provider == "seedance":
-                        input_contents = self._seedance_input_contents(production_id, public, secrets, warnings)
                     model_duration_ms = duration_ms
                     if provider_name == "seedance":
                         requested_s, submitted_s = providers.seedance_duration_seconds(duration_ms)
@@ -288,7 +283,6 @@ class PipelineEngine:
                             source=vg.get("source") or "",
                             resolution=vg.get("resolution") or "720p",
                             cancel=cancel,
-                            input_contents=input_contents if not job.get("external_task_id") else [],
                             external_task_id=job.get("external_task_id"),
                             on_submitted=lambda task_id: self.db.update_production_job(
                                 job["id"], {"external_task_id": task_id}),
@@ -612,141 +606,6 @@ class PipelineEngine:
                 f"本次模型输出时长为 {target_duration_ms}ms，请在该时长内完整完成镜头动作与口播。"
             )
         return "\n".join(part for part in parts if part)
-
-    def _seedance_input_contents(
-        self,
-        production_id: str,
-        public: dict[str, Any],
-        secrets: dict[str, str],
-        warnings: list[str],
-    ) -> list[dict[str, Any]]:
-        production = self._get(production_id)
-        source = Path((production.get("source_video") or {}).get("path") or "")
-        base = str((public.get("video_generator") or {}).get("media_public_base_url") or "")
-        video_url, video_warn = providers.public_media_url(
-            base,
-            production_id,
-            source.name if source.name else "source.mp4",
-        )
-
-        if video_warn:
-            video_url = ""
-            uploaded = self._upload_reference_media_to_gcloud(
-                production_id,
-                public,
-                secrets,
-                source,
-                warnings,
-            )
-            video_url = uploaded.get("video") or ""
-
-        contents = providers.build_reference_input_contents(video_url)
-        logger.info(
-            "generate.reference_inputs count=%s urls=%s",
-            len(contents),
-            ",".join(safe_url(str(item.get("url") or "")) for item in contents) or "-",
-        )
-        return contents
-
-    def _upload_reference_media_to_gcloud(
-        self,
-        production_id: str,
-        public: dict[str, Any],
-        secrets: dict[str, str],
-        source: Path,
-        warnings: list[str],
-    ) -> dict[str, str]:
-        from .understand.gateway import GeminiGatewayClient
-
-        mm = public.get("multimodal") or {}
-        upload_url = str(mm.get("upload_url") or "").strip()
-        if not upload_url:
-            message = (
-                "未配置 media_public_base_url 或 GCloud 上传地址，"
-                "参考视频无法提供给 Seedance"
-            )
-            warnings.append(message)
-            self._emit(production_id, "warning", {"stage": "generate", "message": message})
-            return {}
-
-        client = GeminiGatewayClient(
-            base_url=str(mm.get("base_url") or ""),
-            upload_url=upload_url,
-            token_url=str(mm.get("token_url") or ""),
-            api_key=secrets.get("multimodal") or "",
-            model=str(mm.get("model") or ""),
-            source=str(mm.get("source") or ""),
-            timeout_seconds=int(mm.get("timeout_seconds") or 360),
-        )
-        logger.info(
-            "generate.reference_upload_started endpoint=%s production_id=%s",
-            safe_url(upload_url),
-            production_id,
-        )
-        try:
-            token = client.get_access_token()
-        except Exception as exc:  # noqa: BLE001
-            message = f"GCloud 参考视频上传凭证获取失败：{clip_text(str(exc), 200)}"
-            warnings.append(message)
-            self._emit(
-                production_id,
-                "warning",
-                {
-                    "stage": "generate",
-                    "step": "reference_upload",
-                    "message": message,
-                    "details": {"error_type": exc.__class__.__name__},
-                },
-            )
-            logger.warning("generate.reference_upload_auth_failed", exc_info=True)
-            return {}
-
-        media: list[tuple[str, Path]] = [("video", source)]
-        uploaded: dict[str, str] = {}
-        failed: list[str] = []
-        for role, path in media:
-            if not path.is_file():
-                failed.append(f"{role}:file_missing")
-                continue
-            object_name = f"{production_id}-{path.name}"
-            try:
-                url = client.upload_media(
-                    path,
-                    token,
-                    object_name=object_name,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "generate.reference_upload_failed role=%s file=%s",
-                    role,
-                    file_summary(path),
-                    exc_info=True,
-                )
-                failed.append(f"{role}:{exc.__class__.__name__}")
-                continue
-            if url:
-                uploaded[role] = url
-            else:
-                failed.append(f"{role}:empty_url")
-
-        if failed:
-            message = (
-                "GCloud 参考视频上传未全部成功（"
-                + ", ".join(failed)
-                + "），Seedance 将仅收到已上传成功的参考素材"
-            )
-            warnings.append(message)
-            self._emit(
-                production_id,
-                "warning",
-                {"stage": "generate", "step": "reference_upload", "message": message},
-            )
-        logger.info(
-            "generate.reference_upload_completed uploaded=%s failed=%s",
-            ",".join(sorted(uploaded)) or "-",
-            len(failed),
-        )
-        return uploaded
 
     def _get(self, production_id: str) -> dict[str, Any]:
         production = self.db.get_production(production_id)

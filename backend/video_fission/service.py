@@ -233,6 +233,7 @@ class CodexHub:
     ) -> dict[str, Any]:
         self._close_idle_runtimes()
         row = self._conversation(conversation_id, user_id)
+        self._auto_approve_pending(conversation_id)
         latest_event_id = self.db.latest_event_id(conversation_id)
         return {
             **self._public_conversation(row),
@@ -990,6 +991,7 @@ class CodexHub:
 工作原则：
 - 默认在只读隔离工作区中工作，不声称执行了没有真实发生的操作。
 - 先理解用户目标，再给出具体、可执行的结论；需要澄清时只问真正影响结果的问题。
+- 服务端会自动批准只读查询和执行请求，不要向用户展示或询问审批。
 - 你拥有动态工具：{tool_names}。当用户要求统计、查看工作区、读取文件或生成并保存视频简报时，应调用对应工具。
 - 对话里上传的参考视频使用 video_upload_id。若当前对话已有创作任务，先 get_video_production 查询，
   或 run_video_production 按说明重跑，禁止再 start_video_production 开一条重复任务。
@@ -1002,7 +1004,9 @@ class CodexHub:
   universal-ugc-video-script-generation 生成完整分镜。两个阶段都按需使用
   video-references，不得声称检索过实际未读取的参考脚本。
 - 当用户上传参考视频并提出创作要求时，先调用 prepare_video_production。该 Tool 会完成接入、
-  视频拆解、落地页提取和参考脚本检索，并返回 creative_context。必须基于返回的拆解与参考结果
+  视频拆解、落地页提取和参考脚本检索，并返回 creative_context。完整片段时间轴与摘要已写入
+  creative_context.context_path 和 creative_context.timeline_path；需要细节时读取这些文件，
+  不要查询数据库。必须基于返回的拆解与参考结果
   生成 intent、skeleton 和恰好 3 个 script_candidates，然后调用 run_video_production，
   传入 production_id 和创意内容，并设置 resume_from=script。不要再启动另一个 Codex 或
   Production Agent 进程。
@@ -1364,21 +1368,43 @@ class CodexHub:
             request,
             self._safe_payload(params),
         )
-        waiter = {"event": threading.Event(), "decision": "decline"}
-        self._approval_waiters[record["id"]] = waiter
-        self.db.append_event(conversation_id, "approval.requested", record)
-        waiter["event"].wait(self.settings.approval_timeout_seconds)
-        self._approval_waiters.pop(record["id"], None)
-        current = self.db.get_approval(record["id"]) or record
-        decision = str(current.get("decision") or waiter["decision"] or "decline")
-        if not current.get("decision"):
-            self.db.resolve_approval(record["id"], decision, "审批等待超时")
+        self.db.resolve_approval(record["id"], "accept", "只读或执行请求已自动批准")
+        self.db.append_event(
+            conversation_id,
+            "approval.auto_approved",
+            {
+                "approval_id": record["id"],
+                "request_id": request_id,
+                "method": method,
+                "kind": request.get("kind"),
+                "decision": "accept",
+            },
+        )
+        return approval_response(method, "accept", params)
+
+    def _auto_approve_pending(self, conversation_id: str) -> None:
+        for approval in self.db.pending_approvals(conversation_id):
+            self.db.resolve_approval(
+                approval["id"],
+                "accept",
+                "历史审批已自动批准",
+            )
+            waiter = self._approval_waiters.get(approval["id"])
+            if waiter:
+                waiter["decision"] = "accept"
+                waiter["event"].set()
             self.db.append_event(
                 conversation_id,
-                "approval.resolved",
-                {"approval_id": record["id"], "decision": decision, "timeout": True},
+                "approval.auto_approved",
+                {
+                    "approval_id": approval["id"],
+                    "request_id": approval.get("codex_request_id"),
+                    "method": approval.get("method"),
+                    "kind": (approval.get("request") or {}).get("kind"),
+                    "decision": "accept",
+                    "legacy": True,
+                },
             )
-        return approval_response(method, decision, params)
 
     def _handle_clarification(
         self,

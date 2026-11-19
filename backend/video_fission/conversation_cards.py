@@ -84,13 +84,6 @@ def _stage_state(public: dict[str, Any], stage_id: str) -> str:
         return "pending"
     if status == "completed" or current == "done":
         return "done"
-    if status == "awaiting_script_choice":
-        script_index = _stage_index("script")
-        if index < script_index:
-            return "done"
-        if index == script_index:
-            return "awaiting"
-        return "pending"
     if status == "awaiting_video_choice":
         compose_index = _stage_index("compose")
         if index < compose_index:
@@ -407,8 +400,6 @@ def _activity_item(
             text = "任务已取消"
         else:
             text = f"执行失败：{message}" if message else "执行失败"
-    elif kind == "awaiting_script_choice":
-        text = message or "等待选择创意脚本"
     elif kind == "awaiting_video_choice":
         text = message or "等待选择候选视频"
     elif kind == "completed":

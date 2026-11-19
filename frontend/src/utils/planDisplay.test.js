@@ -66,18 +66,18 @@ describe('plan card landing and script candidates', () => {
     expect(sharedPlanShots(payload)[0].id).toBe('shot_opening')
   })
 
-  it('offers choose only while awaiting a selection', () => {
-    const awaiting = {
+  it('never offers a script-choice checkpoint', () => {
+    const legacyAwaiting = {
       production_id: 'prd_1',
       status: 'awaiting_script_choice',
       script_candidates: candidates,
       selected_script_id: null,
     }
-    expect(isAwaitingScriptChoice(awaiting)).toBe(true)
-    expect(shouldOfferScriptChoice(awaiting)).toBe(true)
-    expect(shouldOfferRegenerateScripts(awaiting)).toBe(true)
-    expect(shouldOfferRegenerateVideo(awaiting)).toBe(false)
-    expect(isSelectedCandidate(candidates[1], awaiting)).toBe(false)
+    expect(isAwaitingScriptChoice(legacyAwaiting)).toBe(false)
+    expect(shouldOfferScriptChoice(legacyAwaiting)).toBe(false)
+    expect(shouldOfferRegenerateScripts(legacyAwaiting)).toBe(false)
+    expect(shouldOfferRegenerateVideo(legacyAwaiting)).toBe(false)
+    expect(isSelectedCandidate(candidates[1], legacyAwaiting)).toBe(false)
   })
 
   it('marks the selected script and only then offers regenerate-video', () => {

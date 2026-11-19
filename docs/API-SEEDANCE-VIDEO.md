@@ -148,7 +148,7 @@ POST https://api.giikin.com/acore/model/v1/task/generate/video
 }
 ```
 
-本项目向 Seedance 提交参考视频生成时，会在 `input_contents` 中放入一条 `type=video_url`、`role=reference_video`，并设置 `options.generate_audio=true`；人声、音乐和环境音由视频模型直接生成。参考视频优先使用 `video_generator.media_public_base_url` 拼接的直链，为空或指向本机时改用多模态设置中的 GCloud 上传地址。
+本项目向 Seedance 提交视频生成任务时只发送文本提示词，不发送 `input_contents`，也不会通过 `video_generator.media_public_base_url` 或 GCloud 上传参考视频。参考视频只用于本地拆解、片段复用和脚本生成；人声、音乐和环境音由视频模型直接生成。
 
 ### 图生视频请求示例
 

@@ -79,15 +79,6 @@ function scrollToBottom(behavior = 'smooth') {
   })
 }
 
-function approvalDetail(approval) {
-  const request = approval.request || {}
-  if (request.kind === 'command') {
-    return [request.command, request.cwd].filter(Boolean).join('\n')
-  }
-  if (request.paths?.length) return request.paths.join('\n')
-  return JSON.stringify(request, null, 2)
-}
-
 function questionOptions(question) {
   const values = question.options || []
   return values.map((option) =>
@@ -420,27 +411,6 @@ defineExpose({ scrollToBottom })
             <pre>{{ JSON.stringify(item.payload, null, 2) }}</pre>
           </details>
         </template>
-      </article>
-
-      <article
-        v-for="approval in conversation.pending_approvals || []"
-        :key="approval.id"
-        class="message interaction-message"
-      >
-        <div class="message-spine"><span></span></div>
-        <div class="interaction-card approval-card" data-testid="approval-card">
-          <div class="interaction-kicker"><CircleAlert :size="15" /> 需要你的批准</div>
-          <h3>{{ approval.request?.reason || '智能中枢请求继续执行' }}</h3>
-          <pre>{{ approvalDetail(approval) }}</pre>
-          <div class="interaction-actions">
-            <button class="button primary" @click="$emit('decide-approval', approval.id, 'accept')">
-              允许本次
-            </button>
-            <button class="button subtle" @click="$emit('decide-approval', approval.id, 'decline')">
-              拒绝
-            </button>
-          </div>
-        </div>
       </article>
 
       <article

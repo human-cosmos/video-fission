@@ -57,7 +57,9 @@ describe('format helpers', () => {
     expect(historyStatusText({ status: 'awaiting_creative_context', current_stage: 'intent' })).toBe(
       '等待生成脚本',
     )
-    expect(historyStatusText({ status: 'awaiting_script_choice', current_stage: 'script' })).toBe('待选择脚本')
+    expect(historyStatusText({ status: 'awaiting_script_choice', current_stage: 'script' })).toBe(
+      '自动生成准备中',
+    )
     expect(historyStatusText({ status: 'awaiting_video_choice', current_stage: 'compose' })).toBe(
       '待选择视频',
     )

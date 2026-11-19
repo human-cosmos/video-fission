@@ -13,9 +13,9 @@ from . import media
 from .audio_separate import separate_reference_audio
 from .jobs import JobRunner, digest, revision
 from .pipeline import REMOTE_VIDEO_PROVIDERS, PipelineEngine, local_script
+from .production_context import creative_context_paths, write_creative_context
 from .references import ReferenceLibrary
 from .script_flow import (
-    candidate_by_id,
     classify_followup,
     lock_script_to_timeline,
     parse_script_selection,
@@ -205,6 +205,7 @@ class ProductionToolHost:
         if not used_model:
             result["degraded"] = True
             result["note"] = "未调用或未配置视频理解模型，这是本地切分/降级结果，不是模型理解。"
+        result.update(write_creative_context(self.settings, production))
         assert_no_forbidden_claim(result)
         return result
 
@@ -231,7 +232,14 @@ class ProductionToolHost:
             for item in refs
         ]
         self.db.update_production(production_id, {"intent": intent})
-        return {"production_id": production_id, "references": intent["references"], "count": len(refs)}
+        production = self._production(production_id)
+        context_paths = write_creative_context(self.settings, production)
+        return {
+            "production_id": production_id,
+            "references": intent["references"],
+            "count": len(refs),
+            **context_paths,
+        }
 
     def lock_timeline_opening(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         production_id = self._pid(arguments, context)
@@ -299,18 +307,21 @@ class ProductionToolHost:
             "error": None,
         }
         self.db.update_production(production_id, updates)
+        context_paths = write_creative_context(self.settings, self._production(production_id))
         return {
             "production_id": production_id,
             "status": "running",
             "candidate_ids": ids,
             "paused": False,
             "message": "3 个创意已写入，接下来会分别生成并合成候选视频。",
+            **context_paths,
         }
 
     def get_production_state(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         production_id = self._pid(arguments, context)
         production = self._production(production_id)
         output = production.get("output") or {}
+        context_paths = creative_context_paths(self.settings, production)
         return {
             "production_id": production_id,
             "status": production.get("status"),
@@ -328,6 +339,7 @@ class ProductionToolHost:
                 "video_path": output.get("video_path"),
                 "srt_path": output.get("srt_path"),
                 "video_url": output.get("video_url"),
+                **context_paths,
             },
             "agent_trace": production.get("agent_trace") or [],
         }
@@ -518,7 +530,7 @@ class ProductionToolHost:
         if not production.get("selected_script_id"):
             raise ProductionToolError("还没有选定脚本，不能生成视频")
         if production.get("status") == "awaiting_script_choice":
-            raise ProductionToolError("还在等待选择脚本，不能生成视频")
+            raise ProductionToolError("旧脚本选择状态已停用，请重新提交三套脚本")
         _public, _secrets, provider = self._validate_video_generation(
             production_id,
             production.get("script") or {},
@@ -691,25 +703,6 @@ class ProductionToolHost:
                 "paused": True,
                 "resume_from": "finalize",
                 "message": "已记录所选视频，继续最终合成即可出片。",
-            }
-        if action == "select":
-            chosen = candidate_by_id(production.get("script_candidates") or [], detail)
-            if not chosen:
-                raise ProductionToolError("脚本候选不存在")
-            self.db.update_production(
-                production_id,
-                {
-                    "script": chosen.get("script") or production.get("script"),
-                    "selected_script_id": chosen["id"],
-                    "error": None,
-                },
-            )
-            return {
-                "action": "select",
-                "production_id": production_id,
-                "script_id": chosen["id"],
-                "paused": True,
-                "message": "已记录所选脚本，需要再调用生成工具才会出片。",
             }
         if detail == "ingest":
             detail = "script" if production.get("script_candidates") else "intent"

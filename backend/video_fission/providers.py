@@ -9,9 +9,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
-from typing import Any, Callable
+from typing import Any
 
 from . import media
 from .logging_utils import prompt_preview, safe_url, summarize_messages
@@ -177,7 +178,6 @@ def generate_remote_video(
     source: str = "",
     resolution: str = "720p",
     cancel: Event | None = None,
-    input_contents: list[dict[str, Any]] | None = None,
     on_submitted: Callable[[str], None] | None = None,
     external_task_id: str | None = None,
 ) -> Path:
@@ -188,7 +188,7 @@ def generate_remote_video(
     started = time.perf_counter()
     logger.info(
         "video.generate_request_started provider=%s endpoint=%s model=%s duration_ms=%s "
-        "target=%sx%s fps=%.3f prompt_chars=%s inputs=%s",
+        "target=%sx%s fps=%.3f prompt_chars=%s",
         provider,
         safe_url(base_url),
         model or "-",
@@ -197,7 +197,6 @@ def generate_remote_video(
         height,
         fps,
         len(prompt),
-        len(input_contents or []),
     )
     preview = prompt_preview(prompt)
     if preview:
@@ -216,7 +215,6 @@ def generate_remote_video(
             source=source,
             resolution=resolution,
             cancel=cancel,
-            input_contents=input_contents,
             on_submitted=on_submitted,
         )
     payload = {
@@ -304,38 +302,6 @@ def generate_remote_video(
     return dest
 
 
-def build_reference_input_contents(
-    video_url: str = "",
-    vocals_url: str = "",
-    bgm_url: str = "",
-) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    if video_url:
-        items.append({"type": "video_url", "role": "reference_video", "url": video_url})
-    if vocals_url:
-        items.append({"type": "audio_url", "role": "reference_audio", "url": vocals_url})
-    if bgm_url:
-        items.append({"type": "audio_url", "role": "reference_audio", "url": bgm_url})
-    return items
-
-
-def public_media_url(base_url: str, production_id: str, name: str) -> tuple[str, str]:
-    """Return (url, warning). Never claim a localhost URL is publicly reachable."""
-    base = str(base_url or "").strip().rstrip("/")
-    name = str(name or "").lstrip("/")
-    path = f"/api/productions/{production_id}/artifacts/{name}"
-    if not base:
-        return "", "未配置 media_public_base_url，参考音视频未写成公网 URL，Seedance 无法保证能拉取"
-    from urllib.parse import urlparse
-
-    host = (urlparse(base).hostname or "").lower()
-    url = f"{base}{path}"
-    private = host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost")
-    if private or host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
-        return url, "media_public_base_url 指向本机或内网，Seedance 通常无法拉取，请改成公网可访问地址"
-    return url, ""
-
-
 def build_seedance_submit_payload(
     model: str,
     prompt: str,
@@ -344,7 +310,6 @@ def build_seedance_submit_payload(
     height: int,
     source: str = "",
     resolution: str = "720p",
-    input_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     requested_duration, submitted_duration = seedance_duration_seconds(duration_ms)
     payload = {
@@ -362,8 +327,6 @@ def build_seedance_submit_payload(
             "return_last_frame": False,
         },
     }
-    if input_contents:
-        payload["input_contents"] = list(input_contents)
     if submitted_duration != requested_duration:
         logger.warning(
             "video.seedance_duration_adjusted model=%s requested_s=%s submitted_s=%s "
@@ -400,14 +363,12 @@ def generate_seedance_video(
     source: str = "",
     resolution: str = "720p",
     cancel: Event | None = None,
-    input_contents: list[dict[str, Any]] | None = None,
     on_submitted: Callable[[str], None] | None = None,
     external_task_id: str | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel)
     if external_task_id:
         return resume_remote_video("seedance", base_url, api_key, external_task_id, timeout, dest, cancel)
-    started = time.perf_counter()
     if not base_url:
         raise ProviderError("Seedance 未配置 base_url")
     if not api_key:
@@ -420,7 +381,6 @@ def generate_seedance_video(
         height,
         source=source,
         resolution=resolution,
-        input_contents=input_contents,
     )
     requested_duration = max(1, int(math.ceil(max(duration_ms, 1) / 1000)))
     submitted_duration = int(payload["duration"])
@@ -428,7 +388,7 @@ def generate_seedance_video(
     logger.info(
         "video.seedance_submit_started endpoint=%s model=%s duration_ms=%s "
         "requested_duration_s=%s submitted_duration_s=%s "
-        "target=%sx%s resolution=%s prompt_chars=%s inputs=%s",
+        "target=%sx%s resolution=%s prompt_chars=%s",
         safe_url(submit_url),
         payload.get("model"),
         duration_ms,
@@ -438,7 +398,6 @@ def generate_seedance_video(
         height,
         resolution,
         len(prompt),
-        len(input_contents or []),
     )
     response = _request_seedance(
         submit_url,

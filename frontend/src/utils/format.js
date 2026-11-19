@@ -62,7 +62,7 @@ export const STATUS_LABELS = {
   draft: '草稿',
   running: '进行中',
   awaiting_creative_context: '等待生成脚本',
-  awaiting_script_choice: '待选择脚本',
+  awaiting_script_choice: '自动生成准备中',
   awaiting_video_choice: '待选择视频',
   completed: '已完成',
   failed: '失败',

@@ -1276,6 +1276,21 @@ class Database:
                     WHERE production_id=? AND status='running' AND external_task_id IS NULL""", (utc_now(), pid))
         return ids
 
+    def legacy_script_choice_productions(self) -> list[str]:
+        rows = self.query(
+            """
+            SELECT id, script_candidates FROM productions
+            WHERE status='awaiting_script_choice'
+            ORDER BY updated_at ASC
+            """
+        )
+        return [
+            str(row["id"])
+            for row in rows
+            if isinstance((candidates := _load(row["script_candidates"], [])), list)
+            and len(candidates) == 3
+        ]
+
     def create_production(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
         values = {

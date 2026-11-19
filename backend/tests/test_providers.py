@@ -30,6 +30,7 @@ def test_seedance_payload_uses_supported_duration():
     )
 
     assert payload["duration"] == 15
+    assert "input_contents" not in payload
 
 
 def test_seedance_submission_adapts_long_shot_before_remote_call(monkeypatch, tmp_path: Path):
@@ -67,4 +68,5 @@ def test_seedance_submission_adapts_long_shot_before_remote_call(monkeypatch, tm
 
     assert submitted[0] is not None
     assert submitted[0]["duration"] == 15
+    assert "input_contents" not in submitted[0]
     assert dest.read_bytes() == b"video"

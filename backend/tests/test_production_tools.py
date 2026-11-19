@@ -129,6 +129,20 @@ def test_candidate_generation_fails_honestly_without_key(app_env):
         assert phrase not in output_blob
 
 
+def test_get_state_does_not_rewrite_creative_context(app_env, monkeypatch):
+    production = create_production(app_env.productions)
+    pid = production["id"]
+    _payload(_execute(app_env, "ingest_reference_video", pid))
+    _payload(_execute(app_env, "understand_reference_video", pid))
+
+    def forbidden_write(*_args, **_kwargs):
+        raise AssertionError("get_production_state 不应写入上下文文件")
+
+    monkeypatch.setattr("video_fission.production_tools.write_creative_context", forbidden_write)
+    state = _payload(_execute(app_env, "get_production_state", pid))
+    assert state["artifacts"]["context_path"].endswith("creative-context.json")
+
+
 def test_candidate_generation_outputs_three_videos_and_pauses(app_env, monkeypatch):
     production = create_production(app_env.productions)
     pid = production["id"]
@@ -261,10 +275,11 @@ def test_followup_stays_on_same_production_and_does_not_restart_ingest(app_env):
     assert production["status"] == "running"
     selected = _payload(_execute(app_env, "handle_production_followup", pid, text="选方案 1"))
     assert selected["production_id"] == pid
-    assert selected["action"] == "select"
-    assert selected.get("paused") is True
+    assert selected["action"] == "resume"
+    assert selected["resume_from"] == "script"
+    assert selected.get("paused") is not True
     production = app_env.db.get_production(pid)
-    assert production["selected_script_id"] == "script_1"
+    assert production["selected_script_id"] is None
     assert production["status"] == "running"
 
 

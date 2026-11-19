@@ -218,7 +218,7 @@ defineExpose({ scrollToBottom })
 
         <template v-if="item.item_type === 'userMessage'">
           <div class="user-message" data-testid="user-message">
-            <div class="user-label">QUERY</div>
+            <div class="user-label">你的问题</div>
             <p>{{ item.payload?.text }}</p>
             <div v-if="item.payload?.mentions?.length" class="mention-row">
               <span v-for="mention in item.payload.mentions" :key="mention.path">
@@ -255,7 +255,7 @@ defineExpose({ scrollToBottom })
               <span
                 class="memo-status"
                 :class="{ live: item.status === 'inProgress' }"
-              >{{ item.status === 'inProgress' ? 'RUNNING' : 'COMPLETE' }}</span>
+              >{{ item.status === 'inProgress' ? '执行中' : '已完成' }}</span>
             </div>
             <div class="markdown-body" v-html="renderMarkdown(payloadText(item))"></div>
             <span v-if="item.status === 'inProgress'" class="typing-caret"></span>

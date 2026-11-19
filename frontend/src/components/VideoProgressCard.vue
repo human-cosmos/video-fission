@@ -32,6 +32,55 @@ const stages = computed(() => {
             : 'pending',
   }))
 })
+const pipelineStages = computed(() => stages.value.filter((stage) => stage.id !== 'done'))
+const completedStages = computed(() =>
+  pipelineStages.value.filter((stage) => stage.state === 'done'),
+)
+const activeStage = computed(
+  () =>
+    pipelineStages.value.find((stage) =>
+      ['active', 'awaiting', 'failed', 'cancelled'].includes(stage.state),
+    ) || null,
+)
+const futureStages = computed(() =>
+  pipelineStages.value.filter((stage) => stage.state === 'pending'),
+)
+const activeStageIndex = computed(() =>
+  activeStage.value
+    ? pipelineStages.value.findIndex((stage) => stage.id === activeStage.value.id) + 1
+    : 0,
+)
+const allStagesDone = computed(
+  () =>
+    pipelineStages.value.length > 0 &&
+    pipelineStages.value.every((stage) => stage.state === 'done'),
+)
+const statusTitle = computed(() => {
+  if (awaitingScript.value) return '等待选择创意脚本'
+  if (status.value === 'failed') {
+    return activeStage.value ? `${activeStage.value.label}阶段失败` : '视频任务执行失败'
+  }
+  if (status.value === 'cancelled') return '视频任务已取消'
+  if (status.value === 'completed' || allStagesDone.value) return '视频任务已完成'
+  if (status.value !== 'running') return STATUS_LABELS[status.value] || status.value || '任务进度'
+
+  return {
+    ingest: '正在接入参考素材',
+    decompose: '正在拆解参考视频',
+    intent: '正在提炼创作意图',
+    script: '正在生成创意脚本',
+    generate: '正在生成视频片段',
+    compose: '正在合成最终成片',
+  }[currentStage.value] || '正在推进视频任务'
+})
+const stageProgressText = computed(() => {
+  if (allStagesDone.value) return `${pipelineStages.value.length} 个阶段已完成`
+  if (!activeStage.value) return STATUS_LABELS[status.value] || '等待下一阶段'
+  return `${activeStage.value.label} · ${activeStageIndex.value}/${pipelineStages.value.length}`
+})
+const futureStagePath = computed(() =>
+  futureStages.value.map((stage) => stage.label).join(' → '),
+)
 const currentActivity = computed(() => {
   if (!isRunning.value) return null
   const items = (props.payload?.activity || []).filter(
@@ -56,6 +105,14 @@ function stageStatusText(state) {
   }[state] || '待执行'
 }
 
+function stageSummary(stage) {
+  const outputs = (stage.outputs || [])
+    .map((row) => row.value)
+    .filter(Boolean)
+  if (outputs.length) return outputs.join(' · ')
+  return stage.description || '阶段已完成'
+}
+
 function formatClock(value) {
   if (!value) return ''
   const date = new Date(value)
@@ -70,18 +127,28 @@ function formatClock(value) {
 </script>
 
 <template>
-  <section class="video-card studio-card" data-testid="video-progress-card">
-    <div class="status-row">
-      <strong>{{ STATUS_LABELS[status] || status || '任务进度' }}</strong>
+  <section
+    class="video-card studio-card"
+    :class="`production-status-${status || 'pending'}`"
+    data-testid="video-progress-card"
+  >
+    <header class="production-status-row">
+      <div class="production-status-main">
+        <span class="production-status-signal" aria-hidden="true"></span>
+        <span class="production-status-copy">
+          <strong>{{ statusTitle }}</strong>
+          <small>{{ stageProgressText }}</small>
+        </span>
+      </div>
       <span v-if="payload.production_id" class="production-reference">
         <span data-testid="video-production-id">{{ payload.production_id }}</span>
         <time v-if="formatClock(payload.updated_at)">{{ formatClock(payload.updated_at) }}</time>
       </span>
-    </div>
-    <ol class="stage-rail">
-      <li v-for="stage in stages" :key="stage.id" :class="stage.state">
+    </header>
+    <ol class="stage-rail" aria-label="视频任务阶段">
+      <li v-for="stage in pipelineStages" :key="stage.id" :class="stage.state">
         <i></i>
-        {{ stage.label }}
+        <span>{{ stage.label }}</span>
       </li>
     </ol>
     <div
@@ -93,51 +160,175 @@ function formatClock(value) {
       <span>{{ currentActivity.text }}</span>
       <small v-if="currentActivity.detail">{{ currentActivity.detail }}</small>
     </div>
-    <ol class="production-step-list" data-testid="video-production-steps">
+
+    <details v-if="allStagesDone" class="production-completed-summary">
+      <summary>
+        <span class="production-completed-check"><Check :size="13" /></span>
+        <span>
+          <strong>全部阶段已完成</strong>
+          <small>查看阶段明细与执行记录</small>
+        </span>
+        <ChevronRight :size="15" />
+      </summary>
+      <ol class="production-step-list" data-testid="video-production-steps">
+        <li
+          v-for="stage in completedStages"
+          :key="stage.id"
+          class="production-step is-done production-step--completed"
+          :data-testid="`video-production-step-${stage.id}`"
+        >
+          <details class="production-step-disclosure">
+            <summary>
+              <span class="production-step-marker" aria-hidden="true">
+                <Check :size="12" />
+              </span>
+              <span class="production-step-summary">
+                <span class="production-step-heading">
+                  <strong>{{ stage.label }}</strong>
+                  <span>{{ stageStatusText(stage.state) }}</span>
+                </span>
+                <span class="production-step-compact">{{ stageSummary(stage) }}</span>
+              </span>
+              <ChevronRight :size="14" />
+            </summary>
+            <div class="production-step-content">
+              <p v-if="stage.description" class="production-step-description">
+                {{ stage.description }}
+              </p>
+              <dl v-if="stage.outputs?.length" class="production-step-output">
+                <div v-for="row in stage.outputs" :key="row.label">
+                  <dt>{{ row.label }}</dt>
+                  <dd>{{ row.value }}</dd>
+                </div>
+              </dl>
+              <details v-if="stage.activities?.length" class="production-step-log">
+                <summary>
+                  <ChevronRight :size="13" />
+                  执行记录
+                  <small>{{ stage.activities.length }}</small>
+                </summary>
+                <ol>
+                  <li
+                    v-for="activity in stage.activities"
+                    :key="`${activity.id}-${activity.created_at}`"
+                    :class="`tone-${activity.tone}`"
+                  >
+                    <time>{{ formatClock(activity.created_at) }}</time>
+                    <div>
+                      <span>{{ activity.text }}</span>
+                      <small v-if="activity.detail">{{ activity.detail }}</small>
+                    </div>
+                  </li>
+                </ol>
+              </details>
+            </div>
+          </details>
+        </li>
+      </ol>
+    </details>
+
+    <ol v-else class="production-step-list" data-testid="video-production-steps">
       <li
-        v-for="(stage, index) in stages"
+        v-for="stage in completedStages"
         :key="stage.id"
-        class="production-step"
-        :class="[`is-${stage.state}`, { 'has-output': stage.outputs?.length }]"
+        class="production-step is-done production-step--completed"
         :data-testid="`video-production-step-${stage.id}`"
       >
+        <details class="production-step-disclosure">
+          <summary>
+            <span class="production-step-marker" aria-hidden="true">
+              <Check :size="12" />
+            </span>
+            <span class="production-step-summary">
+              <span class="production-step-heading">
+                <strong>{{ stage.label }}</strong>
+                <span>{{ stageStatusText(stage.state) }}</span>
+              </span>
+              <span class="production-step-compact">{{ stageSummary(stage) }}</span>
+            </span>
+            <ChevronRight :size="14" />
+          </summary>
+          <div class="production-step-content">
+            <p v-if="stage.description" class="production-step-description">
+              {{ stage.description }}
+            </p>
+            <dl v-if="stage.outputs?.length" class="production-step-output">
+              <div v-for="row in stage.outputs" :key="row.label">
+                <dt>{{ row.label }}</dt>
+                <dd>{{ row.value }}</dd>
+              </div>
+            </dl>
+            <details v-if="stage.activities?.length" class="production-step-log">
+              <summary>
+                <ChevronRight :size="13" />
+                执行记录
+                <small>{{ stage.activities.length }}</small>
+              </summary>
+              <ol>
+                <li
+                  v-for="activity in stage.activities"
+                  :key="`${activity.id}-${activity.created_at}`"
+                  :class="`tone-${activity.tone}`"
+                >
+                  <time>{{ formatClock(activity.created_at) }}</time>
+                  <div>
+                    <span>{{ activity.text }}</span>
+                    <small v-if="activity.detail">{{ activity.detail }}</small>
+                  </div>
+                </li>
+              </ol>
+            </details>
+          </div>
+        </details>
+      </li>
+
+      <li
+        v-if="activeStage"
+        class="production-step production-step--active"
+        :class="`is-${activeStage.state}`"
+        :data-testid="`video-production-step-${activeStage.id}`"
+      >
         <span class="production-step-marker" aria-hidden="true">
-          <Check v-if="stage.state === 'done'" :size="13" />
-          <LoaderCircle v-else-if="stage.state === 'active'" class="is-spinning" :size="13" />
-          <X v-else-if="stage.state === 'failed' || stage.state === 'cancelled'" :size="13" />
-          <template v-else>{{ index + 1 }}</template>
+          <LoaderCircle
+            v-if="activeStage.state === 'active' && !currentActivity"
+            class="is-spinning"
+            :size="13"
+          />
+          <X v-else-if="activeStage.state === 'failed' || activeStage.state === 'cancelled'" :size="13" />
+          <span v-else class="production-step-dot"></span>
         </span>
         <div class="production-step-content">
           <div class="production-step-heading">
-            <strong>{{ stage.label }}</strong>
-            <span>{{ stageStatusText(stage.state) }}</span>
+            <strong>{{ activeStage.label }}</strong>
+            <span>{{ stageStatusText(activeStage.state) }}</span>
           </div>
-          <p class="production-step-description">{{ stage.description }}</p>
-          <dl v-if="stage.outputs?.length" class="production-step-output">
-            <div v-for="row in stage.outputs" :key="row.label">
+          <p v-if="activeStage.description" class="production-step-description">
+            {{ activeStage.description }}
+          </p>
+          <p
+            v-if="
+              activeStage.state === 'awaiting' ||
+              (activeStage.state === 'active' && !currentActivity)
+            "
+            class="production-step-pending"
+          >
+            {{ activeStage.state === 'awaiting' ? '等待选择脚本后继续' : '正在处理，结果完成后显示' }}
+          </p>
+          <dl v-if="activeStage.outputs?.length" class="production-step-output">
+            <div v-for="row in activeStage.outputs" :key="row.label">
               <dt>{{ row.label }}</dt>
               <dd>{{ row.value }}</dd>
             </div>
           </dl>
-          <p
-            v-else-if="stage.state === 'active' || stage.state === 'awaiting'"
-            class="production-step-pending"
-          >
-            {{ stage.state === 'awaiting' ? '等待选择脚本后继续' : '正在处理，结果完成后显示' }}
-          </p>
-          <details
-            v-if="stage.activities?.length"
-            class="production-step-log"
-            :open="stage.state === 'active' || stage.state === 'failed'"
-          >
+          <details v-if="activeStage.activities?.length" class="production-step-log">
             <summary>
               <ChevronRight :size="13" />
               执行记录
-              <small>{{ stage.activities.length }}</small>
+              <small>{{ activeStage.activities.length }}</small>
             </summary>
             <ol>
               <li
-                v-for="activity in stage.activities"
+                v-for="activity in activeStage.activities"
                 :key="`${activity.id}-${activity.created_at}`"
                 :class="`tone-${activity.tone}`"
               >
@@ -149,6 +340,17 @@ function formatClock(value) {
               </li>
             </ol>
           </details>
+        </div>
+      </li>
+
+      <li v-if="futureStages.length" class="production-step production-step--upcoming">
+        <span class="production-step-marker" aria-hidden="true">{{ futureStages.length }}</span>
+        <div class="production-step-content">
+          <div class="production-step-heading">
+            <strong>后续阶段</strong>
+            <span>自动推进</span>
+          </div>
+          <p class="production-step-description">{{ futureStagePath }}</p>
         </div>
       </li>
     </ol>

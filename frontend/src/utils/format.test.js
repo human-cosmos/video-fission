@@ -74,6 +74,7 @@ describe('format helpers', () => {
     expect(needsRemoteFields('openai_compatible')).toBe(true)
     expect(needsRemoteFields('generic_http')).toBe(true)
     expect(needsRemoteFields('gemini_gateway')).toBe(true)
+    expect(needsRemoteFields('seedance')).toBe(true)
   })
 })
 

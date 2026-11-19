@@ -30,10 +30,34 @@ const emit = defineEmits([
   'select-script',
   'regenerate-scripts',
   'regenerate-video',
+  'use-prompt',
 ])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
 const displayItems = computed(() => groupExecutionItems(props.conversation?.items || []))
+const starterTickets = [
+  {
+    title: '参考视频拆解',
+    desc: '看懂卖点、节奏、镜头与叙事结构',
+    prompt: '帮我拆解一个参考视频：它为什么抓人，哪些结构可以复用？',
+  },
+  {
+    title: '短视频脚本',
+    desc: '保留有效结构，换一个更有记忆点的开场',
+    prompt: '把一个产品卖点拆成 30 秒短视频，先给我 3 个不同方向的开场。',
+  },
+  {
+    title: '镜头级规划',
+    desc: '把脚本拆成可执行的镜头、素材与生成要求',
+    prompt: '把这条短视频脚本拆成镜头级执行方案，并标出每个镜头的素材需求。',
+  },
+]
+const starterAsks = [
+  ['卖点拆解', '把一个产品卖点拆成 30 秒短视频'],
+  ['开场钩子', '为美妆新品写一个反常识开场'],
+  ['脚本结构', '设计一套三段式种草脚本'],
+  ['镜头复盘', '复盘这条视频的镜头节奏和转场问题'],
+]
 
 function scrollToBottom(behavior = 'smooth') {
   nextTick(() => {
@@ -131,18 +155,50 @@ defineExpose({ scrollToBottom })
 
 <template>
   <div ref="scroller" class="message-scroller">
-    <div v-if="!conversation" class="hero-empty">
-      <div class="hero-eyebrow"><span></span> CREATIVE OPERATIONS ENGINE</div>
-      <h1>把一个视频想法<br />切成<span>可执行的镜头。</span></h1>
-      <p>
-        对话、推演、查资料、写脚本、调用工具。所有上下文与执行轨迹留在同一个工作台。
-      </p>
-      <div class="hero-metrics">
-        <div><strong>01</strong><span>持续对话</span></div>
-        <div><strong>02</strong><span>Skill 复用</span></div>
-        <div><strong>03</strong><span>Tool 落地</span></div>
+    <div v-if="!conversation" class="welcome">
+      <header class="welcome-head">
+        <h2>先看再拆</h2>
+        <p>
+          从参考视频、卖点和目标受众出发，先拿到判断，再进入脚本与镜头。上传素材、追问方向、继续执行，上下文都留在这张工作台上。
+        </p>
+        <div class="welcome-signal" aria-label="Video Fission 工作范围">
+          <span><i></i>视频理解</span>
+          <span><i></i>脚本规划</span>
+          <span><i></i>镜头拆解</span>
+          <span><i></i>成片生成</span>
+        </div>
+      </header>
+
+      <div class="tickets" role="list">
+        <button
+          v-for="(ticket, index) in starterTickets"
+          :key="ticket.title"
+          type="button"
+          class="ticket"
+          role="listitem"
+          @click="$emit('use-prompt', ticket.prompt)"
+        >
+          <span class="ticket-index">0{{ index + 1 }}</span>
+          <span class="ticket-body">
+            <span class="ticket-name">{{ ticket.title }}</span>
+            <span class="ticket-desc">{{ ticket.desc }}</span>
+          </span>
+          <span class="ticket-arrow" aria-hidden="true">↗</span>
+        </button>
       </div>
-      <div class="hero-beam" aria-hidden="true"></div>
+
+      <div class="asks">
+        <p class="asks-title">推荐指令</p>
+        <button
+          v-for="item in starterAsks"
+          :key="item[0]"
+          type="button"
+          class="ask"
+          @click="$emit('use-prompt', item[1])"
+        >
+          {{ item[1] }}
+        </button>
+      </div>
     </div>
 
     <div v-else class="transcript" data-testid="message-timeline">
@@ -162,7 +218,7 @@ defineExpose({ scrollToBottom })
 
         <template v-if="item.item_type === 'userMessage'">
           <div class="user-message" data-testid="user-message">
-            <div class="user-label">YOU <span>INPUT</span></div>
+            <div class="user-label">QUERY</div>
             <p>{{ item.payload?.text }}</p>
             <div v-if="item.payload?.mentions?.length" class="mention-row">
               <span v-for="mention in item.payload.mentions" :key="mention.path">
@@ -190,23 +246,30 @@ defineExpose({ scrollToBottom })
 
         <template v-else-if="item.item_type === 'agentMessage'">
           <div class="agent-message">
-            <div class="agent-heading">
-              <span class="agent-glyph">VF</span>
-              <div>
+            <div class="memo-head">
+              <span class="memo-agent-mark">VF</span>
+              <span class="memo-agent-copy">
                 <strong>Video Fission</strong>
-                <small>{{ item.status === 'inProgress' ? '正在生成' : '智能中枢' }}</small>
-              </div>
-              <button
-                v-if="payloadText(item)"
-                class="icon-button compact"
-                title="复制回复"
-                @click="copyText(payloadText(item))"
-              >
-                <Copy :size="14" />
-              </button>
+                <small>视频拆解与创作智能体</small>
+              </span>
+              <span
+                class="memo-status"
+                :class="{ live: item.status === 'inProgress' }"
+              >{{ item.status === 'inProgress' ? 'RUNNING' : 'COMPLETE' }}</span>
             </div>
             <div class="markdown-body" v-html="renderMarkdown(payloadText(item))"></div>
             <span v-if="item.status === 'inProgress'" class="typing-caret"></span>
+            <footer v-if="payloadText(item)" class="memo-foot">
+              <button
+                class="memo-action"
+                type="button"
+                title="复制回复"
+                @click="copyText(payloadText(item))"
+              >
+                <Copy :size="13" />
+                复制
+              </button>
+            </footer>
           </div>
         </template>
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -15,17 +16,46 @@ from . import container
 from .api.auth import router as auth_router
 from .api.routes import router
 from .config import settings
-from .logging_utils import configure_logging, log_context, safe_request_id
+from .logging_utils import configure_logging, log_context, logging_status, safe_request_id
 
-configure_logging(Path(__file__).resolve().parents[2])
+configure_logging(Path(__file__).resolve().parents[2], force_file=True)
 logger = logging.getLogger(__name__)
+
+
+def _is_expected_client_disconnect(context: dict[str, object]) -> bool:
+    exc = context.get("exception")
+    if not isinstance(exc, ConnectionResetError):
+        return False
+    error_code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    if error_code != 10054:
+        return False
+    return "_call_connection_lost" in str(context.get("handle") or "")
+
+
+def _install_asyncio_exception_handler() -> None:
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+
+    def handle_exception(_loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        if _is_expected_client_disconnect(context):
+            logger.debug("asyncio.client_disconnect_ignored")
+            return
+        if previous is not None:
+            previous(_loop, context)
+        else:
+            _loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handle_exception)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _install_asyncio_exception_handler()
+    logger.info("application.starting log_file=%s", logging_status().get("path") or "-")
     container.hub.initialize()
     yield
     container.hub.shutdown()
+    logger.info("application.stopped")
 
 
 app = FastAPI(

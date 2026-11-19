@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { outputSrtUrl, outputVideoUrl } from '../utils/productionMedia'
+import { outputVideoUrl } from '../utils/productionMedia'
 import AspectVideo from './AspectVideo.vue'
 
 const props = defineProps({
@@ -8,7 +8,6 @@ const props = defineProps({
 })
 
 const videoUrl = computed(() => outputVideoUrl(props.payload))
-const srtUrl = computed(() => outputSrtUrl(props.payload))
 const dims = computed(() => {
   const source = props.payload?.output || props.payload || {}
   return {
@@ -19,7 +18,7 @@ const dims = computed(() => {
 </script>
 
 <template>
-  <section v-if="videoUrl || srtUrl" class="video-card studio-card studio-output video-output" data-testid="video-output-card">
+  <section v-if="videoUrl" class="video-card studio-card studio-output video-output" data-testid="video-output-card">
     <h3>成片</h3>
     <AspectVideo
       v-if="videoUrl"
@@ -37,15 +36,6 @@ const dims = computed(() => {
         download="final.mp4"
       >
         下载 MP4
-      </a>
-      <a
-        v-if="srtUrl"
-        class="button subtle"
-        data-testid="video-download-srt"
-        :href="srtUrl"
-        download="final.srt"
-      >
-        下载 SRT
       </a>
     </div>
   </section>

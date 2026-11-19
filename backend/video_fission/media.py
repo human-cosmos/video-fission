@@ -501,69 +501,6 @@ def cut_segment(
     return dest
 
 
-def ken_burns_clip(
-    image: Path,
-    dest: Path,
-    duration_ms: int,
-    width: int,
-    height: int,
-    fps: float,
-    text: str = "",
-    overlay_text: bool = True,
-) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(
-        "media.ken_burns_started image=%s output=%s duration_ms=%s target=%sx%s fps=%.3f text_chars=%s overlay_text=%s",
-        image.name,
-        dest.name,
-        duration_ms,
-        width,
-        height,
-        fps,
-        len(text),
-        overlay_text,
-    )
-    _frames, duration = exact_seconds(max(duration_ms, 200), fps)
-    # Slow pan + zoom. Skip drawtext when overlay_text is off so burned
-    # subtitles do not stack on top of the same words.
-    vf = (
-        f"scale={int(width * 1.18)}:{int(height * 1.18)},"
-        f"crop={width}:{height}:x='(in_w-out_w)*t/{duration:.4f}':"
-        f"y='(in_h-out_h)*t/{max(duration * 1.15, 0.2):.4f}',"
-        f"fps={fps:.4f}"
-    )
-    label = escape_drawtext((text or "").strip()[:24])
-    if overlay_text and label:
-        font = default_font()
-        vf += (
-            f",drawtext=fontfile='{font}':text='{label}':fontsize="
-            f"{max(int(height * 0.06), 28)}:fontcolor=white:"
-            "borderw=2:bordercolor=black@0.6:x=(w-text_w)/2:y=h*0.78"
-        )
-    run_ffmpeg(
-        [
-            ffmpeg_bin(),
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            str(image),
-            "-t",
-            f"{duration:.6f}",
-            "-vf",
-            limited_range_vf(vf),
-            *limited_x264_args(),
-            "-an",
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ],
-        timeout=120,
-    )
-    logger.info("media.ken_burns_completed output=%s size=%s", dest.name, dest.stat().st_size)
-    return dest
-
-
 def add_silence_audio(video: Path, dest: Path, duration_ms: int) -> Path:
     duration = max(duration_ms, 1) / 1000
     run_ffmpeg(

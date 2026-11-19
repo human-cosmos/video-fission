@@ -41,6 +41,30 @@ def test_database_persists_conversation_items_and_events(test_settings):
     assert reopened.list_events(conversation["id"])[0]["id"] == event_id
 
 
+def test_only_proactor_connection_reset_disconnects_are_filtered():
+    from video_fission.main import _is_expected_client_disconnect
+
+    disconnect = ConnectionResetError(10054, "connection reset")
+    assert _is_expected_client_disconnect(
+        {
+            "exception": disconnect,
+            "handle": "Handle _ProactorBasePipeTransport._call_connection_lost()",
+        }
+    )
+    assert not _is_expected_client_disconnect(
+        {
+            "exception": disconnect,
+            "handle": "Handle other_callback()",
+        }
+    )
+    assert not _is_expected_client_disconnect(
+        {
+            "exception": RuntimeError("unexpected"),
+            "handle": "Handle _ProactorBasePipeTransport._call_connection_lost()",
+        }
+    )
+
+
 def test_skill_crud_and_toggle(test_settings):
     manager = SkillManager(
         test_settings.skills_dir,

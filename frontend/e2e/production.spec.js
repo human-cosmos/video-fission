@@ -29,10 +29,11 @@ test("settings entry lives in the sidebar, not the top bar", async ({ page }) =>
   await expect(page.getByText("多模态理解", { exact: true })).toHaveCount(0)
   await expect(page.getByText("视频生成", { exact: true })).toHaveCount(0)
   await expect(page.getByText("配音 TTS", { exact: true })).toHaveCount(0)
-  await expect(page.getByTestId("settings-understand")).toBeVisible()
-  await expect(page.getByTestId("settings-understand-observe")).toBeVisible()
-  await expect(page.getByTestId("save-settings")).toBeDisabled()
-  await expect(page.getByText("设置已同步", { exact: true })).toBeVisible()
+  await expect(page.getByTestId("settings-understand")).toHaveCount(0)
+  await expect(page.getByTestId("settings-video-generator")).toHaveCount(0)
+  await expect(page.getByTestId("settings-understand-observe")).toHaveCount(0)
+  await expect(page.getByTestId("save-settings")).toHaveCount(0)
+  await expect(page.getByRole("heading", { name: "Skill 与 Tool" })).toBeVisible()
   await page.getByTestId("sidebar-user-menu").click()
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible()
   await page.getByTestId("new-conversation").click()
@@ -56,6 +57,18 @@ test("runs a production inside a conversation, then regenerates a selected segme
   page,
   request,
 }) => {
+  const configured = await request.put("/api/settings", {
+    data: {
+      video_generator: {
+        provider: "generic_http",
+        base_url: "http://127.0.0.1:8002",
+        model: "e2e-video",
+        resolution: "480p",
+        timeout_seconds: 120,
+      },
+    },
+  })
+  expect(configured.ok()).toBeTruthy()
   await page.goto("/")
   await page.getByTestId("new-conversation").click()
   await expect(page.getByTestId("message-input")).toBeVisible()
@@ -79,7 +92,7 @@ test("runs a production inside a conversation, then regenerates a selected segme
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-player")).toBeVisible()
   await expect(page.getByTestId("video-download-mp4")).toBeVisible()
-  await expect(page.getByTestId("video-download-srt")).toBeVisible()
+  await expect(page.getByTestId("video-download-srt")).toHaveCount(0)
   await expect(page.getByTestId("video-production-step-decompose")).toContainText("切片结果")
   await expect(page.getByTestId("video-production-step-generate")).toContainText("片段结果")
   await expect(page.getByTestId("video-production-step-compose")).toContainText("成片文件")

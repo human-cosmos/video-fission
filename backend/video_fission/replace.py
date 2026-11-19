@@ -30,7 +30,7 @@ _CN_ORDINAL = {
 }
 
 _REWRITE = re.compile(
-    r"重新生成|再生成|新生成|重做|重制|再做|只做|只重做|只重|"
+    r"重新生成|再生成|新生成|重做|重制|再做|只做|只重做|只重|替换|换掉|换成|"
     r"regenerate|re-?generate|\bredo\b|\breplace\b",
     re.I,
 )
@@ -99,9 +99,9 @@ def normalize_replace_policy(raw: Any) -> dict[str, Any]:
 
 
 _REWRITE_NOISE = re.compile(
-    r"把|将|请|帮我|一下|和|与|以及|再|也要|也得|同样|也|要|的|了|吧|啊|"
+    r"把|将|请|帮我|一下|一个|个|和|与|以及|再|也要|也得|同样|也|要|的|了|吧|啊|"
     r"全部|所有|整个|原片|参考片|"
-    r"开场|开头|中间|结尾|价值段|商品展示|行动号召|hook|value|cta|段|镜头|片段",
+    r"开场|开头|中间|结尾|价值段|商品展示|行动号召|创意|想法|方案|hook|value|cta|段|镜头|片段",
     re.I,
 )
 
@@ -293,7 +293,11 @@ def apply_replace_plan(script: dict[str, Any], production: dict[str, Any]) -> di
     shots = []
     for shot in script.get("shots") or []:
         segment_id = shot.get("source_segment_id")
-        is_opening = shot.get("source_kind") == "opening" or shot.get("id") == (script.get("opening") or {}).get("shot_id") or shot.get("id") == "shot_opening"
+        is_opening = (
+            shot.get("source_kind") == "opening"
+            or shot.get("id") == (script.get("opening") or {}).get("shot_id")
+            or shot.get("id") == "shot_opening"
+        )
         if is_opening:
             action = "generate" if opening_block_generate(plan, opening) else "reuse"
         else:

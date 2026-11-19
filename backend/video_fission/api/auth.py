@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -25,6 +26,7 @@ from ..auth import (
     validate_username,
     verify_password,
 )
+from ..logging_utils import logging_status
 from ..sso import sso_service
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,11 @@ def health() -> dict[str, Any]:
         for key in ("ok", "version", "detail")
         if key in ffmpeg
     }
+    logging_public = logging_status()
+    log_path = str(logging_public.get("path") or "")
+    logging_public["path"] = Path(log_path).name if log_path else ""
+    if logging_public.get("error"):
+        logging_public["error"] = "日志文件不可写"
     return {
         "ok": True,
         "service": "video-fission",
@@ -54,8 +61,9 @@ def health() -> dict[str, Any]:
         "ffmpeg": ffmpeg_public,
         "pipeline": {
             "ok": bool(ffmpeg_public.get("ok")),
-            "default_provider": "local_ffmpeg",
+            "default_provider": "seedance",
         },
+        "logging": logging_public,
     }
 
 

@@ -25,6 +25,8 @@ _CONTEXT_VARS = {
     for field in _CONTEXT_FIELDS
 }
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_ACTIVE_LOG_PATH: Path | None = None
+_LOG_CONFIGURATION_ERROR = ""
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
@@ -67,7 +69,31 @@ class ContextFilter(logging.Filter):
         return True
 
 
-def configure_logging(project_root: Path) -> Path | None:
+def _is_running_tests() -> bool:
+    return (
+        os.getenv("PYTEST_CURRENT_TEST") is not None
+        or os.getenv("PYTEST_VERSION") is not None
+        or "pytest" in sys.modules
+        or "_pytest" in sys.modules
+    )
+
+
+def logging_status() -> dict[str, Any]:
+    handler = next(
+        (item for item in logging.getLogger().handlers if item.get_name() == "video-fission-file"),
+        None,
+    )
+    path = _ACTIVE_LOG_PATH
+    return {
+        "enabled": handler is not None and path is not None,
+        "path": str(path) if path else "",
+        "error": _LOG_CONFIGURATION_ERROR,
+    }
+
+
+def configure_logging(project_root: Path, *, force_file: bool = False) -> Path | None:
+    global _ACTIVE_LOG_PATH, _LOG_CONFIGURATION_ERROR
+
     level_name = os.getenv("VF_LOG_LEVEL", "INFO").strip().upper()
     level = getattr(logging, level_name, logging.INFO)
     root = logging.getLogger()
@@ -92,13 +118,15 @@ def configure_logging(project_root: Path) -> Path | None:
     console.setFormatter(formatter)
     console.addFilter(context_filter)
 
-    running_tests = (
-        os.getenv("PYTEST_CURRENT_TEST") is not None
-        or os.getenv("PYTEST_VERSION") is not None
-        or "pytest" in sys.modules
-        or "_pytest" in sys.modules
-    )
-    configured = "0" if running_tests else os.getenv("VF_LOG_FILE", "status/video-fission.log").strip()
+    configured_from_env = os.getenv("VF_LOG_FILE")
+    if configured_from_env is not None:
+        # An explicit path is an operator decision and must override pytest
+        # process heuristics inherited by long-running server children.
+        configured = configured_from_env.strip()
+    elif force_file:
+        configured = "status/video-fission.log"
+    else:
+        configured = "0" if _is_running_tests() else "status/video-fission.log"
     if configured.lower() in {"", "0", "false", "off", "none"}:
         existing = next(
             (handler for handler in root.handlers if handler.get_name() == "video-fission-file"),
@@ -107,6 +135,8 @@ def configure_logging(project_root: Path) -> Path | None:
         if existing is not None:
             root.removeHandler(existing)
             existing.close()
+        _ACTIVE_LOG_PATH = None
+        _LOG_CONFIGURATION_ERROR = ""
         return None
     log_path = Path(configured).expanduser()
     if not log_path.is_absolute():
@@ -116,6 +146,10 @@ def configure_logging(project_root: Path) -> Path | None:
         (handler for handler in root.handlers if handler.get_name() == "video-fission-file"),
         None,
     )
+    if file_handler is not None and Path(file_handler.baseFilename).resolve() != log_path:
+        root.removeHandler(file_handler)
+        file_handler.close()
+        file_handler = None
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if file_handler is None:
@@ -124,6 +158,8 @@ def configure_logging(project_root: Path) -> Path | None:
                 maxBytes=_env_int("VF_LOG_MAX_BYTES", 20 * 1024 * 1024, 1024 * 1024),
                 backupCount=_env_int("VF_LOG_BACKUP_COUNT", 10, 1),
                 encoding="utf-8",
+                errors="backslashreplace",
+                delay=False,
             )
             file_handler.set_name("video-fission-file")
             root.addHandler(file_handler)
@@ -133,11 +169,16 @@ def configure_logging(project_root: Path) -> Path | None:
             _safe_log_text(log_path, 240),
             exc.__class__.__name__,
         )
+        _ACTIVE_LOG_PATH = None
+        _LOG_CONFIGURATION_ERROR = f"{exc.__class__.__name__}: {exc}"
         return None
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     if context_filter not in file_handler.filters:
         file_handler.addFilter(context_filter)
+    _ACTIVE_LOG_PATH = log_path
+    _LOG_CONFIGURATION_ERROR = ""
+    logging.getLogger(__name__).info("logging.file_configured path=%s", log_path)
     return log_path
 
 

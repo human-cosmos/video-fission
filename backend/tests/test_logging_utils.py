@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from video_fission.conversation_cards import progress_payload
-from video_fission.logging_utils import ContextFilter, clip_text, log_context, safe_request_id
+from video_fission.logging_utils import (
+    ContextFilter,
+    clip_text,
+    configure_logging,
+    log_context,
+    logging_status,
+    safe_request_id,
+)
 
 
 def test_safe_request_id_rejects_header_injection_and_oversized_values():
@@ -25,6 +33,26 @@ def test_clip_text_removes_terminal_escape_sequences():
     assert "\n" not in value
     assert "\x1b" not in value
     assert "\\x1b" in value
+
+
+def test_explicit_log_file_overrides_inherited_pytest_detection(tmp_path: Path, monkeypatch):
+    log_path = tmp_path / "runtime.log"
+    monkeypatch.setenv("PYTEST_VERSION", "inherited")
+    monkeypatch.setenv("VF_LOG_FILE", str(log_path))
+    try:
+        configured = configure_logging(tmp_path)
+        logging.getLogger("video_fission.test_logging").warning("runtime failure detail")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        assert configured == log_path.resolve()
+        assert logging_status()["enabled"] is True
+        text = log_path.read_text(encoding="utf-8")
+        assert "logging.file_configured" in text
+        assert "runtime failure detail" in text
+    finally:
+        monkeypatch.setenv("VF_LOG_FILE", "0")
+        configure_logging(tmp_path)
 
 
 def test_progress_payload_labels_cancellation_as_cancelled():

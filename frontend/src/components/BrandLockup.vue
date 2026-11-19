@@ -7,7 +7,7 @@
     </div>
     <div class="brand-copy">
       <strong>VIDEO FISSION</strong>
-      <small>CREATIVE OPERATIONS</small>
+      <small>AI 创作工作台 · PRO</small>
     </div>
   </div>
 </template>

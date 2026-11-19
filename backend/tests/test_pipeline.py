@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 
@@ -8,8 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 from video_fission.container import configure
 from video_fission.main import app
-from video_fission.media import audio_levels, probe, scene_cut_ms
-from video_fission.pipeline import _shot_frame, brief_role_phrases, local_intent, local_script, plan_segments
+from video_fission.media import audio_levels, ffmpeg_bin, probe, scene_cut_ms
+from video_fission.pipeline import brief_role_phrases, local_intent, local_script, plan_segments
 from video_fission.replace import (
     is_rewrite_only_brief,
     parse_brief_targets,
@@ -42,6 +43,8 @@ def _upload(client: TestClient) -> dict:
 def test_settings_masks_api_key_and_keeps_or_clears(client: TestClient):
     initial = client.get("/api/settings").json()
     assert initial["multimodal"]["provider"] == "local_ffmpeg"
+    assert initial["video_generator"]["provider"] == "seedance"
+    assert "fallback_to_local" not in initial["video_generator"]
     assert initial["multimodal"]["api_key_set"] is False
     assert "api_key" not in initial["multimodal"]
 
@@ -67,6 +70,15 @@ def test_settings_masks_api_key_and_keeps_or_clears(client: TestClient):
     assert "sk-" not in probed["detail"]
 
 
+def test_video_generator_rejects_local_ffmpeg(client: TestClient):
+    rejected = client.put(
+        "/api/settings",
+        json={"video_generator": {"provider": "local_ffmpeg"}},
+    )
+    assert rejected.status_code == 400
+    assert "不支持 local_ffmpeg" in rejected.text
+
+
 def test_health_includes_ffmpeg_and_pipeline(client: TestClient):
     body = client.get("/api/health").json()
     assert body["ok"] is True
@@ -75,7 +87,35 @@ def test_health_includes_ffmpeg_and_pipeline(client: TestClient):
     assert "database" in body
     assert body["ffmpeg"]["ok"] is True
     assert body["pipeline"]["ok"] is True
-    assert body["pipeline"]["default_provider"] == "local_ffmpeg"
+    assert body["pipeline"]["default_provider"] == "seedance"
+    assert body["logging"]["enabled"] is False
+    assert body["logging"]["error"] == ""
+
+
+def test_health_redacts_absolute_log_path_and_error(
+    client: TestClient,
+    monkeypatch,
+    tmp_path: Path,
+):
+    from video_fission.api import auth as auth_api
+
+    monkeypatch.setattr(
+        auth_api,
+        "logging_status",
+        lambda: {
+            "enabled": False,
+            "path": str(tmp_path / "private" / "video-fission.log"),
+            "error": f"PermissionError: {tmp_path}",
+        },
+    )
+
+    logging_info = client.get("/api/health").json()["logging"]
+
+    assert logging_info == {
+        "enabled": False,
+        "path": "video-fission.log",
+        "error": "日志文件不可写",
+    }
 
 
 def test_local_decompose_covers_timeline_with_hook_value_cta():
@@ -92,14 +132,6 @@ def test_local_decompose_covers_timeline_with_hook_value_cta():
 def test_sample_reference_detects_main_scene_cuts():
     cuts = scene_cut_ms(FIXTURE)
     assert cuts == [2700, 5400]
-
-
-def test_shot_frame_prefers_mid_segment_still(tmp_path: Path):
-    art = tmp_path
-    (art / "seg_02_frame_01.jpg").write_bytes(b"early")
-    (art / "seg_02_frame_02.jpg").write_bytes(b"mid")
-    chosen = _shot_frame(art, {"id": "shot_02", "source_segment_id": "seg_02"}, {})
-    assert chosen.name == "seg_02_frame_02.jpg"
 
 
 def test_intent_references_exist_and_full_run_writes_final(test_settings, client: TestClient):
@@ -141,17 +173,16 @@ def test_intent_references_exist_and_full_run_writes_final(test_settings, client
 
     output = public["output"]
     final_video = Path(output["video_path"])
-    final_srt = Path(output["srt_path"])
     assert final_video.is_file()
-    assert final_srt.is_file()
+    assert not (final_video.parent / "final.srt").exists()
+    assert not output.get("srt_path")
+    assert not output.get("srt_url")
     info = probe(final_video)
     assert info["duration_ms"] > 1000
     assert abs(info["duration_ms"] - public["script"]["total_duration_ms"]) <= 500
     assert final_video.stat().st_size > 1000
     assert info["pix_fmt"] == "yuv420p"
     assert str(info.get("color_range") or "").lower() not in {"pc", "jpeg", "full", "2"}
-    srt_text = final_srt.read_text(encoding="utf-8")
-    assert "虾" in srt_text or srt_text.strip()
     one_liner = public["skeleton"]["one_liner"]
     assert "香酥虾" in one_liner
     for shot in public["script"]["shots"]:
@@ -165,7 +196,7 @@ def test_intent_references_exist_and_full_run_writes_final(test_settings, client
     assert artifact.status_code == 200
     assert artifact.headers["content-type"].startswith("video/")
     srt = client.get(f"/api/productions/{production_id}/artifacts/final.srt")
-    assert srt.status_code == 200
+    assert srt.status_code == 404
     frame = client.get(f"/api/productions/{production_id}/artifacts/seg_01_frame_01.jpg")
     assert frame.status_code == 200
     missing = client.get(f"/api/productions/{production_id}/artifacts/../final.mp4")
@@ -418,9 +449,10 @@ def _assert_final(public: dict, source_tolerance_ms: int = 100) -> dict:
     assert public["status"] == "completed", public.get("error")
     output = public["output"]
     final_video = Path(output["video_path"])
-    final_srt = Path(output["srt_path"])
     assert final_video.is_file()
-    assert final_srt.is_file()
+    assert not (final_video.parent / "final.srt").exists()
+    assert not output.get("srt_path")
+    assert not output.get("srt_url")
     info = probe(final_video)
     source_ms = int(public["source_video"]["duration_ms"])
     assert abs(info["duration_ms"] - source_ms) <= source_tolerance_ms
@@ -428,9 +460,6 @@ def _assert_final(public: dict, source_tolerance_ms: int = 100) -> dict:
         assert abs(int(info.get("audio_duration_ms") or 0) - info["duration_ms"]) <= 20
     assert info["pix_fmt"] == "yuv420p"
     assert str(info.get("color_range") or "").lower() not in {"pc", "jpeg", "full", "2"}
-    srt_text = final_srt.read_text(encoding="utf-8")
-    assert srt_text.strip()
-    assert "时长" not in srt_text
     brief = str(public.get("brief") or "")
     rewrite_only = is_rewrite_only_brief(brief)
     for shot in public["script"]["shots"]:
@@ -443,7 +472,6 @@ def _assert_final(public: dict, source_tolerance_ms: int = 100) -> dict:
         if rewrite_only:
             assert brief not in voiceover
             assert brief not in on_screen
-            assert brief not in srt_text
             assert "重新生成" not in voiceover + on_screen
             assert "重做" not in voiceover + on_screen
     source_has_audio = bool((public.get("source_video") or {}).get("duration_ms") and info.get("has_audio"))
@@ -493,6 +521,7 @@ def _ids_by_role(public: dict, role: str) -> list[str]:
 def test_brief_parser_only_treats_rewrite_requests_as_targets():
     assert strip_rewrite_instructions("把第二段和结尾重新生成") == ""
     assert is_rewrite_only_brief("只重做开场")
+    assert is_rewrite_only_brief("替换一个开头的创意")
     assert strip_rewrite_instructions("用香酥虾做一条短视频。把第二段和结尾重新生成。") == "用香酥虾做一条短视频"
     creative = parse_brief_targets("用香酥虾做一个开场抓人、中间展示产品、结尾促单的短视频")
     assert creative["has_named"] is False
@@ -511,6 +540,10 @@ def test_brief_parser_only_treats_rewrite_requests_as_targets():
     mid_too = parse_brief_targets("中间也要新生成")
     assert "value" in mid_too["roles"]
     assert mid_too["also_default"] is True
+
+    replaced_opening = parse_brief_targets("替换一个开头的创意")
+    assert replaced_opening["roles"] == ["hook"]
+    assert replaced_opening["has_named"] is True
 
     clock = parse_brief_targets("从 00:01.5 到 00:05.5 重新生成")
     assert clock["time_ranges"][0]["start_ms"] == 1500
@@ -650,6 +683,19 @@ def test_brief_redo_hook_only(client: TestClient):
             assert action == ("generate" if segment_id in hook_ids else "reuse")
 
 
+def test_replace_opening_creative_regenerates_the_whole_opening_block(client: TestClient):
+    created = _create(client, "替换一个开头的创意")
+    public = _run_wait(created["id"])
+    _assert_final(public)
+    opening = _opening(public)
+    opening_ids = set(opening.get("segment_ids") or [])
+    assert opening_ids
+    assert opening_ids <= set(public["replace_plan"]["resolved_segment_ids"])
+    assert set(public["replace_plan"]["resolved_segment_ids"]) == opening_ids
+    assert _opening_shot(public)["action"] == "generate"
+    assert "brief" in {item["reason"] for item in public["replace_plan"]["reasons"]}
+
+
 def test_time_ranges_hit_a_middle_segment(client: TestClient):
     created = _create(
         client,
@@ -760,7 +806,6 @@ def test_seedance_generated_clips_are_normalized_and_composed(client: TestClient
                 "source": "video-fission-test",
                 "resolution": "480p",
                 "timeout_seconds": 120,
-                "fallback_to_local": False,
                 "api_key": "dk-ai-p-test",
             }
         },
@@ -797,7 +842,6 @@ def test_seedance_without_base_url_does_not_silently_use_local(client: TestClien
                 "provider": "seedance",
                 "base_url": "",
                 "model": "seedance-2-0-fast",
-                "fallback_to_local": False,
             }
         },
     )
@@ -812,3 +856,111 @@ def test_seedance_without_base_url_does_not_silently_use_local(client: TestClien
     public = container.productions.get(created["id"])
     assert public["status"] == "failed"
     assert "base_url" in public["error"]
+
+
+def test_generated_clip_without_model_audio_fails(client: TestClient, monkeypatch, tmp_path: Path):
+    silent = tmp_path / "silent.mp4"
+    subprocess.run(
+        [
+            ffmpeg_bin(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=1280x720:d=2:r=30",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(silent),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    from video_fission import providers
+
+    def fake_silent_remote(*args, **_kwargs):
+        dest = Path(args[10])
+        shutil.copyfile(silent, dest)
+        return dest
+
+    monkeypatch.setattr(providers, "generate_remote_video", fake_silent_remote)
+    created = _create(client, "全部新生成，做一条香酥虾短视频")
+    from video_fission import container
+
+    paused = container.productions.engine.run(created["id"])
+    assert paused["status"] == "awaiting_script_choice"
+    with pytest.raises(RuntimeError, match="缺少音轨"):
+        container.productions.select_script(created["id"], "script_a", wait=True)
+    public = container.productions.get(created["id"])
+    assert public["status"] == "failed"
+    assert "缺少音轨" in public["error"]
+
+
+def test_silent_reuse_clip_gets_audio_before_concat(
+    client: TestClient,
+    monkeypatch,
+    tmp_path: Path,
+):
+    settings = client.put(
+        "/api/settings",
+        json={
+            "video_generator": {
+                "provider": "generic_http",
+                "base_url": "https://video.example.test/generate",
+                "model": "test-video",
+                "resolution": "480p",
+            }
+        },
+    )
+    assert settings.status_code == 200, settings.text
+
+    silent_source = tmp_path / "silent-source.mp4"
+    subprocess.run(
+        [
+            ffmpeg_bin(),
+            "-y",
+            "-i",
+            str(FIXTURE),
+            "-an",
+            "-c:v",
+            "copy",
+            str(silent_source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with silent_source.open("rb") as handle:
+        uploaded = client.post(
+            "/api/productions/uploads",
+            files={"file": ("silent-source.mp4", handle, "video/mp4")},
+        )
+    assert uploaded.status_code == 201, uploaded.text
+    created = client.post(
+        "/api/productions",
+        json={
+            "brief": "替换第二段，保留其他镜头",
+            "video_upload_id": uploaded.json()["id"],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    from video_fission import providers
+
+    def fake_remote(*args, **_kwargs):
+        dest = Path(args[10])
+        shutil.copyfile(FIXTURE, dest)
+        return dest
+
+    monkeypatch.setattr(providers, "generate_remote_video", fake_remote)
+    public = _run_wait(
+        created.json()["id"],
+        {"mode": "selected", "segment_ids": ["seg_02"]},
+    )
+    info = _assert_final(public)
+
+    assert info["has_audio"] is True
+    assert abs(int(info["audio_duration_ms"]) - int(info["duration_ms"])) <= 20
+    assert probe(Path(public["clips"][0]["path"]))["has_audio"] is True

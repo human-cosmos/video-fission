@@ -650,10 +650,12 @@ class ProductionService:
         output = production.get("output") or None
         if isinstance(output, dict):
             output = {
-                **output,
+                **{
+                    key: value
+                    for key, value in output.items()
+                    if key not in {"srt_path", "srt_url"}
+                },
                 "video_url": output.get("video_url") or f"/api/productions/{production_id}/artifacts/final.mp4",
-                "srt_url": output.get("srt_url")
-                or (f"/api/productions/{production_id}/artifacts/final.srt" if output.get("srt_path") else ""),
             }
         return {
             "id": production["id"],
@@ -682,8 +684,6 @@ class ProductionService:
             "landing_page": production.get("landing_page"),
             "script_candidates": production.get("script_candidates") or [],
             "selected_script_id": production.get("selected_script_id"),
-            "audio_separation": production.get("audio_separation"),
-            "subtitle_style": production.get("subtitle_style"),
             "created_at": production["created_at"],
             "updated_at": production["updated_at"],
         }

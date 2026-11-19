@@ -126,14 +126,9 @@ test('keeps the conversation and account controls reachable on mobile', async ({
   await expect(page.getByRole('button', { name: '退出登录' })).toBeInViewport()
   await expect(page.getByTestId('sidebar-account-group')).toBeInViewport()
   await expect(page.getByRole('button', { name: '打开能力台' })).toHaveCount(0)
-  await page.getByRole('button', { name: '关闭会话列表' }).click()
-  await page.getByRole('button', { name: '打开会话参数' }).click()
-  const sessionDialog = page.getByRole('dialog', { name: '会话参数' })
-  await expect(sessionDialog).toBeVisible()
-  await expect(sessionDialog.getByRole('button', { name: '模型' })).toBeVisible()
-  await expect(sessionDialog.getByRole('button', { name: '推理强度' })).toBeVisible()
-  await page.getByRole('button', { name: '关闭会话参数' }).click()
-  await expect(sessionDialog).toHaveCount(0)
+  await page.locator('.sidebar-close').click({ force: true })
+  await expect(page.getByRole('button', { name: '模型' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '推理强度' })).toBeVisible()
   await page.waitForTimeout(300)
   await page.screenshot({
     path: testInfo.outputPath('video-fission-mobile.png'),

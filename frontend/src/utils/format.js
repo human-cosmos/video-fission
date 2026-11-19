@@ -128,7 +128,8 @@ export function needsRemoteFields(provider) {
   return (
     provider === 'openai_compatible' ||
     provider === 'generic_http' ||
-    provider === 'gemini_gateway'
+    provider === 'gemini_gateway' ||
+    provider === 'seedance'
   )
 }
 

@@ -1,7 +1,7 @@
 .PHONY: install dev build test e2e
 
 install:
-	uv sync --extra dev
+	uv sync --extra dev --extra shot-detect
 	npm install --prefix frontend
 
 dev:

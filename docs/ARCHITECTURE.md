@@ -60,7 +60,7 @@ FastAPI
   ├─ productions.py       upload / run / cancel / SSE / artifacts
   ├─ pipeline.py          ingest → decompose → intent → script → generate → compose
   ├─ understand/          提示词、规范化、转场精修、切片、observe、GeminiGatewayClient
-  ├─ providers.py         openai-compatible chat / video / TTS adapters
+  ├─ providers.py         openai-compatible chat / real video model adapters
   ├─ references.py        real retrieval over skills/video-references
   ├─ media.py             ffmpeg / ffprobe helpers
   └─ db.py                SQLite persistence
@@ -170,7 +170,7 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 ### `app_settings`
 
-单行 JSON：多模态、视频生成、TTS 和合成开关。密钥与公开配置分开存；对外读取只出现 `api_key_set`，不会回显 Key。`PUT` 时省略或 `""` 保留原 Key，JSON `null` 清除。
+单行 JSON：多模态与真实视频生成配置。密钥与公开配置分开存；对外读取只出现 `api_key_set`，不会回显 Key。`PUT` 时省略或 `""` 保留原 Key，JSON `null` 清除。
 
 ### `video_uploads` / `productions` / `production_events`
 
@@ -184,17 +184,15 @@ SQLite 以 WAL 模式运行，单进程读写，适合独立本地部署。
 
 ## 7. 视频创作管线
 
-管线独立于 Codex CLI，由 `PipelineEngine` 同步执行、后台线程启动。默认提供者 `local_ffmpeg`，无 API Key 也能跑完全程。
+管线独立于 Codex CLI，由 `PipelineEngine` 同步执行、后台线程启动。视频生成只允许真实模型通道，默认 `seedance`；`local_ffmpeg` 仅用于切段、拼接、淡化和音画对齐，不再作为视频生成 Provider。
 
 阶段固定为：`ingest` → `decompose` → `intent` → `script` → `generate` → `compose`。状态可落盘恢复；已有拆解结果时可再次 `POST /run`。`resume_from` 允许 `ingest|decompose|intent|script|generate`（非法值报错）；省略时按跟进消息分类，默认仍兼容 `intent`。`script` 结束后进入 `awaiting_script_choice`，需 `POST /api/productions/{id}/select-script`（body 为 `{ "script_id" }`）后才进入 generate。也可 `PATCH` 更新 `brief` / `replace_policy`。SSE 事件至少包括 `stage_started`、`stage_completed`、`warning`、`error`、`completed`。
 
-- **decompose**：由 `video_fission.understand` 增强，`pipeline._stage_decompose` 调用 `run_decompose`。设置开启 `transition_detection` 且安装了 `shot-detect` extra 时，先用 PySceneDetect + TransNetV2 做帧级转场检测，并把模型时间点吸附到真实切点；依赖缺失或失败则退化为 `select='gt(scene,0.15)'` 的 ffmpeg 场景切分，并写 warning。切点仍按 Hook/Value/CTA 时间窗规划（无模型时），Hook/CTA 会吸附到合法窗口内最近的主切点。官方夹具切在 2700ms / 5400ms，分成 hook / value / cta 三段。片段覆盖源视频 `[0, duration_ms)`，允许 100ms 误差且互不重叠。每段写出可播放的 `clips/{seg_id}.mp4`（H.264 yuv420p，有音轨则保留）和 1–3 张关键帧 `{seg_id}_frame_01.jpg`（以及 `_02` / `_03`）。`openai_compatible` / `gemini_gateway` 配置可用时，用移植后的提示词做整片理解、片段解析和 observe（`observe` 超时取 `understand.observe_timeout_seconds`，默认 360，不套用 multimodal 的 120s）；失败不得让 production 失败，保留本地切分并 warning。`gemini_gateway` 的整片理解与片段分析会在 `artifacts/.../gemini_api_calls/{video_understanding,clip_analysis}/` 下按调用原子写入独立 JSON，保存完整响应、调用标签、输入形态、模型、耗时及失败错误；诊断记录写盘失败不影响管线。无 Key 或关闭 `observe` 时不插入空白观察卡。多模态设置按用户隔离。一级标签到 `role` 的映射固定为：开场钩子→hook，痛点具象/方案登场/卖点展示/效果展示/场景演示/信任构建→value，响应号召→cta，其他或空→other。
+- **decompose**：由 `video_fission.understand` 增强，`pipeline._stage_decompose` 调用 `run_decompose`。设置开启 `transition_detection` 且安装了 `shot-detect` extra 时，先用 PySceneDetect + TransNetV2 做帧级转场检测，并把模型时间点吸附到真实切点；依赖缺失或失败则退化为 `select='gt(scene,0.15)'` 的 ffmpeg 场景切分，并写 warning。切点仍按 Hook/Value/CTA 时间窗规划（无模型时），Hook/CTA 会吸附到合法窗口内最近的主切点。官方夹具切在 2700ms / 5400ms，分成 hook / value / cta 三段。片段覆盖源视频 `[0, duration_ms)`，允许 100ms 误差且互不重叠。每段写出可播放的 `clips/{seg_id}.mp4`（H.264 yuv420p，有音轨则保留）和 1–3 张关键帧 `{seg_id}_frame_01.jpg`（以及 `_02` / `_03`）。`openai_compatible` / `gemini_gateway` 配置可用时，用移植后的提示词做整片理解、片段解析和 observe。Gemini 多模态请求使用至少 30720 的有效 Token 预算，整片拆分与片段解析为 120 秒，只有 observe 使用 `understand.observe_timeout_seconds`（默认 360）；整片拆分最多评估两个候选，HTTP 层由 `VF_GEMINI_MAX_CONCURRENCY` 限制单进程并发并在网络错误上做带抖动退避。`gemini_gateway` 的整片理解与片段分析会在 `artifacts/.../gemini_api_calls/{video_understanding,clip_analysis}/` 下按调用原子写入独立 JSON，保存完整响应、调用标签、输入形态、模型、耗时及失败错误；诊断记录写盘失败不影响管线。失败不得让 production 失败，保留本地切分并 warning。无 Key 或关闭 `observe` 时不插入空白观察卡。多模态设置按用户隔离。一级标签到 `role` 的映射固定为：开场钩子→hook，痛点具象/方案登场/卖点展示/效果展示/场景演示/信任构建→value，响应号召→cta，其他或空→other。
 - **intent**：必须真实检索 `skills/video-references`：3 篇同品类 + 1 篇跨品类。此阶段只读首行骨架和第二条 `---` 之前的注意项；`intent.references[].path` 是相对项目根的真实路径。brief/消息中的落地页 URL 会经 SSRF 校验后抓取并抽取结构化卖点（`landing_page`）；无 URL 或抓取失败不得让管线失败，JS 重页面可提示用户粘贴正文。
 - **script**：至少读 3 篇参考全文。每次产出恰好 3 个创意脚本候选（`script_a` / `script_b` / `script_c`），共享同一参考时间轴和开场连续块，仅角度与口播/画面文案不同；随后暂停等待用户选择，不自动进入 generate。镜头策略以解析后的 `replace_plan` 为准：`mode=default` 且 brief 未点名片段时，Hook/CTA `generate`、中间 Value `reuse`；也可按 `all` / `selected` / brief 点名任意段生成。结构化勾选优先于 brief。
-- **generate**：进入本阶段前须已选定脚本；开始时会再应用 `replace_plan`。reuse 按源片段裁切并混入已分离人声（可用时）；generate 默认对关键帧做 Ken Burns。远端 `seedance` 按 OpenAPI 提交 `model/prompt/duration/aspect_ratio/resolution`，并在 `input_contents` 中传入参考视频与人声/BGM 两条 `reference_audio`，`options.generate_audio=true`；prompt 要求生成口播且不得烧字幕。轮询 `/acore/model/v1/task/video/{taskId}`，读取 `data.result.video.url`，下载后统一转码到目标宽高、帧率和精确时长。`video_generator.media_public_base_url` 为空或指向本机时只告警，不假装公网可达。无模型音轨时回退 TTS，再回退可用参考人声；无音轨占位文件不得当作口播，也不得用静音垫轨冒充。默认硬烧字幕时不再叠一层 drawtext。H.264 yuv420p + AAC。远程失败且 `fallback_to_local=true` 时回退本地。分辨率跟随源视频（竖屏封顶 1080×1920，横屏长边 ≤1920）。
-- **compose**：拼接镜头；generate/reuse 交界做短淡化（约 8–12 帧画面 + 80–120ms 音频）；BGM 只混已分离的 `reference-bgm.m4a`，不再垫参考片完整混音。由旁白/屏上字生成 `final.srt`（不含「时长 Nms」调试句，也不烧替换指令；有开场/中间/结尾时按角色拆句），按检测到的参考软字幕样式硬烧，读不到则用安全默认位置（`method=default_safe`，不得写成「已对齐参考字幕」）；默认可另存 sidecar；最后把音画锁到同一精确时长。TTS 未配置不阻塞出片。`final.mp4` 须能被 ffprobe 解析，时长约等于脚本总时长 ±100ms，视频与音频时长差很小，`pix_fmt=yuv420p` 且 `color_range` 不是 pc；生成与拼接强制 `setsar=1`。
-
-CJK 字幕优先使用 `/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf`。
+- **generate**：进入本阶段前须已选定脚本；开始时会再应用 `replace_plan`。reuse 按源片段裁切并保留原片音轨；generate 必须调用真实远端模型，不再从关键帧做 Ken Burns。Seedance 按 OpenAPI 提交 `model/prompt/duration/aspect_ratio/resolution`，`options.generate_audio=true`；`input_contents` 只传参考视频，不传分离人声或 BGM。prompt 要求模型直接生成语音、音乐或环境音，画面内不得生成字幕或任何叠加文字。无音轨的生成片段直接失败，不回退 TTS、参考人声或静音轨。远程失败直接失败，不回退本地。分辨率跟随源视频（竖屏封顶 1080×1920，横屏长边 ≤1920）。
+- **compose**：拼接镜头；generate/reuse 交界做短淡化（约 8–12 帧画面 + 80–120ms 音频）；不额外混 BGM。当前阶段不生成 `final.srt`、不硬烧字幕，也不提供字幕下载。最后把音画锁到同一精确时长。`final.mp4` 须能被 ffprobe 解析，时长约等于脚本总时长 ±100ms，视频与音频时长差很小，`pix_fmt=yuv420p` 且 `color_range` 不是 pc；生成与拼接强制 `setsar=1`。
 
 ## 8. 前端
 
@@ -234,7 +232,7 @@ SSE 只负责触发增量刷新，SQLite 中的 `items` 是前端最终状态源
 - Codex CLI：`0.169.0`
 - 后端测试（含认证、用户隔离、管线与指定片段替换）：`uv run pytest -q` → 52 passed, 4 skipped
 - 夹具：`backend/tests/fixtures/sample-reference.mp4`
-- 无 Key 本地跑通：可下载 ffprobe 可解析的 `final.mp4` 与 `final.srt`
+- 真实视频 Provider 桩：可验证 ffprobe 可解析且带模型音轨的 `final.mp4`
 - 真实 Codex 集成：1 passed
 - 前端单元测试：18 passed
 - 前端生产构建：passed

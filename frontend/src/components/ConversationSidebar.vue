@@ -1,17 +1,14 @@
 <script setup>
 import {
-  Archive,
-  ArchiveRestore,
   ChevronRight,
   Clapperboard,
   LoaderCircle,
   LogOut,
   MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plus,
   Search,
   Settings2,
+  Trash2,
   X,
 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -41,10 +38,8 @@ const props = defineProps({
 const emit = defineEmits([
   'new',
   'select',
-  'archive',
-  'unarchive',
+  'delete',
   'close-mobile',
-  'toggle-collapse',
   'resize-start',
   'resize-keydown',
   'resize-reset',
@@ -106,15 +101,6 @@ onBeforeUnmount(() => {
   >
     <header class="brand-row">
       <BrandLockup />
-      <button
-        class="icon-button sidebar-collapse-button"
-        :aria-label="collapsed ? '展开会话侧栏' : '折叠会话侧栏'"
-        :title="collapsed ? '展开侧栏' : '折叠侧栏'"
-        @click="$emit('toggle-collapse')"
-      >
-        <PanelLeftOpen v-if="collapsed" :size="17" />
-        <PanelLeftClose v-else :size="17" />
-      </button>
       <button class="icon-button sidebar-close" aria-label="关闭会话列表" @click="$emit('close-mobile')">
         <X :size="18" />
       </button>
@@ -128,7 +114,7 @@ onBeforeUnmount(() => {
       @click="$emit('new')"
     >
       <Plus :size="17" />
-      <span>新建对话</span>
+      <span>新建会话</span>
       <kbd>⌘ N</kbd>
     </button>
 
@@ -142,12 +128,6 @@ onBeforeUnmount(() => {
         @input="$emit('search', $event.target.value)"
       />
     </label>
-
-    <div class="sidebar-section-label">
-      <span>最近对话</span>
-      <LoaderCircle v-if="loading" class="spin" :size="14" />
-      <span v-else>{{ conversations.length }}</span>
-    </div>
 
     <nav class="conversation-list" aria-label="对话列表">
       <button
@@ -184,19 +164,14 @@ onBeforeUnmount(() => {
           >{{ productionBadges[conversation.id] }}</em>
         </span>
         <span
-          class="row-action"
-          :title="conversation.is_archived ? '取消归档' : '归档'"
+          class="row-action row-action--danger"
+          title="删除会话"
           role="button"
           tabindex="0"
-          @click.stop="
-            $emit(conversation.is_archived ? 'unarchive' : 'archive', conversation.id)
-          "
-          @keydown.enter.stop="
-            $emit(conversation.is_archived ? 'unarchive' : 'archive', conversation.id)
-          "
+          @click.stop="$emit('delete', conversation.id)"
+          @keydown.enter.stop="$emit('delete', conversation.id)"
         >
-          <ArchiveRestore v-if="conversation.is_archived" :size="14" />
-          <Archive v-else :size="14" />
+          <Trash2 :size="14" />
         </span>
       </button>
 
@@ -290,11 +265,11 @@ onBeforeUnmount(() => {
       role="separator"
       aria-label="调整会话侧栏宽度"
       aria-orientation="vertical"
-      :aria-valuemin="232"
+      :aria-valuemin="196"
       :aria-valuemax="420"
       :aria-valuenow="width"
       tabindex="0"
-      title="拖拽调整宽度，双击恢复默认"
+      title="拖拽调整宽度，缩到最窄自动折叠，向右拖动展开"
       @pointerdown="$emit('resize-start', $event)"
       @keydown="$emit('resize-keydown', $event)"
       @dblclick="$emit('resize-reset')"

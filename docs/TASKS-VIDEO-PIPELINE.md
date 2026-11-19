@@ -1,5 +1,10 @@
 # Video Fission 视频生成管线任务书
 
+> 2026-11-18 增量约束：视频生成已删除 `local_ffmpeg` Provider，只保留真实模型通道；
+> `generate` 镜头必须由模型直接生成语音和音乐，无音轨即失败。当前阶段不生成 SRT、
+> 不硬烧字幕，也不依赖 TTS 或额外 BGM。下方早期任务描述中与本节冲突的本地生成、
+> 字幕和 TTS 路径均为历史记录。
+
 状态：已锁定（Grok Bot，2026-11-17 21:35 Asia/Shanghai）
 截止：2026-11-18 08:00 Asia/Shanghai 交付可运行真实项目
 工作区：`/workspace/video-fission`（共享电脑）。不要改用户本机副本，不要 git 提交/推送，除非 Grok 另行批准。
@@ -29,7 +34,7 @@
 
 设置持久化在 SQLite 表 `app_settings`（单行 JSON）。API Key 只写不回显，读取时用 `api_key_set: true/false`，值用 `null`。
 
-默认提供者均为 `local_ffmpeg`，保证零配置可运行。
+多模态可在无 Key 时使用本地描述兜底；视频生成必须使用真实模型通道，默认 `seedance`。
 
 ```json
 {
@@ -41,24 +46,11 @@
     "timeout_seconds": 120
   },
   "video_generator": {
-    "provider": "local_ffmpeg",
-    "base_url": "",
+    "provider": "seedance",
+    "base_url": "https://api.giikin.com",
     "api_key_set": false,
-    "model": "",
-    "timeout_seconds": 300,
-    "fallback_to_local": true
-  },
-  "tts": {
-    "provider": "none",
-    "base_url": "",
-    "api_key_set": false,
-    "model": "",
-    "voice": "alloy"
-  },
-  "compose": {
-    "burn_in_subtitles": true,
-    "mix_reference_bgm": true,
-    "bgm_volume": 0.18
+    "model": "seedance-2-0-fast",
+    "timeout_seconds": 600
   }
 }
 ```
@@ -66,8 +58,7 @@
 `provider` 枚举：
 
 - 多模态：`local_ffmpeg` | `openai_compatible`
-- 视频生成：`local_ffmpeg` | `openai_compatible` | `generic_http`
-- TTS：`none` | `openai_compatible`
+- 视频生成：`seedance` | `openai_compatible` | `generic_http`
 
 `openai_compatible`：`{base_url}/chat/completions`（多模态/文本）或文档中写清的视频生成协议。请求带 `Authorization: Bearer <api_key>`，`model` 可配。
 
@@ -76,7 +67,7 @@
 - 直接视频字节（`Content-Type: video/mp4`），或
 - JSON `{ "url": "https://..." }` / `{ "job_id": "..." }`；若是 job，则 `GET {base_url}/jobs/{job_id}` 轮询直到 `status=completed` 且给出 `url`。
 
-若配置了远端提供者且调用失败：当 `fallback_to_local=true` 时回退到 `local_ffmpeg`，并在 production 的该阶段写入 `warning`；否则阶段失败。
+视频生成调用失败时阶段直接失败，不写本地关键帧、不静默回退。生成结果必须包含模型直接生成的语音和音乐/环境音；缺少音轨同样失败。
 
 ## 4. 锁定的 HTTP 契约
 
@@ -86,7 +77,7 @@
 
 - `GET /api/settings` → 上述 JSON（无明文 Key）
 - `PUT /api/settings` → 部分更新；未传 `api_key` 或传空字符串表示保留原 Key；传 JSON `null` 表示清除 Key。
-- `POST /api/settings/test` body `{ "target": "multimodal"|"video_generator"|"tts" }` → `{ "ok": bool, "provider": "...", "detail": "..." }`。`local_ffmpeg` 检查 ffmpeg/ffprobe；远端做一次最小探活（例如列出模型或 1 token 请求）。不要在 detail 里回显 Key。
+- `POST /api/settings/test` body `{ "target": "multimodal"|"video_generator" }` → `{ "ok": bool, "provider": "...", "detail": "..." }`。远端视频生成做一次最小探活。不要在 detail 里回显 Key。
 
 ### 创作任务（productions）
 

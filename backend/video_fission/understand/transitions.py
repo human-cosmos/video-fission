@@ -12,6 +12,11 @@ from .normalize import get_lens_data, validate_segments
 
 logger = logging.getLogger(__name__)
 
+_BASE_DEPENDENCIES = {
+    "cv2": "opencv-python-headless",
+    "scenedetect": "scenedetect",
+}
+
 
 @dataclass
 class TransitionInfo:
@@ -24,14 +29,19 @@ class TransitionInfo:
     warning: str = ""
 
 
+def missing_detection_dependencies() -> list[str]:
+    missing: list[str] = []
+    for module, package in _BASE_DEPENDENCIES.items():
+        try:
+            __import__(module)
+        except Exception:  # noqa: BLE001
+            missing.append(package)
+    return missing
+
+
 def detection_available() -> bool:
-    try:
-        import cv2  # noqa: F401
-        import torch  # noqa: F401
-        from scenedetect import SceneManager  # noqa: F401
-    except Exception:
-        return False
-    return True
+    # TransNetV2 is optional. PySceneDetect remains useful without torch.
+    return not missing_detection_dependencies()
 
 
 class TransitionDetector:

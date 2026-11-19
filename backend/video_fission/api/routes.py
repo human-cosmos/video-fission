@@ -494,7 +494,7 @@ def list_tool_runs(
 
 
 class SettingsTestRequest(BaseModel):
-    target: str = Field(pattern="^(multimodal|video_generator|tts)$")
+    target: str = Field(pattern="^(multimodal|video_generator)$")
 
 
 class TimeRangeBody(BaseModel):

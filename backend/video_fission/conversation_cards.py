@@ -18,7 +18,7 @@ PRODUCTION_STAGES = (
     ("intent", "意图", "提炼目标、受众和核心承诺"),
     ("script", "脚本", "生成候选创意与分镜脚本"),
     ("generate", "生成", "生成或复用每个镜头片段"),
-    ("compose", "合成", "混合音轨、字幕并输出成片"),
+    ("compose", "合成", "拼接模型生成与复用镜头并输出成片"),
     ("done", "完成", "成片已交付"),
 )
 
@@ -29,8 +29,6 @@ STEP_LABELS = {
     "clip_analysis": "关键帧与片段",
     "observe": "片段观察",
     "assemble": "片段拼接",
-    "audio": "音轨混合",
-    "subtitles": "字幕处理",
     "finalize": "音画对齐",
 }
 
@@ -334,12 +332,11 @@ def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[di
                     "成片文件",
                     f"{video_path.name} · {size_text}" if video_path.name else "",
                 ),
-                _output_row("字幕文件", Path(str(output.get("srt_path") or "")).name),
                 _output_row("输出地址", output.get("video_url")),
             ]
         )
     elif stage_id == "done" and public.get("status") == "completed":
-        rows.append(_output_row("交付状态", "成片与字幕已生成"))
+        rows.append(_output_row("交付状态", "成片已生成"))
     return [row for row in rows if row]
 
 
@@ -608,7 +605,6 @@ def output_payload(public: dict[str, Any]) -> dict[str, Any] | None:
         "error": public.get("error"),
         "output": output,
         "video_url": (output or {}).get("video_url") if isinstance(output, dict) else "",
-        "srt_url": (output or {}).get("srt_url") if isinstance(output, dict) else "",
         "updated_at": public.get("updated_at"),
     }
 

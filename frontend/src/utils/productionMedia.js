@@ -39,15 +39,6 @@ export function outputVideoUrl(payload) {
   return withRevision(url, payload?.updated_at || payload?.output?.updated_at)
 }
 
-export function outputSrtUrl(payload) {
-  const id = payload?.production_id
-  const url =
-    payload?.srt_url ||
-    payload?.output?.srt_url ||
-    (id ? productionArtifactUrl(id, 'final.srt') : '')
-  return withRevision(url, payload?.updated_at || payload?.output?.updated_at)
-}
-
 export function sourceVideoUrl(payload) {
   const source = payload?.source_video || payload?.reference_video || {}
   if (source.url) return source.url

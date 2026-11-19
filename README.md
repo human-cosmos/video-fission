@@ -19,7 +19,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 参考视频意图、UGC 脚本生成和 13 篇吹风机/除吹雪机参考脚本共享技能链
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
-- 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、可配置视频生成、ffmpeg 合成；默认 `local_ffmpeg`，无 API Key 也可上传参考视频，经 3 选 1 脚本后下载可播放的 `final.mp4`
+- 视频创作管线：可配置多模态拆解、真实检索 `video-references` 的意图/脚本、远端模型视频生成、ffmpeg 拼接；生成镜头只允许 Seedance / OpenAI Compatible / Generic HTTP，不再使用本地关键帧伪生成
 - decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片/片段理解与观察卡；Gemini 每次整片理解或片段分析响应单独落盘；缺依赖或无 Key 时自动退化，不中断出片
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
@@ -40,7 +40,7 @@ codex login
 ## 启动
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra shot-detect
 npm install --prefix frontend
 ./scripts/dev.sh
 ```
@@ -49,23 +49,25 @@ npm install --prefix frontend
 
 工作台可在「对话 / 系统设置」之间切换，原有 Codex 对话能力保持不变。
 
-运行日志默认同时写入终端和 `status/video-fission.log`，单文件 20MB、保留 10 份。日志带 `request_id` / `production_id` / `stage` 等关联字段，覆盖 API 请求、外部模型与视频 Provider、Codex RPC、转场/切片、片段理解、镜头生成和 FFmpeg 合成。用 `VF_LOG_LEVEL=DEBUG` 可查看更细的媒体探测和 FFmpeg 命令；提示词默认只记录长度与摘要，调试时可临时设置 `VF_LOG_PROMPTS=1` 输出截断预览。
+运行日志默认同时写入终端和 `status/video-fission.log`，单文件 20MB、保留 10 份。显式配置 `VF_LOG_FILE` 会覆盖测试进程继承的环境判定，避免服务进程误关文件日志；`GET /api/health` 的 `logging` 字段只报告是否启用和日志文件名，不暴露绝对路径。日志带 `request_id` / `production_id` / `stage` 等关联字段，覆盖 API 请求、外部模型与视频 Provider、Codex RPC、转场/切片、片段理解、镜头生成和 FFmpeg 合成。用 `VF_LOG_LEVEL=DEBUG` 可查看更细的媒体探测和 FFmpeg 命令；提示词默认只记录长度与摘要，调试时可临时设置 `VF_LOG_PROMPTS=1` 输出截断预览。
 
 ### 视频创作
 
-默认无需 API Key。在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片；配置了理解模型后还会出现整片标签、三级标签和观察卡。完成后可播放并下载 `final.mp4` 和字幕 `final.srt`。刷新后会从已有任务恢复进度。
+在对话中上传参考视频（最大 500MB）并填写创作说明后发送。时间线会展示理解、规划、片段和成片卡片；配置了理解模型后还会出现整片标签、三级标签和观察卡。生成镜头必须配置真实视频模型通道，完成后可播放并下载 `final.mp4`。当前阶段不额外生成或烧录字幕。
 
-「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成、TTS，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用，否则尝试 `inlineData`，无效时再退化为关键帧。`.env` 的 `VF_GEMINI_*` 会在当前项目首次启动或旧默认配置迁移时写入用户设置，显式自定义过的数据库设置优先。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
+「系统设置」可配置多模态（`local_ffmpeg` / `openai_compatible` / `gemini_gateway`）、视频生成模型，以及理解与切片开关（`transition_detection` / `clip_analysis` / `observe` / `clip_workers` / `gemini_max_size_mb` / `observe_timeout_seconds`，观察卡超时默认 360 秒）。视频生成只保留真实模型通道，默认 `seedance`；旧 `local_ffmpeg` 视频设置会自动迁移到 Seedance。`gemini_gateway` 支持对话接口、可选媒体上传地址、换票地址、来源标识和输出 Token 上限；配置上传地址时优先上传视频并以 `fileData.fileUri` 调用。API Key 只写不回显；留空保存表示保留原 Key。管线实现细节见后端与 `docs/ARCHITECTURE.md`。
 
 视频生成支持 `seedance` 内网 Provider。默认地址为 `https://api.giikin.com`，Seedance 2.0 Flash 对应的协议模型名为 `seedance-2-0-fast`（也兼容输入 `seedance-2.0-flash`）。提交走 `/acore/model/v1/task/generate/video`，状态查询走 `/acore/model/v1/task/video/{taskId}`；下载后会统一转成项目要求的分辨率、帧率和精确时长。也可以使用 `npx dksk auth <key>` 登录后，在系统设置中保存同一认证 Key。
 
-可选转场检测依赖单独安装，不要把它和 `uv sync --extra dev` 绑在一起：
+Seedance 的参考视频优先使用 `media_public_base_url` 直链。未配置或该地址指向本机/内网时，管线会自动使用多模态设置中的 GCloud `upload_url` 和 `token_url` 上传参考视频，并以返回的存储 URL 提交；只有上传地址缺失、换票失败或上传失败时才写 warning。人声和 BGM 不再单独传给 Seedance，统一由视频模型按提示词生成。
+
+默认安装会同时安装转场检测依赖：
 
 ```bash
-uv sync --extra shot-detect
+uv sync --extra dev --extra shot-detect
 ```
 
-`shot-detect` 包含 CPU 可跑的 `torch`、`opencv-python`、`numpy`、`scenedetect`，以及包内约 30MB 的 TransNetV2 权重。缺 extra 或检测失败时自动退化为 ffmpeg 场景切分并写 warning，默认 pytest 仍须通过。
+`shot-detect` 包含 CPU 可跑的 `torch`、`opencv-python`、`numpy`、`scenedetect`，以及包内约 30MB 的 TransNetV2 权重。PySceneDetect 是基础转场检测，TransNetV2 缺失时仍可使用 PySceneDetect；基础依赖也缺失或检测失败时才退化为 ffmpeg 场景切分，并在任务事件和日志中写明缺失包名或异常详情。
 
 也可以分别启动：
 
@@ -117,6 +119,7 @@ cd backend
 | `VF_GEMINI_TOKEN_URL` | SSO access token URL | 公司共享 token 获取地址 |
 | `VF_GEMINI_MODEL` | 空 | 多模态默认模型 |
 | `VF_GEMINI_SOURCE` | 空 | Gemini 网关请求来源标识 |
+| `VF_GEMINI_MAX_CONCURRENCY` | `6` | 单进程 Gemini HTTP 最大并发数 |
 
 环境变量由当前 shell 读取；项目不会自动覆盖已有 `.env`。
 
@@ -132,7 +135,7 @@ data/
 ├── uploads/               # 对话附件
 │   └── users/{user}/      # 每用户附件与 productions 参考视频
 ├── artifacts/             # Tool 生成产物
-│   └── users/{user}/      # 每用户简报、关键帧、片段、final.mp4 / final.srt
+│   └── users/{user}/      # 每用户简报、关键帧、片段、final.mp4
 ├── skills/                # 全局自定义 Skill
 └── skills_disabled/       # 已停用的全局 Skill
 skills/                    # 随项目分发的内置 Skill
@@ -175,12 +178,12 @@ SQLite 保存以下数据：
 
 ## 视频创作 API
 
-默认提供者为 `local_ffmpeg`。不要把 API Key 写进仓库、README 或前端日志。
+视频生成默认提供者为 `seedance`，不再静默回退本地。不要把 API Key 写进仓库、README 或前端日志。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` / `PUT` | `/api/settings` | 读取或更新设置；Key 只写，留空保留，JSON `null` 清除 |
-| `POST` | `/api/settings/test` | 探活 `multimodal` / `video_generator` / `tts` |
+| `POST` | `/api/settings/test` | 探活 `multimodal` / `video_generator` |
 | `POST` | `/api/productions/uploads` | 上传参考视频，最大 500MB，需能被 ffprobe 解析 |
 | `POST` | `/api/productions` | 创建草稿（`title`、`brief`、`video_upload_id`，可选 `replace_policy`） |
 | `GET` | `/api/productions` / `/api/productions/{id}` | 列表或详情；详情含只读 `replace_plan` |
@@ -196,7 +199,7 @@ SQLite 保存以下数据：
 
 配置 `gemini_gateway` 后，整片理解与片段分析的每一次网关响应都会单独写入生产产物目录的 `gemini_api_calls/video_understanding/` 和 `gemini_api_calls/clip_analysis/`。每个 JSON 包含完整响应、调用标签、输入形态（video/frames）、模型、耗时和成功/失败状态；网络或解析失败也会留下错误记录。该记录只影响诊断，写盘失败不会中断拆解或出片。
 
-远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。失败且 `fallback_to_local=true` 时回退本地并写入 warning。TTS 未配置不会阻塞出片。默认按参考样式（读不到则用安全默认位置）硬烧字幕，并只混合已分离的参考 BGM，可在设置中关闭。
+远程多模态走 `{base_url}/chat/completions`；视频生成可走 `seedance` 内网协议、`openai_compatible` 的 `{base_url}/video/generations` 或 `generic_http` 的 `POST {base_url}`。`seedance` 使用 `task_id` 与 `result.video.url`，旧格式的 `url` / `job_id` 轮询仍保留兼容。视频生成失败会直接失败，不回退本地关键帧。语音、音乐和环境音由视频模型直接生成并随片段音轨返回；缺少音轨的生成片段视为失败。当前阶段不生成 sidecar SRT，也不硬烧字幕。
 
 ## Tool
 
@@ -247,7 +250,7 @@ npm test --prefix frontend
 npm run build --prefix frontend
 ```
 
-后端管线测试使用仓库内夹具 `backend/tests/fixtures/sample-reference.mp4`（约 8 秒，含 Hook/Value/CTA 色块和简单音频）。无网络、无 API Key 的 `POST /run` 路径会生成可被 ffprobe 解析的 `final.mp4` 和 `final.srt`。
+后端管线测试使用仓库内夹具 `backend/tests/fixtures/sample-reference.mp4`（约 8 秒，含 Hook/Value/CTA 色块和简单音频）。测试通过 Provider 桩验证真实远端生成路径、模型音轨、拼接和 `final.mp4` 输出，不再覆盖本地视频伪生成。
 
 真实 Codex 集成测试：
 

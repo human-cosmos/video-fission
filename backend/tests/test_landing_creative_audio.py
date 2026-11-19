@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import json
-import time
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-from tests.helpers import finish_production
 from video_fission.audio_separate import separate_reference_audio
 from video_fission.container import configure
 from video_fission.landing import analyze_landing, assert_public_url, extract_urls
 from video_fission.main import app
-from video_fission.media import audio_levels, ffmpeg_bin, probe, probe_audio
-from video_fission.pipeline import PipelineEngine, _has_audio, _vocals_stem_usable
+from video_fission.media import ffmpeg_bin, probe, probe_audio
+from video_fission.pipeline import PipelineEngine
 from video_fission.providers import (
     build_reference_input_contents,
     build_seedance_submit_payload,
@@ -139,7 +137,19 @@ def test_script_pauses_for_choice_then_select_continues(client: TestClient, test
     voiceovers = []
     for item in candidates:
         shots = (item.get("script") or {}).get("shots") or []
-        timelines.append(tuple((s.get("id"), s.get("start_ms"), s.get("end_ms"), s.get("duration_ms"), s.get("action"), s.get("source_segment_id")) for s in shots))
+        timelines.append(
+            tuple(
+                (
+                    shot.get("id"),
+                    shot.get("start_ms"),
+                    shot.get("end_ms"),
+                    shot.get("duration_ms"),
+                    shot.get("action"),
+                    shot.get("source_segment_id"),
+                )
+                for shot in shots
+            )
+        )
         openings.append((item.get("script") or {}).get("opening"))
         voiceovers.append(tuple(s.get("voiceover") for s in shots))
     assert len(set(timelines)) == 1
@@ -165,16 +175,12 @@ def test_script_pauses_for_choice_then_select_continues(client: TestClient, test
     assert finished["status"] == "completed", finished.get("error")
     assert finished["selected_script_id"] == "script_b"
     assert Path(finished["output"]["video_path"]).is_file()
-    assert (art / "reference-vocals.m4a").is_file()
-    assert (art / "reference-bgm.m4a").is_file()
-    assert (art / "with-bgm.mp4").is_file()
+    assert not (art / "final.srt").exists()
+    assert not (art / "with-bgm.mp4").exists()
+    assert not (art / "reference-vocals.m4a").exists()
+    assert not (art / "reference-bgm.m4a").exists()
     assert not (art / "reference-audio.m4a").exists()
-    style = finished.get("subtitle_style") or {}
-    assert style.get("method") in {"default_safe", "soft_sub"}
-    if style.get("method") == "default_safe":
-        assert style.get("aligned") is False
-        assert "已对齐参考" not in str(style.get("note") or "")
-        assert claims_reference_aligned(style) is False
+    assert not finished.get("output", {}).get("srt_url")
 
     from video_fission.conversation_cards import plan_payload
     paused_plan = plan_payload({**paused, "status": "awaiting_script_choice"})
@@ -244,11 +250,7 @@ def test_audio_stems_differ_from_mix_and_each_other(tmp_path: Path):
 
 
 def test_seedance_request_body_includes_reference_av_and_guardrails():
-    contents = build_reference_input_contents(
-        "https://cdn.example.test/src.mp4",
-        "https://cdn.example.test/reference-vocals.m4a",
-        "https://cdn.example.test/reference-bgm.m4a",
-    )
+    contents = build_reference_input_contents("https://cdn.example.test/src.mp4")
     prompt = PipelineEngine._shot_generate_prompt(
         type("E", (), {"_landing_prompt": lambda self, production: "卖点：不卡纹"})(),
         {"voiceover": "还在为壳卡纹发愁吗？", "visual": "特写手机壳", "prompt": "特写手机壳"},
@@ -266,11 +268,10 @@ def test_seedance_request_body_includes_reference_av_and_guardrails():
     )
     assert payload["options"]["generate_audio"] is True
     roles = {(item["type"], item["role"]) for item in payload["input_contents"]}
-    assert ("video_url", "reference_video") in roles
-    assert sum(1 for item in payload["input_contents"] if item["role"] == "reference_audio") == 2
-    assert "必须生成与口播一致的人声音轨" in payload["prompt"]
+    assert roles == {("video_url", "reference_video")}
+    assert "由视频模型直接生成完整语音和音乐/环境音" in payload["prompt"]
     assert "还在为壳卡纹发愁吗？" in payload["prompt"]
-    assert "不得烧录" in payload["prompt"]
+    assert "不得生成字幕" in payload["prompt"]
     empty_url, warning = public_media_url("", "prd_test", "source.mp4")
     assert empty_url == ""
     assert "公网" in warning
@@ -279,96 +280,84 @@ def test_seedance_request_body_includes_reference_av_and_guardrails():
     assert local_warn
 
 
-def test_placeholder_stems_are_not_used_as_voiceover(tmp_path: Path, monkeypatch):
-    silent = _color_clip(tmp_path / "silent.mp4", duration=1.5, audio=None)
-    assert probe(silent)["has_audio"] is False
-    sep = separate_reference_audio(silent, tmp_path)
-    assert sep["usable"] is False
-    assert sep["method"] == "placeholder"
-    vocals = Path(sep["vocals_path"])
-    assert vocals.is_file()
-    assert _vocals_stem_usable(sep, vocals) is False
+def test_seedance_uploads_reference_media_to_gcloud_when_public_base_is_missing(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    uploads: list[tuple[str, str]] = []
 
-    dest = tmp_path / "shot.mp4"
-    dest.write_bytes(silent.read_bytes())
+    class FakeGatewayClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_access_token(self):
+            return "upload-token"
+
+        def upload_media(self, path, token, *, object_name):
+            uploads.append((path.name, object_name))
+            return f"https://storage.example.test/{object_name}?token={token}"
+
+    monkeypatch.setattr(
+        "video_fission.understand.gateway.GeminiGatewayClient",
+        FakeGatewayClient,
+    )
+    engine = PipelineEngine.__new__(PipelineEngine)
+    engine._get = lambda _production_id: {
+        "source_video": {"path": str(source)},
+        "audio_separation": {"usable": True},
+    }
+    engine.artifact_dir = lambda _production_id: tmp_path
+    emitted: list[dict] = []
+    engine._emit = lambda _production_id, _kind, payload: emitted.append(payload)
     warnings: list[str] = []
-    calls: list[str] = []
 
-    def fake_tts(*_args, **_kwargs):
-        calls.append("tts")
-        speech = _kwargs.get("dest") or _args[-1]
-        _run_ffmpeg(
-            [
-                ffmpeg_bin(),
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=1:sample_rate=44100",
-                "-c:a",
-                "libmp3lame",
-                str(speech),
-            ]
-        )
-        return speech
-
-    from video_fission import providers
-
-    monkeypatch.setattr(providers, "synthesize_speech", fake_tts)
-
-    class Engine:
-        def _emit(self, *_args, **_kwargs):
-            return None
-
-    production = {
-        "id": "prd_silent",
-        "audio_separation": sep,
-    }
-    public = {
-        "tts": {
-            "provider": "openai_compatible",
-            "base_url": "https://tts.example.test",
-            "model": "demo",
-            "voice": "alloy",
-            "timeout_seconds": 10,
-        }
-    }
-    secrets = {"tts": "sk-test"}
-    PipelineEngine._apply_voiceover(
-        Engine(),  # type: ignore[arg-type]
-        dest,
-        {"id": "shot_01", "voiceover": "你好，这是口播。"},
-        production,
-        tmp_path,
-        public,
-        secrets,
+    contents = engine._seedance_input_contents(
+        "prd_gcloud",
+        {
+            "video_generator": {"media_public_base_url": ""},
+            "multimodal": {
+                "upload_url": "https://upload.example.test/gcloud",
+                "token_url": "https://token.example.test",
+            },
+        },
+        {"multimodal": ""},
         warnings,
-        1500,
-        0,
     )
-    assert calls == ["tts"]
-    assert _has_audio(dest)
-    levels = audio_levels(dest)
-    # TTS path must not be near-silent placeholder.
-    assert levels.get("mean_db", -99) > -50 or levels.get("max_db", -99) > -30
 
-    dest2 = tmp_path / "shot2.mp4"
-    dest2.write_bytes(silent.read_bytes())
-    warnings2: list[str] = []
-    PipelineEngine._apply_voiceover(
-        Engine(),  # type: ignore[arg-type]
-        dest2,
-        {"id": "shot_02", "voiceover": "你好，这是口播。"},
-        production,
-        tmp_path,
-        {"tts": {"provider": "none"}},
-        {},
-        warnings2,
-        1500,
-        0,
+    assert warnings == []
+    assert emitted == []
+    assert [item["role"] for item in contents] == ["reference_video"]
+    assert all("prd_gcloud-" in item["url"] for item in contents)
+    assert {name for name, _object_name in uploads} == {"source.mp4"}
+
+
+def test_seedance_reports_missing_public_base_and_gcloud_upload(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    engine = PipelineEngine.__new__(PipelineEngine)
+    engine._get = lambda _production_id: {
+        "source_video": {"path": str(source)},
+        "audio_separation": {"usable": True},
+    }
+    engine.artifact_dir = lambda _production_id: tmp_path
+    emitted: list[dict] = []
+    engine._emit = lambda _production_id, _kind, payload: emitted.append(payload)
+    warnings: list[str] = []
+
+    contents = engine._seedance_input_contents(
+        "prd_no_upload",
+        {
+            "video_generator": {"media_public_base_url": ""},
+            "multimodal": {"upload_url": ""},
+        },
+        {"multimodal": ""},
+        warnings,
     )
-    assert any("没有可用口播" in item and "未写入静音轨" in item for item in warnings2)
-    assert _has_audio(dest2) is False
+
+    assert contents == []
+    assert any("GCloud 上传地址" in warning for warning in warnings)
+    assert emitted[-1]["stage"] == "generate"
 
 
 def test_soft_sub_and_default_safe_styles(tmp_path: Path):
@@ -381,6 +370,12 @@ def test_soft_sub_and_default_safe_styles(tmp_path: Path):
     assert claims_reference_aligned(default_safe_style()) is False
 
     ass = tmp_path / "ref.ass"
+    style_format = (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding"
+    )
     ass.write_text(
         """[Script Info]
 ScriptType: v4.00+
@@ -388,13 +383,13 @@ PlayResX: 640
 PlayResY: 360
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+__STYLE_FORMAT__
 Style: Default,Droid Sans Fallback,28,&H00FFFF00,&H000000FF,&H00111111,&H80000000,0,0,0,0,100,100,0,0,1,2,1,8,20,20,40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,开场字幕
-""",
+""".replace("__STYLE_FORMAT__", style_format),
         encoding="utf-8",
     )
     with_sub = tmp_path / "with-sub.mkv"

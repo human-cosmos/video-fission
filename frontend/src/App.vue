@@ -1,15 +1,11 @@
 <script setup>
 import {
-  Activity,
   ArrowUp,
   Check,
-  Clapperboard,
   Menu,
-  Paperclip,
-  SlidersHorizontal,
+  Plus,
   Square,
   X,
-  Zap,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, eventUrl } from './api'
@@ -59,9 +55,7 @@ const nextConversationCursor = ref('')
 const hasMoreConversations = ref(false)
 const loadingMoreConversations = ref(false)
 const mobileSidebar = ref(false)
-const mobileSessionOpen = ref(false)
 const toast = ref('')
-const streamConnected = ref(false)
 const timeline = ref(null)
 const composerInput = ref(null)
 let eventSource = null
@@ -109,14 +103,15 @@ watch(workspaceMode, (mode) => {
   )
   if (mode !== 'chat') {
     mobileSidebar.value = false
-    mobileSessionOpen.value = false
   }
 })
 
 let sidebarResizeStartX = 0
 let sidebarResizeStartWidth = 0
 
-const SIDEBAR_MIN_WIDTH = 232
+const SIDEBAR_MIN_WIDTH = 196
+const SIDEBAR_AUTO_COLLAPSE_WIDTH = 216
+const SIDEBAR_AUTO_EXPAND_WIDTH = 236
 const SIDEBAR_MAX_WIDTH = 420
 const SIDEBAR_DEFAULT_WIDTH = 260
 const SIDEBAR_COLLAPSED_WIDTH = 68
@@ -341,18 +336,11 @@ function closeStream() {
     eventSource.close()
     eventSource = null
   }
-  streamConnected.value = false
 }
 
 function connectStream(conversationId, afterId = 0) {
   closeStream()
   eventSource = new EventSource(eventUrl(conversationId, afterId))
-  eventSource.onopen = () => {
-    streamConnected.value = true
-  }
-  eventSource.onerror = () => {
-    streamConnected.value = false
-  }
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
@@ -456,7 +444,6 @@ async function selectConversation(id) {
 
 async function selectConversationTask(id) {
   workspaceMode.value = 'chat'
-  mobileSessionOpen.value = false
   const sequence = ++selectionSequence
   closeStream()
   try {
@@ -480,12 +467,6 @@ async function selectConversationTask(id) {
 function openSettings() {
   workspaceMode.value = 'settings'
   mobileSidebar.value = false
-  mobileSessionOpen.value = false
-}
-
-function openMobileSession() {
-  mobileSidebar.value = false
-  mobileSessionOpen.value = true
 }
 
 function startDraftConversation() {
@@ -499,7 +480,6 @@ function startDraftConversation() {
   uploading.value = false
   clearAttachments()
   mobileSidebar.value = false
-  mobileSessionOpen.value = false
   nextTick(() => composerInput.value?.focus())
 }
 
@@ -534,11 +514,11 @@ async function createConversationTask() {
   }
 }
 
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
+function setSidebarCollapsed(collapsed) {
+  sidebarCollapsed.value = collapsed
   window.localStorage.setItem(
     'video-fission.sidebarCollapsed',
-    String(sidebarCollapsed.value),
+    String(collapsed),
   )
 }
 
@@ -546,7 +526,9 @@ function startSidebarResize(event) {
   if (window.innerWidth <= 900) return
   event.preventDefault()
   sidebarResizeStartX = event.clientX
-  sidebarResizeStartWidth = sidebarWidth.value
+  sidebarResizeStartWidth = sidebarCollapsed.value
+    ? SIDEBAR_COLLAPSED_WIDTH
+    : sidebarWidth.value
   document.body.classList.add('is-resizing-sidebar')
   window.addEventListener('pointermove', resizeSidebar)
   window.addEventListener('pointerup', stopSidebarResize, { once: true })
@@ -554,9 +536,21 @@ function startSidebarResize(event) {
 }
 
 function resizeSidebar(event) {
-  sidebarWidth.value = clampSidebarWidth(
+  const nextWidth = clampSidebarWidth(
     sidebarResizeStartWidth + event.clientX - sidebarResizeStartX,
   )
+  if (sidebarCollapsed.value) {
+    if (nextWidth >= SIDEBAR_AUTO_EXPAND_WIDTH) {
+      setSidebarCollapsed(false)
+      sidebarWidth.value = nextWidth
+    }
+    return
+  }
+  if (nextWidth <= SIDEBAR_AUTO_COLLAPSE_WIDTH) {
+    setSidebarCollapsed(true)
+    return
+  }
+  sidebarWidth.value = nextWidth
 }
 
 function stopSidebarResize() {
@@ -568,19 +562,37 @@ function stopSidebarResize() {
 }
 
 function handleSidebarResizeKey(event) {
+  if (sidebarCollapsed.value) {
+    if (event.key === 'ArrowRight' || event.key === 'End') {
+      event.preventDefault()
+      setSidebarCollapsed(false)
+      sidebarWidth.value =
+        event.key === 'End' ? SIDEBAR_MAX_WIDTH : SIDEBAR_DEFAULT_WIDTH
+    }
+    return
+  }
   const step = event.shiftKey ? 24 : 8
   let next = sidebarWidth.value
   if (event.key === 'ArrowLeft') next -= step
   else if (event.key === 'ArrowRight') next += step
-  else if (event.key === 'Home') next = SIDEBAR_MIN_WIDTH
+  else if (event.key === 'Home') {
+    event.preventDefault()
+    setSidebarCollapsed(true)
+    return
+  }
   else if (event.key === 'End') next = SIDEBAR_MAX_WIDTH
   else return
   event.preventDefault()
+  if (next <= SIDEBAR_AUTO_COLLAPSE_WIDTH) {
+    setSidebarCollapsed(true)
+    return
+  }
   sidebarWidth.value = clampSidebarWidth(next)
   window.localStorage.setItem('video-fission.sidebarWidth', String(sidebarWidth.value))
 }
 
 function resetSidebarWidth() {
+  setSidebarCollapsed(false)
   sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH
   window.localStorage.setItem('video-fission.sidebarWidth', String(SIDEBAR_DEFAULT_WIDTH))
 }
@@ -940,37 +952,25 @@ async function bindUnboundProduction(productionId) {
   }
 }
 
-async function archiveConversation(id) {
-  try {
-    await api.archive(id)
-    if (id === currentConversation.value?.id) {
-      currentConversation.value = {
-        ...currentConversation.value,
-        is_archived: true,
-        archived_at: new Date().toISOString(),
-      }
-    }
-    await loadConversations({ reset: true })
-    await alignCurrentConversationWithView()
-    notify('对话已归档')
-  } catch (error) {
-    notify(error.message)
-  }
-}
+async function deleteConversation(id) {
+  if (!id) return
+  const conversation = conversations.value.find((item) => item.id === id)
+  const title = conversation?.title || '这个会话'
+  if (!window.confirm(`确定删除会话「${title}」？删除后不可恢复。`)) return
 
-async function unarchiveConversation(id) {
+  const deletingCurrent = id === currentConversation.value?.id
   try {
-    await api.unarchive(id)
-    if (id === currentConversation.value?.id) {
-      currentConversation.value = {
-        ...currentConversation.value,
-        is_archived: false,
-        archived_at: null,
-      }
+    await api.deleteConversation(id)
+    conversations.value = conversations.value.filter((item) => item.id !== id)
+    if (deletingCurrent) {
+      closeStream()
+      currentConversation.value = null
+      window.localStorage.removeItem('video-fission.activeConversation')
+      const next = conversations.value[0]
+      if (next) await selectConversation(next.id)
+      else startDraftConversation()
     }
-    await loadConversations({ reset: true })
-    await alignCurrentConversationWithView()
-    notify('已取消归档')
+    notify('对话已删除')
   } catch (error) {
     notify(error.message)
   }
@@ -1000,7 +1000,6 @@ function insertLineBreak(event) {
 function handleShortcut(event) {
   if (event.key === 'Escape') {
     mobileSidebar.value = false
-    mobileSessionOpen.value = false
     return
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
@@ -1059,12 +1058,10 @@ onBeforeUnmount(() => {
       :loading-more="loadingMoreConversations"
       @new="newConversation"
       @select="selectConversation"
-      @archive="archiveConversation"
-      @unarchive="unarchiveConversation"
+      @delete="deleteConversation"
       @search="handleConversationSearch"
       @load-more="loadMoreConversations"
       @close-mobile="mobileSidebar = false"
-      @toggle-collapse="toggleSidebar"
       @resize-start="startSidebarResize"
       @resize-keydown="handleSidebarResizeKey"
       @resize-reset="resetSidebarWidth"
@@ -1094,59 +1091,11 @@ onBeforeUnmount(() => {
               @blur="saveTitle"
               @keydown.enter.target.blur
             />
-            <h1 v-else>Video Fission</h1>
-            <div class="conversation-meta">
-              <span v-if="streamConnected" class="live-label"><i></i> LIVE</span>
-              <span v-else-if="currentConversation" class="live-label muted">历史已保存</span>
-              <span v-if="currentConversation?.status === 'running'">
-                <Activity :size="12" /> 执行中
-              </span>
-            </div>
+            <h1 v-else>先看再拆</h1>
           </template>
           <template v-else>
             <h1>系统设置</h1>
-            <div class="conversation-meta">
-              <span class="page-subtitle">账号、Skill 与 Tool</span>
-            </div>
           </template>
-        </div>
-
-        <div class="topbar-controls">
-          <TopbarSelect
-            v-if="isChatMode && currentConversation"
-            v-model="currentConversation.model"
-            class="model-control"
-            caption="模型"
-            aria-label="模型"
-            :options="modelOptions"
-            @change="updateModel"
-          >
-            <template #icon><span class="control-prefix">M</span></template>
-          </TopbarSelect>
-          <TopbarSelect
-            v-if="isChatMode && currentConversation"
-            v-model="currentConversation.reasoning_effort"
-            class="effort-control"
-            caption="推理"
-            aria-label="推理强度"
-            :options="effortOptions"
-            @change="updateEffort"
-          >
-            <template #icon>
-              <span class="control-prefix"><Zap :size="13" /></span>
-            </template>
-          </TopbarSelect>
-
-          <button
-            v-if="isChatMode && currentConversation"
-            class="icon-button mobile-only mobile-session-toggle"
-            aria-label="打开会话参数"
-            aria-controls="mobile-session-sheet"
-            :aria-expanded="mobileSessionOpen"
-            @click="openMobileSession"
-          >
-            <SlidersHorizontal :size="18" />
-          </button>
         </div>
       </header>
 
@@ -1178,27 +1127,20 @@ onBeforeUnmount(() => {
         @select-script="selectScript"
         @regenerate-scripts="regenerateScripts"
         @regenerate-video="regenerateVideo"
+        @use-prompt="usePrompt"
       />
 
       <section class="composer-dock">
-        <div v-if="!hasConversation" class="prompt-rail">
-          <button
-            v-for="prompt in [
-              ['把一个产品卖点拆成 30 秒短视频', '卖点拆解'],
-              ['为美妆新品写一个反常识开场', '开场钩子'],
-              ['设计一套三段式种草脚本', '脚本结构'],
-            ]"
-            :key="prompt[1]"
-            data-testid="quick-prompt"
-            @click="usePrompt(prompt[0])"
-          >
-            <span>{{ prompt[1] }}</span>
-            {{ prompt[0] }}
-            <ArrowUp :size="13" />
-          </button>
-        </div>
-
         <div class="composer">
+          <input
+            ref="videoInput"
+            type="file"
+            hidden
+            :accept="VIDEO_ACCEPT"
+            data-testid="composer-video-upload"
+            :disabled="uploading || isArchived"
+            @change="uploadComposerVideo"
+          />
           <div v-if="productionVideo" class="composer-video" data-testid="composer-video-preview">
             <video
               :src="productionVideo.previewUrl || productionVideo.url"
@@ -1239,51 +1181,58 @@ onBeforeUnmount(() => {
               </button>
             </span>
           </div>
-          <textarea
-            ref="composerInput"
-            v-model="composer"
-            data-testid="message-input"
-            rows="1"
-            maxlength="30000"
-            :disabled="isArchived"
-            :placeholder="
-              isArchived
-                ? '该对话已归档，取消归档后可继续发送'
-                : currentConversation?.status === 'running'
-                ? '追问当前执行，或补充新的限制…'
-                : awaitingScriptChoice
-                ? '改文案或卖点可再出 3 个脚本；输入「用第 2 个」也可挑选'
-                : '描述你想拆解、策划或完成的视频任务…'
-            "
-            @keydown="insertLineBreak"
-          ></textarea>
-          <div class="composer-footer">
+          <div class="composer-row">
             <div class="composer-tools">
-              <label class="icon-button file-button" title="添加文件">
-                <Paperclip :size="18" />
-                <input
-                  type="file"
-                  multiple
-                  hidden
-                  :disabled="uploading || isArchived"
-                  @change="uploadFiles"
-                />
-              </label>
-              <label class="icon-button file-button" title="上传参考视频">
-                <Clapperboard :size="18" />
-                <input
-                  ref="videoInput"
-                  type="file"
-                  hidden
-                  :accept="VIDEO_ACCEPT"
-                  data-testid="composer-video-upload"
-                  :disabled="uploading || isArchived"
-                  @change="uploadComposerVideo"
-                />
-              </label>
+              <button
+                type="button"
+                class="composer-plus"
+                title="上传参考视频"
+                aria-label="上传参考视频"
+                :disabled="uploading || isArchived"
+                @click="videoInput?.click()"
+              >
+                <Plus :size="19" />
+                <span>上传参考视频</span>
+              </button>
               <span v-if="uploading" class="uploading-label">上传中…</span>
             </div>
+            <textarea
+              ref="composerInput"
+              v-model="composer"
+              data-testid="message-input"
+              rows="1"
+              maxlength="30000"
+              :disabled="isArchived"
+              :placeholder="
+                isArchived
+                  ? '该对话已归档，取消归档后可继续发送'
+                  : currentConversation?.status === 'running'
+                  ? '追问当前执行，或补充新的限制…'
+                  : awaitingScriptChoice
+                  ? '改文案或卖点可再出 3 个脚本；输入「用第 2 个」也可挑选'
+                  : '描述你想拆解、策划或完成的视频任务…'
+              "
+              @keydown="insertLineBreak"
+            ></textarea>
             <div class="send-actions">
+              <div v-if="currentConversation" class="composer-config">
+                <TopbarSelect
+                  v-model="currentConversation.model"
+                  class="composer-model-control"
+                  caption="模型"
+                  aria-label="模型"
+                  :options="modelOptions"
+                  @change="updateModel"
+                />
+                <TopbarSelect
+                  v-model="currentConversation.reasoning_effort"
+                  class="composer-effort-control"
+                  caption="推理"
+                  aria-label="推理强度"
+                  :options="effortOptions"
+                  @change="updateEffort"
+                />
+              </div>
               <button
                 v-if="currentConversation?.status === 'running'"
                 class="stop-button"
@@ -1291,7 +1240,7 @@ onBeforeUnmount(() => {
                 title="停止执行"
                 @click="stopTurn"
               >
-                <Square :size="15" fill="currentColor" />
+                <Square :size="14" fill="currentColor" />
               </button>
               <button
                 class="send-button"
@@ -1300,7 +1249,7 @@ onBeforeUnmount(() => {
                 :title="currentConversation?.status === 'running' ? '追问' : '发送'"
                 @click="send"
               >
-                <ArrowUp :size="19" />
+                <ArrowUp :size="17" />
               </button>
             </div>
           </div>
@@ -1328,59 +1277,6 @@ onBeforeUnmount(() => {
         @notify="notify"
       />
     </main>
-
-    <Transition name="session-sheet">
-      <div
-        v-if="isChatMode && currentConversation && mobileSessionOpen"
-        class="mobile-session-backdrop"
-        @click.self="mobileSessionOpen = false"
-      >
-        <section
-          class="mobile-session-sheet"
-          id="mobile-session-sheet"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="mobile-session-title"
-        >
-          <header>
-            <div>
-              <span>SESSION</span>
-              <h2 id="mobile-session-title">会话参数</h2>
-            </div>
-            <button
-              class="icon-button compact"
-              aria-label="关闭会话参数"
-              @click="mobileSessionOpen = false"
-            >
-              <X :size="17" />
-            </button>
-          </header>
-          <p>模型和推理强度从下一条消息起生效。</p>
-          <div class="mobile-session-fields">
-            <TopbarSelect
-              v-model="currentConversation.model"
-              caption="模型"
-              aria-label="模型"
-              :options="modelOptions"
-              @change="updateModel"
-            >
-              <template #icon><span class="control-prefix">M</span></template>
-            </TopbarSelect>
-            <TopbarSelect
-              v-model="currentConversation.reasoning_effort"
-              caption="推理强度"
-              aria-label="推理强度"
-              :options="effortOptions"
-              @change="updateEffort"
-            >
-              <template #icon>
-                <span class="control-prefix"><Zap :size="13" /></span>
-              </template>
-            </TopbarSelect>
-          </div>
-        </section>
-      </div>
-    </Transition>
 
     <Transition name="toast">
       <div v-if="toast" class="toast-message" role="status">

@@ -308,6 +308,104 @@ prompt_video_split = """你是一名专业的电商广告视频内容分析与�
 """
 
 
+prompt_video_split_compact = """你是一名专业的电商广告视频内容分析与分镜拆分专家。
+
+视频总时长：{{VIDEO_DURATION}}
+
+完整观看视频，结合画面、屏幕文字和语音，一次完成：整片标签、语义分镜、每个片段的三级标签，以及视频开头区间。只输出一个合法 JSON 对象，不要解释、前言或 Markdown。
+
+## 分镜规则
+1. 在镜头/场景切换、商品展示变化、人物动作变化、卖点或主题变化、广告结构变化处拆分。
+2. 不按固定间隔机械拆分；同一镜头内连续表达同一卖点的内容保持完整；相邻同义内容合并；快速剪辑中有独立意义的短镜头保留。
+3. 常规片段 5~15 秒，单个片段不超过 20 秒，通常不短于 3 秒；片段数量由内容决定。
+4. 第一个片段从 00:00 开始，最后一个片段结束于视频总时长；相邻片段 end_time 必须等于下一段 start_time，不能重叠或留空隙。
+5. 时间优先使用 MM:SS，可保留一位小数，例如 00:05、01:20.5。
+
+## 开头区间
+opening 从 00:00 开始，到开场故事、画面与节奏自然收住为止。开头不等于 hook；hook 负责在前几秒停住滑动，开头是完整开场单元。常见约 10~15 秒，但必须落在真实镜头、台词或节奏转折处，禁止为凑整秒硬切。短片可标到全片结束，并在 reason 中说明故事、画面和节奏为何在此结束。
+
+## 片段三级标签
+- tag_level1 每段只能有 1 个，职责范围为：开场钩子、痛点具象、方案登场、卖点展示、效果展示、场景演示、信任构建、响应号召。
+- tag_level2 每段只能有 1 个，必须属于该一级职责；可参考实际广告语义拟出贴切类型，例如开场钩子下可用痛点钩子、结果钩子、反差钩子、奇观钩子、权威钩子、身份钩子、利益钩子、颜值钩子。
+- tag_level3 选 1~3 个短语，必须是画面中可见的元素或证据，并与二级标签属于同一条链路。写元素类型或证据，不写完整句子；商品名、数字和具体效果写在 description。
+- 第一个片段优先使用开场钩子；若已经进入主体讲解则按实际职责标注。每个片段只承担一个一级职责。
+
+## 视频级字段
+以下数组字段没有内容时输出 []，文本字段没有内容时输出 ""：
+- product_name：画面或口播中实际展示的商品中文名，按主次排序，不编造。
+- environment_categories：只能使用 居家场景、办公场景、棚拍场景、自然场景、城市场景、合成场景。
+- environment_specific_scenes：具体场景，如卧室、厨房、街道、雪地、纯色背景。
+- model_types：只能使用 真人模特、虚拟模特、特殊模特。
+- model_social_role：模特社会角色，如医生、专家、家庭主妇。
+- model_appearance_features：模特外貌特点，如高颜值、精致、接地气、老年。
+- style_categories：只能使用 真实接地气、高端质感类、幽默搞怪类、情感氛围类、躁动/强促销类、二次元/艺术类。
+- style_details：具体风格，如冷色调打光、手持跟拍、快节奏字幕。
+- product_presentation_types：只能使用 功能演示型、产品拆解型、对比测评型、社交背书型。
+- product_showcase_forms：具体展示形式，如使用体验、效果展示、功能展示、材质工艺解析、竞品对比展示。
+- narration_method_categories：只能使用 真人口播、话外音旁白、剧情对话、音乐音频。
+- narration_method_details：具体解说形式，如故事叙述、专家讲解、达人推荐、剧情故事。
+- opening_types：只能使用 抓人眼球、硬广、剧情演绎。
+- opening_forms：具体开场形式，如问题直击痛点、高能画面冲击、反转悬念、产品效果前置。
+- narrative_structures：只能使用 痛点解决型、悬念反转型、情感共鸣型、知识密度型、产品体验型、热点借势型、系列连载型。
+- rhythm_patterns：节奏特征，如快剪轰炸型、悬念递进型、情感沉浸型、数据驱动型。
+- interaction_modes：只能使用 直接互动、间接互动、沉浸视角。
+- BGM_categories：只能使用 节奏/卡点、洗脑/玩梗、情绪渲染、辅助/背景。
+- BGM_styles：具体 BGM 氛围，如低音、悬念、俏皮、热血、欢快、接地气。
+- video_describe：只依据画面描述场景、人物、商品、动作、屏幕文字和镜头流程，不少于 100 字，不引用音频。
+- video_summary：结合画面、字幕和语音概括主题、商品、核心卖点与广告结构，不超过 150 字。
+
+## 输出 JSON 契约
+{
+  "product_name": [],
+  "environment_categories": [],
+  "environment_specific_scenes": [],
+  "model_types": [],
+  "model_social_role": [],
+  "model_appearance_features": [],
+  "style_categories": [],
+  "style_details": [],
+  "product_presentation_types": [],
+  "product_showcase_forms": [],
+  "narration_method_categories": [],
+  "narration_method_details": [],
+  "opening_types": [],
+  "opening_forms": [],
+  "narrative_structures": [],
+  "rhythm_patterns": [],
+  "interaction_modes": [],
+  "BGM_categories": [],
+  "BGM_styles": [],
+  "video_describe": "",
+  "video_summary": "",
+  "opening": {
+    "start_time": "00:00",
+    "end_time": "00:00",
+    "reason": ""
+  },
+  "video_lens": [
+    {
+      "index": 1,
+      "start_time": "00:00",
+      "end_time": "00:00",
+      "description": "",
+      "summary": "",
+      "tag_level1": "开场钩子",
+      "tag_level2": "",
+      "tag_level3": []
+    }
+  ]
+}
+
+字段要求：
+- 所有视频级字段必须输出；固定分类只能使用给定名称。
+- video_lens 必须首尾覆盖全片且连续。
+- description 只依据画面，具体、客观、完整，不少于 20 字。
+- summary 结合画面与语音，不超过 20 字。
+- opening 必填且 start_time 必须为 00:00，reason 必须写明真实转折原因。
+- 只输出最终 JSON，可被 Python json.loads 直接解析。
+"""
+
+
 # ==================== Gemini 片段解析 ====================
 
 prompt_lens_analysis = """你是一名电商广告视频片段解析专家。输入是从完整广告视频中切出的单个视频片段。

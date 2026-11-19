@@ -4,13 +4,15 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.helpers import finish_production
 from video_fission.container import configure
 from video_fission.conversation_cards import cards_for, observe_payload, stable_item_id, understanding_payload
 from video_fission.main import app
 from video_fission.understand.normalize import (
     SLOT_TO_ROLE,
+    build_compact_split_prompt,
+    build_split_prompt,
     coverage_ok,
+    coverage_ok_lenses,
     extract_video_tags,
     normalize_segments,
     normalize_tags,
@@ -20,6 +22,8 @@ from video_fission.understand.normalize import (
 )
 from video_fission.understand.observe import normalize_observe_response
 from video_fission.understand.transitions import TransitionDetector, TransitionInfo
+
+from tests.helpers import finish_production
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-reference.mp4"
 
@@ -306,12 +310,277 @@ def test_remote_failure_falls_back_and_pipeline_still_completes(client: TestClie
     assert finished["status"] == "completed"
     assert public["decomposition"]["provider"] == "local_ffmpeg"
     assert any("整片理解失败" in item or "已保留本地切分" in item for item in public["warnings"])
+    assert any("fake gateway down" in item for item in public["warnings"])
     assert Path(public["output"]["video_path"]).is_file()
     clip = Path(container.settings.artifacts_dir) / "productions" / production_id / "clips" / "seg_01.mp4"
     assert clip.is_file()
     media = client.get(f"/api/productions/{production_id}/artifacts/clips/seg_01.mp4")
     assert media.status_code == 200
     assert media.headers["content-type"].startswith("video/")
+
+
+def test_remote_split_repairs_partial_timeline_and_keeps_model_summary(monkeypatch, tmp_path: Path):
+    from video_fission.understand import service as understand_service
+
+    monkeypatch.setattr(
+        understand_service,
+        "ensure_under_size",
+        lambda src, _tmp, _limit: (src, ""),
+    )
+    monkeypatch.setattr(understand_service.media, "extract_frames", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        understand_service,
+        "_call_understand",
+        lambda *_args, **_kwargs: (
+            {
+                "video_summary": "模型总结仍然可用",
+                "video_lens": [
+                    {"start_time": 0, "end_time": 3, "description": "开场"},
+                    {"start_time": 5, "end_time": 8, "description": "结尾"},
+                ],
+            },
+            False,
+        ),
+    )
+
+    lenses, tags, _provider, _model, warning, _opening = understand_service._remote_split(
+        FIXTURE,
+        tmp_path,
+        8.1,
+        {
+            "base_url": "https://gateway.example/chat",
+            "model": "gemini-test",
+        },
+        "token",
+        "gemini_gateway",
+        {"gemini_max_size_mb": 15},
+        TransitionInfo(),
+        None,
+    )
+
+    assert len(lenses) == 2
+    assert coverage_ok_lenses(lenses, 8.1)
+    assert tags["video_summary"] == "模型总结仍然可用"
+    assert "时间轴存在缺口或重叠" in warning
+
+
+def test_remote_split_preserves_tags_when_model_returns_no_lenses(monkeypatch, tmp_path: Path):
+    from video_fission.understand import service as understand_service
+
+    monkeypatch.setattr(
+        understand_service,
+        "ensure_under_size",
+        lambda src, _tmp, _limit: (src, ""),
+    )
+    monkeypatch.setattr(understand_service.media, "extract_frames", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        understand_service,
+        "_call_understand",
+        lambda *_args, **_kwargs: ({"video_summary": "只有摘要"}, False),
+    )
+
+    lenses, tags, _provider, _model, warning, _opening = understand_service._remote_split(
+        FIXTURE,
+        tmp_path,
+        8.1,
+        {
+            "base_url": "https://gateway.example/chat",
+            "model": "gemini-test",
+        },
+        "token",
+        "gemini_gateway",
+        {"gemini_max_size_mb": 15},
+        TransitionInfo(),
+        None,
+    )
+
+    assert lenses == []
+    assert tags["video_summary"] == "只有摘要"
+    assert "已使用本地切分" in warning
+
+
+def test_remote_split_uses_gemini_timeout_and_selects_best_candidate(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from video_fission.understand import service as understand_service
+
+    monkeypatch.setattr(
+        understand_service,
+        "ensure_under_size",
+        lambda src, _tmp, _limit: (src, ""),
+    )
+    monkeypatch.setattr(understand_service.media, "extract_frames", lambda *_args, **_kwargs: [])
+    calls: list[dict] = []
+    payloads = [
+        {
+            "video_lens": [{"start_time": 0, "end_time": 8.1, "description": "候选一"}],
+            "video_summary": "",
+        },
+        {
+            "video_lens": [
+                {"start_time": 0, "end_time": 4.0, "description": "候选二 A"},
+                {"start_time": 4.0, "end_time": 8.1, "description": "候选二 B"},
+            ],
+            "video_summary": "更完整的候选",
+        },
+    ]
+
+    def fake_call(_provider, _mm, _api_key, _prompt, _video, _frames, **kwargs):
+        calls.append(kwargs)
+        return payloads[len(calls) - 1], False
+
+    monkeypatch.setattr(understand_service, "_call_understand", fake_call)
+
+    lenses, tags, _provider, _model, _warning, _opening = understand_service._remote_split(
+        FIXTURE,
+        tmp_path,
+        8.1,
+        {
+            "base_url": "https://gateway.example/chat",
+            "model": "gemini-test",
+        },
+        "token",
+        "gemini_gateway",
+        {"gemini_max_size_mb": 15},
+        TransitionInfo(),
+        None,
+    )
+
+    assert len(calls) == 2
+    assert all(call["timeout_seconds"] == 120 for call in calls)
+    assert len(lenses) == 2
+    assert lenses[0]["description"] == "候选二 A"
+    assert tags["video_summary"] == "更完整的候选"
+
+
+def test_clip_analysis_uses_short_gemini_timeout(monkeypatch, tmp_path: Path):
+    from video_fission.understand import service as understand_service
+
+    captured: dict = {}
+
+    def fake_call(_provider, _mm, _api_key, _prompt, _video, _frames, **kwargs):
+        captured.update(kwargs)
+        return {
+            "is_include_product": "是",
+            "clip_description": "片段描述",
+        }, False
+
+    def fake_run_workers(segments, work, *_args, **_kwargs):
+        segment_id, payload, _error = work(segments[0])
+        return {segment_id: payload}
+
+    monkeypatch.setattr(understand_service, "_call_understand", fake_call)
+    monkeypatch.setattr(understand_service, "_run_workers", fake_run_workers)
+    segments = [
+        {
+            "id": "seg_01",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "clip_path": "clips/seg_01.mp4",
+        }
+    ]
+
+    understand_service._analyze_clips(
+        segments,
+        tmp_path,
+        {
+            "base_url": "https://gateway.example/chat",
+            "model": "gemini-test",
+        },
+        "token",
+        "gemini_gateway",
+        {"clip_workers": 1},
+        {},
+        [],
+        lambda *_args: None,
+        None,
+    )
+
+    assert captured["timeout_seconds"] == 120
+
+
+def test_split_prompt_budget_uses_compact_then_frames():
+    from video_fission.understand import service as understand_service
+
+    prompt, mode, prompt_tokens, video_tokens, estimated = understand_service._select_split_prompt(100.067)
+    assert mode == "compact_video"
+    assert prompt == build_compact_split_prompt(100.067)
+    assert prompt != build_split_prompt(100.067)
+    assert prompt_tokens + video_tokens == estimated
+    assert estimated <= understand_service.VIDEO_INPUT_TOKEN_BUDGET
+
+    short_prompt, short_mode, *_ = understand_service._select_split_prompt(8.1)
+    assert short_mode == "full_video"
+    assert short_prompt == build_split_prompt(8.1)
+
+    long_prompt, long_mode, *_ = understand_service._select_split_prompt(300)
+    assert long_mode == "frames"
+    assert long_prompt == build_split_prompt(300)
+
+
+def test_compact_split_prompt_keeps_output_contract():
+    prompt = build_compact_split_prompt(100.067)
+    for required in (
+        "video_lens",
+        "opening",
+        "tag_level1",
+        "tag_level2",
+        "tag_level3",
+        "product_name",
+        "environment_categories",
+        "BGM_styles",
+        "video_describe",
+        "video_summary",
+    ):
+        assert required in prompt
+    assert "100.1 秒" in prompt
+
+
+def test_remote_split_uses_compact_prompt_for_long_video(monkeypatch, tmp_path: Path):
+    from video_fission.understand import service as understand_service
+
+    monkeypatch.setattr(understand_service, "ensure_under_size", lambda src, _tmp, _limit: (src, ""))
+    monkeypatch.setattr(understand_service.media, "extract_frames", lambda *_args, **_kwargs: [])
+    captured: dict = {}
+
+    def fake_call(_provider, _mm, _api_key, prompt, video_path, frames, temperature, **kwargs):
+        captured.update(
+            {
+                "prompt": prompt,
+                "video_path": video_path,
+                "frames": frames,
+                "temperature": temperature,
+            }
+        )
+        return (
+            {
+                "video_summary": "模型总结",
+                "video_lens": [{"start_time": 0, "end_time": 100.067, "description": "完整片段"}],
+            },
+            False,
+        )
+
+    monkeypatch.setattr(understand_service, "_call_understand", fake_call)
+    lenses, _tags, _provider, _model, warning, _opening = understand_service._remote_split(
+        FIXTURE,
+        tmp_path,
+        100.067,
+        {
+            "base_url": "https://gateway.example/chat",
+            "model": "gemini-test",
+        },
+        "token",
+        "gemini_gateway",
+        {"gemini_max_size_mb": 15},
+        TransitionInfo(),
+        None,
+    )
+
+    assert len(lenses) == 1
+    assert captured["prompt"] == build_compact_split_prompt(100.067)
+    assert captured["video_path"] == FIXTURE
+    assert "已使用精简提示词" in warning
 
 
 @pytest.mark.skipif(

@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from .prompts import prompt_video_split
+from .prompts import prompt_video_split, prompt_video_split_compact
 
 _JSON_FENCE = re.compile(r"```(?:json)?", re.IGNORECASE)
 _DURATION_TOKEN = "{{VIDEO_DURATION}}"
@@ -52,6 +52,14 @@ def build_split_prompt(duration_s: float) -> str:
     seconds = total - minutes * 60
     duration_text = f"{total:.1f} 秒（{minutes:02d}:{seconds:04.1f}）"
     return prompt_video_split.replace(_DURATION_TOKEN, duration_text)
+
+
+def build_compact_split_prompt(duration_s: float) -> str:
+    total = round(max(float(duration_s), 0.0), 1)
+    minutes = int(total // 60)
+    seconds = total - minutes * 60
+    duration_text = f"{total:.1f} 秒（{minutes:02d}:{seconds:04.1f}）"
+    return prompt_video_split_compact.replace(_DURATION_TOKEN, duration_text)
 
 
 def parse_time(value: Any, last: bool = False) -> float:
@@ -158,7 +166,11 @@ def empty_video_tags() -> dict[str, Any]:
 def _video_tag_source(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
-    if "video_lens" in data or any(key in data for key in VIDEO_TAG_LIST_FIELDS):
+    if (
+        "video_lens" in data
+        or any(key in data for key in VIDEO_TAG_LIST_FIELDS)
+        or any(key in data for key in VIDEO_TAG_TEXT_FIELDS)
+    ):
         return data
     for key in ("data", "result", "content", "text", "message", "output", "answer"):
         nested = data.get(key)

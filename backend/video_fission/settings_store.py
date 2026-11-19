@@ -28,27 +28,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "timeout_seconds": 120,
     },
     "video_generator": {
-        "provider": "local_ffmpeg",
-        "base_url": "",
+        "provider": "seedance",
+        "base_url": "https://api.giikin.com",
         "source": "video-fission",
         "resolution": "720p",
         "api_key_set": False,
-        "model": "",
-        "timeout_seconds": 300,
-        "fallback_to_local": True,
+        "model": "seedance-2-0-fast",
+        "timeout_seconds": 600,
         "media_public_base_url": "",
-    },
-    "tts": {
-        "provider": "none",
-        "base_url": "",
-        "api_key_set": False,
-        "model": "",
-        "voice": "alloy",
-    },
-    "compose": {
-        "burn_in_subtitles": True,
-        "mix_reference_bgm": True,
-        "bgm_volume": 0.18,
     },
     "understand": {
         "transition_detection": True,
@@ -62,11 +49,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 PROVIDER_ENUMS = {
     "multimodal": {"local_ffmpeg", "openai_compatible", "gemini_gateway"},
-    "video_generator": {"local_ffmpeg", "openai_compatible", "generic_http", "seedance"},
-    "tts": {"none", "openai_compatible"},
+    "video_generator": {"openai_compatible", "generic_http", "seedance"},
 }
 
-SECRET_KEYS = ("multimodal", "video_generator", "tts")
+SECRET_KEYS = ("multimodal", "video_generator")
 
 
 class SettingsStore:
@@ -91,7 +77,7 @@ class SettingsStore:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         public, secrets = self._load(user_id)
-        for section in ("multimodal", "video_generator", "tts", "compose", "understand"):
+        for section in ("multimodal", "video_generator", "understand"):
             if section not in patch or patch[section] is None:
                 continue
             if not isinstance(patch[section], dict):
@@ -129,12 +115,6 @@ class SettingsStore:
                     raise ValueError("timeout_seconds 需在 5 到 3600 之间")
                 if "timeout_seconds" in public[section]:
                     public[section]["timeout_seconds"] = timeout
-            if (
-                section == "video_generator"
-                and "fallback_to_local" in incoming
-                and incoming["fallback_to_local"] is not None
-            ):
-                public[section]["fallback_to_local"] = bool(incoming["fallback_to_local"])
             if section == "understand":
                 for flag in ("transition_detection", "clip_analysis", "observe"):
                     if flag in incoming and incoming[flag] is not None:
@@ -154,16 +134,6 @@ class SettingsStore:
                     if timeout < 30 or timeout > 3600:
                         raise ValueError("observe_timeout_seconds 需在 30 到 3600 之间")
                     public[section]["observe_timeout_seconds"] = timeout
-            if section == "compose":
-                if "burn_in_subtitles" in incoming and incoming["burn_in_subtitles"] is not None:
-                    public[section]["burn_in_subtitles"] = bool(incoming["burn_in_subtitles"])
-                if "mix_reference_bgm" in incoming and incoming["mix_reference_bgm"] is not None:
-                    public[section]["mix_reference_bgm"] = bool(incoming["mix_reference_bgm"])
-                if "bgm_volume" in incoming and incoming["bgm_volume"] is not None:
-                    volume = float(incoming["bgm_volume"])
-                    if volume < 0 or volume > 1:
-                        raise ValueError("bgm_volume 需在 0 到 1 之间")
-                    public[section]["bgm_volume"] = volume
             if section in SECRET_KEYS and "api_key" in incoming:
                 # Missing key is ignored by caller; explicit null clears; "" keeps.
                 value = incoming["api_key"]
@@ -179,7 +149,7 @@ class SettingsStore:
 
     def test_target(self, target: str, user_id: str | None = None) -> dict[str, Any]:
         if target not in SECRET_KEYS:
-            raise ValueError("target 必须是 multimodal、video_generator 或 tts")
+            raise ValueError("target 必须是 multimodal 或 video_generator")
         public, secrets = self._load(user_id)
         section = public[target]
         provider = section.get("provider") or "local_ffmpeg"
@@ -191,9 +161,6 @@ class SettingsStore:
             safe_url(str(section.get("base_url") or "")),
             section.get("model") or "-",
         )
-        if target == "tts" and provider == "none":
-            logger.info("settings.probe_completed target=%s provider=none", target)
-            return {"ok": True, "provider": "none", "detail": "TTS 未启用，出片时不会阻塞"}
         if provider == "local_ffmpeg":
             probe = media.ffmpeg_available()
             result = {
@@ -364,6 +331,23 @@ class SettingsStore:
         ):
             public["multimodal"] = deepcopy(defaults["multimodal"])
             migrated = True
+        elif (
+            defaults["multimodal"]["provider"] == "gemini_gateway"
+            and isinstance(stored_multimodal, dict)
+            and stored_multimodal.get("provider") == "gemini_gateway"
+            and stored_multimodal.get("base_url") == defaults["multimodal"].get("base_url")
+            and stored_multimodal.get("upload_url") == defaults["multimodal"].get("upload_url")
+            and stored_multimodal.get("token_url") == defaults["multimodal"].get("token_url")
+            and stored_multimodal.get("model") == defaults["multimodal"].get("model")
+            and stored_multimodal.get("source") == defaults["multimodal"].get("source")
+            and int(stored_multimodal.get("timeout_seconds") or 120) == 360
+        ):
+            public["multimodal"]["timeout_seconds"] = 120
+            migrated = True
+        stored_video = stored.get("video_generator")
+        if isinstance(stored_video, dict) and stored_video.get("provider") == "local_ffmpeg":
+            public["video_generator"] = deepcopy(defaults["video_generator"])
+            migrated = True
         for key, value in (row.get("secrets") or {}).items():
             if key in secrets:
                 secrets[key] = str(value or "")
@@ -386,7 +370,7 @@ class SettingsStore:
                     "token_url": runtime.gemini_token_url,
                     "model": runtime.gemini_model or "gemini-3.8-flash",
                     "source": runtime.gemini_source,
-                    "timeout_seconds": 360,
+                    "timeout_seconds": 120,
                 }
             )
         return defaults

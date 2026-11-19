@@ -103,6 +103,17 @@ def _conversation_owner(conversation_id: str, current_user: dict[str, Any]) -> N
         raise HTTPException(404, "对话不存在")
 
 
+def _creative_production(production_id: str, current_user: dict[str, Any]) -> dict[str, Any]:
+    production = container.db.get_production(
+        production_id,
+        owner_id(current_user),
+        task_kind="creative",
+    )
+    if not production:
+        raise HTTPException(404, "创作任务不存在")
+    return production
+
+
 @router.get("/runtime")
 def runtime() -> dict[str, Any]:
     return container.hub.runtime_status()
@@ -119,6 +130,13 @@ def runtime_skills() -> dict[str, Any]:
 @router.get("/capabilities")
 def capabilities() -> dict[str, Any]:
     return container.hub.capabilities()
+
+
+@router.get("/features")
+def features() -> dict[str, bool]:
+    return {
+        "reference_remix": bool(container.settings.enable_reference_remix),
+    }
 
 
 @router.get("/models")
@@ -714,6 +732,7 @@ def get_production(
     production_id: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.get(production_id, user_id=owner_id(current_user))
     except Exception as exc:
@@ -726,6 +745,7 @@ def patch_production(
     body: ProductionPatch,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         policy = body.replace_policy.model_dump() if body.replace_policy is not None else None
         return container.productions.patch(
@@ -746,6 +766,7 @@ async def run_production(
     request: Request,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     policy = None
     resume_from = None
     user_approved = False
@@ -775,6 +796,7 @@ def generate_production_scripts(
     production_id: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.generate_scripts_with_gemini(
             production_id,
@@ -789,6 +811,7 @@ def approve_production_scripts(
     production_id: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.approve_scripts(
             production_id,
@@ -804,6 +827,7 @@ def select_production_script(
     body: SelectScriptBody,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.select_script(
             production_id,
@@ -820,6 +844,7 @@ def select_production_video(
     body: SelectVideoBody,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.select_video(
             production_id,
@@ -835,6 +860,7 @@ def cancel_production(
     production_id: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _creative_production(production_id, current_user)
     try:
         return container.productions.cancel(production_id, user_id=owner_id(current_user))
     except Exception as exc:
@@ -846,6 +872,7 @@ def delete_production(
     production_id: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, bool]:
+    _creative_production(production_id, current_user)
     try:
         container.productions.delete(production_id, user_id=owner_id(current_user))
         return {"deleted": True}
@@ -860,6 +887,7 @@ async def production_events(
     after_id: int = Query(default=0, ge=0),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
+    _creative_production(production_id, current_user)
     try:
         container.productions.get(production_id, user_id=owner_id(current_user))
     except Exception as exc:
@@ -908,6 +936,7 @@ def get_production_artifact(
     name: str,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
+    _creative_production(production_id, current_user)
     try:
         path = container.productions.artifact_path(
             production_id,

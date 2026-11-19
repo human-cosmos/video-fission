@@ -5,6 +5,7 @@ from .config import settings as default_settings
 from .db import Database
 from .production_agent import ProductionAgent
 from .productions import ProductionService
+from .remixes import ReferenceRemixService
 from .service import CodexHub
 from .settings_store import SettingsStore
 from .skills import SkillManager
@@ -15,12 +16,13 @@ db: Database
 skills: SkillManager
 settings_store: SettingsStore
 productions: ProductionService
+remixes: ReferenceRemixService
 tools: object
 hub: CodexHub
 
 
 def configure(runtime_settings: Settings | None = None) -> None:
-    global settings, db, skills, settings_store, productions, tools, hub
+    global settings, db, skills, settings_store, productions, remixes, tools, hub
     settings = runtime_settings or default_settings
     settings.ensure_directories()
     db = Database(settings.database_path)
@@ -36,6 +38,7 @@ def configure(runtime_settings: Settings | None = None) -> None:
     )
     settings_store = SettingsStore(db, settings)
     productions = ProductionService(settings, db, settings_store)
+    remixes = ReferenceRemixService(settings, db, settings_store, productions.engine)
     tools = build_registry(
         db,
         settings.workspace,
@@ -52,6 +55,7 @@ def configure(runtime_settings: Settings | None = None) -> None:
     )
     hub = CodexHub(settings, db, skills, tools, productions=productions)
     productions.recover_orphaned_runs()
+    remixes.recover_orphaned_runs()
 
 
 configure()

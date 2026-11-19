@@ -529,7 +529,11 @@ def build_registry(
         }
         if user_id is not None:
             run_kwargs["user_id"] = user_id
-        current = productions.db.get_production(production_id, user_id)
+        current = productions.db.get_production(
+            production_id,
+            user_id,
+            task_kind="creative",
+        )
         if not current:
             raise ValueError("创作任务不存在")
         creative_keys = ("intent", "skeleton", "script_candidates")

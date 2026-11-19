@@ -164,6 +164,9 @@ class CodexHub:
             "runtime": self.runtime_status(),
             "skills": self.skills.list(),
             "tools": self.tools.summary(),
+            "features": {
+                "reference_remix": bool(self.settings.enable_reference_remix),
+            },
         }
 
     def list_conversations(

@@ -26,7 +26,10 @@ async function request(path, options = {}) {
     const message = Array.isArray(detail)
       ? detail.map((item) => item.msg || String(item)).join('；')
       : detail
-    throw new Error(message || `请求失败 (${response.status})`)
+    const error = new Error(message || `请求失败 (${response.status})`)
+    error.status = response.status
+    error.data = data
+    throw error
   }
   return data
 }
@@ -53,6 +56,7 @@ export const api = {
   deleteUser: (id) =>
     request(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   health: () => request('/health'),
+  features: () => request('/features'),
   capabilities: () => request('/capabilities'),
   models: (refresh = false) => request(`/models${refresh ? '?refresh=true' : ''}`),
   conversations: ({
@@ -149,6 +153,14 @@ export const api = {
     ),
   deleteProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  createRemix: (payload) => request('/remixes', json('POST', payload)),
+  remix: (id) => request(`/remixes/${encodeURIComponent(id)}`),
+  renderRemix: (id, payload = {}) =>
+    request(`/remixes/${encodeURIComponent(id)}/render`, json('POST', payload)),
+  cancelRemix: (id) =>
+    request(`/remixes/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  deleteRemix: (id) =>
+    request(`/remixes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
 export function eventUrl(conversationId, afterId = 0) {
@@ -161,6 +173,14 @@ export function productionEventUrl(productionId, afterId = 0) {
 
 export function productionArtifactUrl(productionId, name) {
   return `${BASE}/productions/${encodeURIComponent(productionId)}/artifacts/${encodeURIComponent(name)}`
+}
+
+export function remixEventUrl(remixId, afterId = 0) {
+  return `${BASE}/remixes/${encodeURIComponent(remixId)}/events?after_id=${afterId}`
+}
+
+export function remixArtifactUrl(remixId, name) {
+  return `${BASE}/remixes/${encodeURIComponent(remixId)}/artifacts/${name}`
 }
 
 

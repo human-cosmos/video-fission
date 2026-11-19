@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import container
 from .api.auth import router as auth_router
+from .api.remixes import router as remix_router
 from .api.routes import router
 from .config import settings
 from .logging_utils import configure_logging, log_context, logging_status, safe_request_id
@@ -96,7 +97,7 @@ def _request_scope(path: str) -> tuple[str, str]:
             continue
         if part == "conversations":
             conversation_id = parts[index + 1]
-        elif part == "productions" and parts[index + 1].startswith("prd_"):
+        elif part in {"productions", "remixes"} and parts[index + 1].startswith(("prd_", "rmx_")):
             production_id = parts[index + 1]
     return conversation_id, production_id
 
@@ -174,7 +175,8 @@ async def security_headers(request: Request, call_next):
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
-            "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+            "media-src 'self' blob:; connect-src 'self'; "
+            "object-src 'none'; base-uri 'none'; "
             "frame-ancestors 'none'",
         )
     return response
@@ -182,6 +184,7 @@ async def security_headers(request: Request, call_next):
 
 app.include_router(auth_router)
 app.include_router(router)
+app.include_router(remix_router)
 
 
 if settings.frontend_dist.is_dir():

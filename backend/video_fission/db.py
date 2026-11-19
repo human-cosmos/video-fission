@@ -241,6 +241,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS productions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
+                    task_kind TEXT NOT NULL DEFAULT 'creative',
                     title TEXT NOT NULL,
                     brief TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -256,6 +257,7 @@ class Database:
                     output TEXT,
                     video_upload_id TEXT NOT NULL,
                     reference_images TEXT,
+                    remix_plan TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -315,6 +317,13 @@ class Database:
             self._ensure_column(connection, "productions", "audio_separation", "TEXT")
             self._ensure_column(connection, "productions", "subtitle_style", "TEXT")
             self._ensure_column(connection, "productions", "agent_trace", "TEXT")
+            self._ensure_column(
+                connection,
+                "productions",
+                "task_kind",
+                "TEXT NOT NULL DEFAULT 'creative'",
+            )
+            self._ensure_column(connection, "productions", "remix_plan", "TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_productions_conversation ON productions(conversation_id)"
             )
@@ -323,6 +332,14 @@ class Database:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_productions_user_updated ON productions(user_id, updated_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_productions_kind_updated "
+                "ON productions(task_kind, updated_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_productions_kind_status "
+                "ON productions(task_kind, status)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_uploads_user_created ON video_uploads(user_id, created_at DESC)"
@@ -1268,21 +1285,54 @@ class Database:
                 WHERE production_id=? AND status IN ('pending','running')""",
                 (utc_now(), utc_now(), production_id))
 
-    def recover_production_jobs(self) -> list[str]:
+    def recover_production_jobs(self, task_kind: str = "creative") -> list[str]:
         """Leave remote IDs intact; local processes cannot survive a restart."""
         with self.transaction() as connection:
-            rows = connection.execute("SELECT id FROM productions WHERE status='running'").fetchall()
+            rows = connection.execute(
+                "SELECT id FROM productions WHERE status='running' AND task_kind=?",
+                (task_kind,),
+            ).fetchall()
             ids = [row["id"] for row in rows]
             for pid in ids:
                 connection.execute("""UPDATE production_jobs SET status='pending',updated_at=?
                     WHERE production_id=? AND status='running' AND external_task_id IS NULL""", (utc_now(), pid))
         return ids
 
+    def list_running_productions(self, task_kind: str) -> list[dict[str, Any]]:
+        rows = self.query(
+            "SELECT * FROM productions WHERE status='running' AND task_kind=? ORDER BY created_at ASC",
+            (task_kind,),
+        )
+        return [self._production_from_row(row) for row in rows]
+
+    def find_production_by_upload(
+        self,
+        video_upload_id: str,
+        *,
+        task_kind: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        conditions = ["video_upload_id = ?", "task_kind = ?"]
+        values: list[Any] = [video_upload_id, task_kind]
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            values.append(user_id)
+        row = self.query_one(
+            f"""
+            SELECT * FROM productions
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            tuple(values),
+        )
+        return self._production_from_row(row) if row else None
+
     def legacy_script_choice_productions(self) -> list[str]:
         rows = self.query(
             """
             SELECT id, script_candidates FROM productions
-            WHERE status='awaiting_script_choice'
+            WHERE status='awaiting_script_choice' AND task_kind='creative'
             ORDER BY updated_at ASC
             """
         )
@@ -1298,6 +1348,7 @@ class Database:
         values = {
             "id": payload["id"],
             "user_id": payload.get("user_id"),
+            "task_kind": payload.get("task_kind") or "creative",
             "title": payload.get("title") or "",
             "brief": payload["brief"],
             "status": payload.get("status") or "draft",
@@ -1321,6 +1372,7 @@ class Database:
             "video_upload_id": payload["video_upload_id"],
             "conversation_id": payload.get("conversation_id"),
             "source_item_id": payload.get("source_item_id"),
+            "remix_plan": _json(payload.get("remix_plan")),
             "created_at": now,
             "updated_at": now,
         }
@@ -1328,15 +1380,16 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO productions (
-                    id, user_id, title, brief, status, current_stage, error, warnings, source_video,
+                    id, user_id, task_kind, title, brief, status, current_stage, error, warnings, source_video,
                     decomposition, intent, skeleton, script, clips, output, replace_policy,
                     replace_plan, reference_images, video_upload_id, conversation_id, source_item_id,
-                    created_at, updated_at
+                    remix_plan, created_at, updated_at
                 ) VALUES (
-                    :id, :user_id, :title, :brief, :status, :current_stage, :error, :warnings, :source_video,
+                    :id, :user_id, :task_kind, :title, :brief, :status, :current_stage, :error, :warnings,
+                    :source_video,
                     :decomposition, :intent, :skeleton, :script, :clips, :output, :replace_policy,
                     :replace_plan, :reference_images, :video_upload_id, :conversation_id, :source_item_id,
-                    :created_at, :updated_at
+                    :remix_plan, :created_at, :updated_at
                 )
                 """,
                 values,
@@ -1347,20 +1400,27 @@ class Database:
         self,
         production_id: str,
         user_id: str | None = None,
+        task_kind: str | None = None,
     ) -> dict[str, Any] | None:
-        if user_id is None:
-            row = self.query_one("SELECT * FROM productions WHERE id = ?", (production_id,))
-        else:
-            row = self.query_one(
-                "SELECT * FROM productions WHERE id = ? AND user_id = ?",
-                (production_id, user_id),
-            )
+        conditions = ["id = ?"]
+        values: list[Any] = [production_id]
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            values.append(user_id)
+        if task_kind is not None:
+            conditions.append("task_kind = ?")
+            values.append(task_kind)
+        row = self.query_one(
+            f"SELECT * FROM productions WHERE {' AND '.join(conditions)}",
+            tuple(values),
+        )
         return self._production_from_row(row) if row else None
 
     def list_productions(
         self,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        task_kind: str | None = "creative",
     ) -> list[dict[str, Any]]:
         conditions: list[str] = []
         values: list[Any] = []
@@ -1370,6 +1430,9 @@ class Database:
         if user_id is not None:
             conditions.append("user_id = ?")
             values.append(user_id)
+        if task_kind is not None:
+            conditions.append("task_kind = ?")
+            values.append(task_kind)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         if conditions:
             rows = self.query(
@@ -1389,14 +1452,16 @@ class Database:
             return None
         if user_id is None:
             row = self.query_one(
-                "SELECT * FROM productions WHERE source_item_id = ? ORDER BY created_at DESC, id DESC",
+                """SELECT * FROM productions
+                WHERE source_item_id = ? AND task_kind = 'creative'
+                ORDER BY created_at DESC, id DESC""",
                 (source_item_id,),
             )
         else:
             row = self.query_one(
                 """
                 SELECT * FROM productions
-                WHERE source_item_id = ? AND user_id = ?
+                WHERE source_item_id = ? AND user_id = ? AND task_kind = 'creative'
                 ORDER BY created_at DESC, id DESC
                 """,
                 (source_item_id, user_id),
@@ -1412,7 +1477,10 @@ class Database:
     ) -> dict[str, Any] | None:
         if not conversation_id or not video_upload_id:
             return None
-        conditions = "conversation_id = ? AND video_upload_id = ? AND brief = ?"
+        conditions = (
+            "conversation_id = ? AND video_upload_id = ? AND brief = ? "
+            "AND task_kind = 'creative'"
+        )
         values: tuple[Any, ...] = (conversation_id, video_upload_id, brief)
         if user_id is not None:
             conditions += " AND user_id = ?"
@@ -1454,6 +1522,7 @@ class Database:
             "audio_separation",
             "subtitle_style",
             "agent_trace",
+            "remix_plan",
         }
         json_fields = {
             "warnings",
@@ -1473,6 +1542,7 @@ class Database:
             "audio_separation",
             "subtitle_style",
             "agent_trace",
+            "remix_plan",
         }
         values: dict[str, Any] = {}
         for key, value in fields.items():
@@ -1584,6 +1654,8 @@ class Database:
             "audio_separation": _load(_row_get(row, "audio_separation"), None),
             "subtitle_style": _load(_row_get(row, "subtitle_style"), None),
             "agent_trace": _load(_row_get(row, "agent_trace"), []),
+            "task_kind": _row_get(row, "task_kind") or "creative",
+            "remix_plan": _load(_row_get(row, "remix_plan"), None),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

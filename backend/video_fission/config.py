@@ -96,6 +96,7 @@ class Settings:
     seedance_model: str = ""
     seedance_auth_file: Path | None = None
     allow_local_copy_fallback: bool = False
+    enable_reference_remix: bool = True
     e2e_fake_creative_context: bool = False
 
     def __post_init__(self) -> None:
@@ -163,6 +164,7 @@ class Settings:
             seedance_model=os.getenv("VF_SEEDANCE_MODEL", "").strip(),
             seedance_auth_file=_seedance_auth_file(),
             allow_local_copy_fallback=_env_bool("VF_ALLOW_LOCAL_COPY_FALLBACK", False),
+            enable_reference_remix=_env_bool("VF_ENABLE_REFERENCE_REMIX", True),
             e2e_fake_creative_context=_env_bool("VF_E2E_FAKE_CREATIVE_CONTEXT", False),
         )
 

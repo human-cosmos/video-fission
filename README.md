@@ -20,6 +20,7 @@ Video Fission 是一个从 `hot-product-system` 智能中枢能力中抽离出�
 - 受控动态 Tool 注册、执行与运行记录
 - 响应式 Vue 3 对话工作台
 - 单 Codex 编排出片：当前对话负责生成创意意图、骨架和三份脚本，Python 后台自动生成并合成三条候选视频，用户选定一条后执行最终合成；不再启动额外的 Production Codex 子进程，也不走 `PipelineEngine` 固定阶段循环
+- 独立原片重排快捷入口：保留参考视频开头和结尾，只重排中间 value 片段并直接拼接原片；单任务单成片，不使用视频生成模型，也不进入候选视频选择
 - decompose 增强：可选 TransNetV2 + PySceneDetect 转场检测、整片理解与深度观察；Gemini 每次整片理解响应单独落盘。生产拆解仍要求真实 Gemini；出片 Tool 在无 Key 时可以做诚实的本地切分，但必须标明这是降级结果，不能写成模型理解
 - 模型设置持久化到 SQLite；API Key 只写不回显；`gemini_gateway` 的 `token_url` 可明文回读
 - 后端单元测试、真实 Codex 集成测试和 Playwright 浏览器 E2E
@@ -129,6 +130,7 @@ cd backend
 | `VF_GEMINI_MODEL` | 空 | 多模态默认模型 |
 | `VF_GEMINI_SOURCE` | 空 | Gemini 网关请求来源标识 |
 | `VF_GEMINI_MAX_CONCURRENCY` | `6` | 单进程 Gemini HTTP 最大并发数 |
+| `VF_ENABLE_REFERENCE_REMIX` | `true` | 是否启用独立原片重排快捷入口；关闭后前端隐藏入口且相关写接口不可用 |
 
 环境变量由当前 shell 读取；项目不会自动覆盖已有 `.env`。
 

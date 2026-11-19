@@ -264,7 +264,11 @@ class ProductionService:
         return public
 
     def get(self, production_id: str, user_id: str | None = None) -> dict[str, Any]:
-        production = self.db.get_production(production_id, user_id)
+        production = self.db.get_production(
+            production_id,
+            user_id,
+            task_kind="creative",
+        )
         if not production:
             raise ProductionNotFound("创作任务不存在")
         return self._to_public(production)
@@ -808,6 +812,8 @@ class ProductionService:
     ) -> None:
         production = self.db.get_production(production_id)
         if not production:
+            return
+        if production.get("task_kind") != "creative":
             return
         conversation_id = (production.get("conversation_id") or "").strip()
         if not conversation_id or not self.db.get_conversation(conversation_id):

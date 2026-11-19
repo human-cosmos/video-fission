@@ -4,6 +4,7 @@ import {
   Check,
   Menu,
   Plus,
+  Shuffle,
   Square,
   X,
 } from '@lucide/vue'
@@ -12,6 +13,7 @@ import { api, eventUrl } from './api'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
+import ReferenceRemixPanel from './components/ReferenceRemixPanel.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
 import {
   isConversationListEvent,
@@ -48,6 +50,8 @@ const productions = ref([])
 const rerunning = ref(false)
 const selectingVideo = ref(false)
 const cancelling = ref(false)
+const remixOpen = ref(false)
+const remixEnabled = ref(false)
 const videoInput = ref(null)
 const conversationQuery = ref('')
 const nextConversationCursor = ref('')
@@ -207,6 +211,10 @@ const productionBadges = computed(() => {
   return badges
 })
 
+watch(productionVideo, (value) => {
+  if (!value) remixOpen.value = false
+})
+
 function notify(message) {
   toast.value = message
   clearTimeout(toastTimer)
@@ -239,8 +247,12 @@ async function runBootstrap() {
   loading.value = true
   bootError.value = ''
   try {
-    const modelPayload = await api.models().catch(() => ({ items: [] }))
+    const [modelPayload, featurePayload] = await Promise.all([
+      api.models().catch(() => ({ items: [] })),
+      api.features().catch(() => ({})),
+    ])
     models.value = modelPayload.items || []
+    remixEnabled.value = Boolean(featurePayload.reference_remix)
     await Promise.all([
       loadConversations({ reset: true }),
       loadProductions(),
@@ -1162,9 +1174,21 @@ onBeforeUnmount(() => {
             ></video>
             <div class="composer-video-meta">
               <strong>{{ productionVideo.name }}</strong>
-              <button type="button" class="icon-button compact" :aria-label="`移除 ${productionVideo.name}`" @click="removeAttachment(productionVideo.id)">
-                <X :size="14" />
-              </button>
+              <div class="composer-video-actions">
+                <button
+                  v-if="remixEnabled"
+                  type="button"
+                  class="composer-remix-button"
+                  data-testid="open-reference-remix"
+                  @click="remixOpen = true"
+                >
+                  <Shuffle :size="14" />
+                  原片重排
+                </button>
+                <button type="button" class="icon-button compact" :aria-label="`移除 ${productionVideo.name}`" @click="removeAttachment(productionVideo.id)">
+                  <X :size="14" />
+                </button>
+              </div>
             </div>
           </div>
           <div v-if="otherAttachments.length" class="composer-context">
@@ -1294,6 +1318,13 @@ onBeforeUnmount(() => {
         @notify="notify"
       />
     </main>
+
+    <ReferenceRemixPanel
+      :open="remixOpen"
+      :video="productionVideo"
+      @close="remixOpen = false"
+      @notify="notify"
+    />
 
     <Transition name="toast">
       <div v-if="toast" class="toast-message" role="status">

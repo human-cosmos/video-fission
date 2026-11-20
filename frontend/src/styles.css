@@ -4963,6 +4963,14 @@ a.button.primary {
   --vf-accent-soft: rgba(91, 94, 230, 0.08);
   --vf-accent-line: rgba(91, 94, 230, 0.24);
   --vf-grid: rgba(91, 94, 230, 0.035);
+  --welcome-surface: var(--paper-deep);
+  --welcome-surface: color-mix(in srgb, var(--vf-accent) 30%, var(--paper-bright));
+  --welcome-accent: var(--vf-accent);
+  --welcome-accent-soft: var(--vf-accent-soft);
+  --welcome-line: var(--vf-accent-line);
+  --welcome-text: var(--ink);
+  --welcome-text-soft: var(--ink-soft);
+  --welcome-serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --font-display: "Inter", "Noto Sans SC", "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --font-body: "Inter", "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   color: var(--ink);
@@ -5282,69 +5290,213 @@ a.button.primary {
 
 .app-shell.mode-chat .welcome-head {
   position: relative;
-  padding: 28px 30px 25px;
+  display: grid;
+  grid-template-columns: minmax(250px, 0.82fr) minmax(0, 1.45fr);
+  gap: clamp(36px, 6vw, 82px);
+  min-height: 298px;
+  padding: 38px 42px;
   overflow: hidden;
   background:
-    linear-gradient(110deg, rgba(91, 94, 230, 0.055), transparent 46%),
-    #ffffff;
-  border: 1px solid var(--line);
+    radial-gradient(circle at 92% 18%, var(--welcome-accent-soft), transparent 34%),
+    radial-gradient(circle at 12% 112%, rgba(255, 255, 255, 0.08), transparent 40%),
+    var(--welcome-surface);
+  border: 1px solid var(--welcome-line);
   border-radius: 8px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 18px 44px var(--vf-accent-soft);
+  isolation: isolate;
+}
+
+.app-shell.mode-chat .welcome-head::before {
+  position: absolute;
+  right: -8px;
+  bottom: -70px;
+  z-index: 0;
+  color: var(--welcome-text);
+  font-family: var(--welcome-serif);
+  font-size: 230px;
+  line-height: 1;
+  pointer-events: none;
+  content: "映" / "";
+  opacity: 0.06;
+  speak: never;
 }
 
 .app-shell.mode-chat .welcome-head::after {
   position: absolute;
   top: 0;
-  left: 30px;
-  width: 96px;
+  left: 42px;
+  width: 92px;
   height: 2px;
   content: "";
-  background: var(--vf-accent);
-  box-shadow: 0 0 16px rgba(91, 94, 230, 0.35);
+  background: var(--welcome-accent);
+  box-shadow: 0 0 16px var(--welcome-accent-soft);
 }
 
-.app-shell.mode-chat .welcome-head h2 {
+.app-shell.mode-chat .welcome-brand {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding-right: clamp(24px, 4vw, 54px);
+  border-right: 1px solid var(--welcome-line);
+  animation: welcome-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.app-shell.mode-chat .welcome-brand h2 {
   margin: 0;
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: clamp(26px, 3vw, 34px);
-  font-weight: 650;
-  line-height: 1.16;
+  color: var(--welcome-text);
+  font-family: var(--welcome-serif);
+  font-size: clamp(58px, 6vw, 78px);
+  font-weight: 400;
+  line-height: 0.98;
   letter-spacing: 0;
 }
 
-.app-shell.mode-chat .welcome-head p {
-  max-width: 100%;
-  margin: 12px 0 0;
-  color: var(--ink-soft);
-  font-size: 13px;
-  line-height: 1.8;
-  white-space: nowrap;
+.app-shell.mode-chat .welcome-motto {
+  max-width: 13ch;
+  margin: 24px 0 0;
+  color: var(--welcome-text-soft);
+  font-family: var(--welcome-serif);
+  font-size: clamp(20px, 2vw, 25px);
+  font-weight: 400;
+  line-height: 1.58;
+  text-wrap: pretty;
+  hanging-punctuation: allow-end;
 }
 
-.app-shell.mode-chat .welcome-signal {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
+.app-shell.mode-chat .welcome-details {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  margin: 0;
+  animation: welcome-rise 520ms 80ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.app-shell.mode-chat .welcome-signal span {
+.app-shell.mode-chat .welcome-detail {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 22px;
+  padding: 26px 0;
+}
+
+.app-shell.mode-chat .welcome-detail:first-child {
+  padding-top: 0;
+}
+
+.app-shell.mode-chat .welcome-detail + .welcome-detail {
+  border-top: 1px solid var(--welcome-line);
+  padding-bottom: 0;
+}
+
+.app-shell.mode-chat .welcome-detail dt {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: var(--ink-muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
+  padding-top: 2px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.55;
+  letter-spacing: 0.08em;
 }
 
-.app-shell.mode-chat .welcome-signal i {
-  width: 4px;
-  height: 4px;
-  background: var(--vf-accent);
-  border-radius: 50%;
+.app-shell.mode-chat .welcome-detail dt::before {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 1px;
+  content: "";
+  background: var(--welcome-accent);
+}
+
+.app-shell.mode-chat .welcome-detail dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--welcome-text-soft);
+  font-size: 15px;
+  line-height: 1.78;
+  text-wrap: pretty;
+  hanging-punctuation: allow-end;
+}
+
+.app-shell.mode-chat .welcome-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 9px;
+  color: var(--welcome-text);
+  font-weight: 520;
+}
+
+.app-shell.mode-chat .welcome-flow span {
+  white-space: nowrap;
+}
+
+.app-shell.mode-chat .welcome-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.app-shell.mode-chat .welcome-flow i {
+  color: var(--welcome-accent);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1;
+  opacity: 0.72;
+}
+
+@keyframes welcome-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 860px) {
+  .app-shell.mode-chat .welcome-head {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 28px;
+    min-height: 0;
+    padding: 34px;
+  }
+
+  .app-shell.mode-chat .welcome-brand {
+    align-items: flex-start;
+    padding: 0 0 26px;
+    border-right: 0;
+    border-bottom: 1px solid var(--welcome-line);
+  }
+
+  .app-shell.mode-chat .welcome-motto {
+    max-width: none;
+  }
+
+  .app-shell.mode-chat .welcome-detail {
+    padding: 20px 0;
+  }
+
+  .app-shell.mode-chat .welcome-detail:first-child {
+    padding-top: 0;
+  }
+
+  .app-shell.mode-chat .welcome-head::before {
+    right: -18px;
+    bottom: -54px;
+    font-size: 190px;
+  }
 }
 
 .app-shell.mode-chat .transcript {
@@ -6214,31 +6366,52 @@ a.button.primary {
   }
 
   .app-shell.mode-chat .welcome-head {
-    padding: 22px 18px 19px;
+    gap: 24px;
+    padding: 28px 20px 24px;
   }
 
   .app-shell.mode-chat .welcome-head::after {
-    left: 18px;
-    width: 72px;
+    left: 20px;
+    width: 68px;
   }
 
-  .app-shell.mode-chat .welcome-head h2 {
-    font-size: 27px;
+  .app-shell.mode-chat .welcome-brand {
+    padding-bottom: 22px;
   }
 
-  .app-shell.mode-chat .welcome-head p {
-    font-size: 12px;
+  .app-shell.mode-chat .welcome-brand h2 {
+    font-size: 54px;
+  }
+
+  .app-shell.mode-chat .welcome-motto {
+    margin-top: 18px;
+    font-size: 20px;
+    line-height: 1.62;
+  }
+
+  .app-shell.mode-chat .welcome-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    padding: 17px 0;
+  }
+
+  .app-shell.mode-chat .welcome-detail dt {
+    padding-top: 0;
+  }
+
+  .app-shell.mode-chat .welcome-detail dd {
+    font-size: 14px;
     line-height: 1.72;
   }
 
-  .app-shell.mode-chat .welcome-signal {
-    gap: 7px 13px;
-    margin-top: 16px;
-    padding-top: 13px;
+  .app-shell.mode-chat .welcome-flow {
+    gap: 7px;
   }
 
-  .app-shell.mode-chat .welcome-signal span {
-    font-size: 9px;
+  .app-shell.mode-chat .welcome-head::before {
+    right: -22px;
+    bottom: -38px;
+    font-size: 150px;
   }
 
   .app-shell.mode-chat .transcript {
@@ -6391,9 +6564,13 @@ a.button.primary {
     transition: none;
   }
 
-  .app-shell.mode-chat .welcome-signal i,
   .app-shell.mode-chat .thinking-line span,
   .app-shell.mode-chat .typing-caret {
+    animation: none;
+  }
+
+  .app-shell.mode-chat .welcome-brand,
+  .app-shell.mode-chat .welcome-details {
     animation: none;
   }
 }

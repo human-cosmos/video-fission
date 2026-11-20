@@ -1270,7 +1270,7 @@ onBeforeUnmount(() => {
               @blur="saveTitle"
               @keydown.enter.target.blur
             />
-            <h1 v-else>视频裂变</h1>
+            <h1 v-else>映造</h1>
           </template>
           <template v-else>
             <h1>{{ workspaceMode === 'help' ? '系统帮助' : '系统设置' }}</h1>

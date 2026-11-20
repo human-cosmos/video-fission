@@ -145,14 +145,38 @@ defineExpose({ scrollToBottom })
   <div ref="scroller" class="message-scroller">
     <div v-if="!conversation" class="welcome">
       <header class="welcome-head">
-        <h2>视频裂变</h2>
-        <p>从视频、卖点、受众先判断，再写脚本拆镜头。</p>
-        <div class="welcome-signal" aria-label="Video Fission 工作范围">
-          <span><i></i>视频理解</span>
-          <span><i></i>脚本规划</span>
-          <span><i></i>镜头拆解</span>
-          <span><i></i>成片生成</span>
+        <div class="welcome-brand">
+          <h2>映造</h2>
+          <p class="welcome-motto">让每一个创意，都成为好作品。</p>
         </div>
+        <dl class="welcome-details">
+          <div class="welcome-detail">
+            <dt>产品定位</dt>
+            <dd>新一代 AI Agent 驱动的智能视频创作平台。</dd>
+          </div>
+          <div class="welcome-detail welcome-detail--flow">
+            <dt>核心价值</dt>
+            <dd class="welcome-flow" aria-label="理解视频到交付作品的创作流程">
+              <span class="welcome-step">
+                理解视频
+                <i aria-hidden="true">→</i>
+              </span>
+              <span class="welcome-step">
+                激发创意
+                <i aria-hidden="true">→</i>
+              </span>
+              <span class="welcome-step">
+                生成脚本
+                <i aria-hidden="true">→</i>
+              </span>
+              <span class="welcome-step">
+                智能制作
+                <i aria-hidden="true">→</i>
+              </span>
+              <span class="welcome-step">交付作品</span>
+            </dd>
+          </div>
+        </dl>
       </header>
     </div>
 

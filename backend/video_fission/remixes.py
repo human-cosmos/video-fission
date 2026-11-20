@@ -274,18 +274,50 @@ class ReferenceRemixService:
 
     def recover_orphaned_runs(self, *, wait: bool = False) -> list[str]:
         recovered: list[str] = []
-        for production in self.db.list_running_productions(REMIX_TASK_KIND):
+        for production in self.db.list_productions_by_status(
+            REMIX_TASK_KIND,
+            ("running", "awaiting_order"),
+        ):
             remix_id = production["id"]
             with self._lock:
                 if remix_id in self._cancels:
                     continue
             plan = production.get("remix_plan") or {}
             if production.get("decomposition") and plan.get("ordered_units"):
-                self._start_render(remix_id, wait=wait)
+                if production.get("status") == "awaiting_order":
+                    self._queue_default_render(remix_id, plan, wait=wait)
+                else:
+                    self._start_render(remix_id, wait=wait)
             else:
                 self._start_analysis(remix_id, wait=wait)
             recovered.append(remix_id)
         return recovered
+
+    def _queue_default_render(
+        self,
+        remix_id: str,
+        plan: dict[str, Any],
+        *,
+        wait: bool = False,
+        cancel: threading.Event | None = None,
+    ) -> None:
+        queued_plan = {**plan, "phase": "render_queued"}
+        self.db.update_production(
+            remix_id,
+            {
+                "remix_plan": queued_plan,
+                "status": "running",
+                "current_stage": "render",
+                "error": None,
+                "output": None,
+            },
+        )
+        self._emit(
+            remix_id,
+            "remix_plan_ready",
+            {"plan": _public_plan(queued_plan)},
+        )
+        self._start_render(remix_id, wait=wait, cancel=cancel)
 
     def _start_analysis(self, remix_id: str, *, wait: bool = False) -> None:
         production = self._record(remix_id)
@@ -382,7 +414,7 @@ class ReferenceRemixService:
                 },
             )
             plan = self._build_plan(updated)
-            plan["phase"] = "awaiting_order"
+            plan["phase"] = "render_queued"
             for warning in plan.get("warnings") or []:
                 if warning not in warnings:
                     warnings.append(warning)
@@ -391,17 +423,9 @@ class ReferenceRemixService:
                 {
                     "decomposition": decomposition,
                     "warnings": warnings,
-                    "remix_plan": plan,
-                    "status": "awaiting_order",
-                    "current_stage": "arrange",
-                    "error": None,
                 },
             )
-            self._emit(
-                remix_id,
-                "awaiting_order",
-                {"message": "原片已拆解，请确认中间片段顺序"},
-            )
+            self._queue_default_render(remix_id, plan, cancel=cancel)
         except Exception as exc:  # noqa: BLE001
             if cancel.is_set():
                 self.db.update_production(remix_id, {"status": "cancelled"})
@@ -411,8 +435,14 @@ class ReferenceRemixService:
         finally:
             self._cleanup_thread(remix_id, thread)
 
-    def _start_render(self, remix_id: str, *, wait: bool = False) -> None:
-        cancel = threading.Event()
+    def _start_render(
+        self,
+        remix_id: str,
+        *,
+        wait: bool = False,
+        cancel: threading.Event | None = None,
+    ) -> None:
+        cancel = cancel or threading.Event()
         with self._lock:
             self._cancels[remix_id] = cancel
         context = copy_context()

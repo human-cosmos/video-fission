@@ -27,10 +27,12 @@ const loading = ref(false)
 const rendering = ref(false)
 const error = ref('')
 const middleOrder = ref([])
+const orderBaseline = ref([])
 const activePlanSignature = ref('')
 const activeUploadId = ref('')
 let pollTimer = null
 let requestSequence = 0
+let autoRenderAttemptId = ''
 
 const status = computed(() => String(remix.value?.status || ''))
 const plan = computed(() => remix.value?.remix_plan || {})
@@ -45,6 +47,27 @@ const outputUrl = computed(() => remix.value?.output?.video_url || '')
 const isRunning = computed(() => status.value === 'running')
 const isAwaitingOrder = computed(() => status.value === 'awaiting_order')
 const isCompleted = computed(() => status.value === 'completed')
+const orderAdjusted = computed(
+  () => JSON.stringify(middleOrder.value) !== JSON.stringify(orderBaseline.value),
+)
+const orderNotice = computed(() => {
+  if (orderAdjusted.value) {
+    return {
+      title: '顺序已调整，尚未重新拼接',
+      detail: '点击下方按钮，按当前顺序生成新成片',
+    }
+  }
+  if (isCompleted.value) {
+    return {
+      title: '当前成片已按此顺序生成',
+      detail: '你可以继续调整，再按当前顺序重新拼接',
+    }
+  }
+  return {
+    title: '当前顺序已按分析结果打乱',
+    detail: '系统将直接按此顺序拼接，你仍可在成片后调整',
+  }
+})
 const canRender = computed(
   () =>
     Boolean(remix.value?.id) &&
@@ -60,7 +83,7 @@ const statusTitle = computed(() => {
       ? '正在理解原片片段'
       : '正在拼接原片'
   }
-  if (isAwaitingOrder.value) return '确认中间片段顺序'
+  if (isAwaitingOrder.value) return '正在按默认顺序拼接'
   if (isCompleted.value) return '原片重排已完成'
   if (status.value === 'failed') return '原片重排失败'
   if (status.value === 'cancelled') return '原片重排已取消'
@@ -89,6 +112,7 @@ function setPlanOrder(current) {
   if (!current || signature === activePlanSignature.value) return
   activePlanSignature.value = signature
   middleOrder.value = (current.remix_plan?.middle_order || []).map(String)
+  orderBaseline.value = [...middleOrder.value]
 }
 
 async function loadRemix(remixId, { silent = false } = {}) {
@@ -179,25 +203,61 @@ function moveMiddle(index, direction) {
   middleOrder.value = next
 }
 
-async function renderRemix() {
+async function startRender(automatic = false) {
   if (!remix.value?.id || !canRender.value) return
+  const remixId = remix.value.id
+  const videoId = props.video?.id
   rendering.value = true
   error.value = ''
   try {
-    const current = await api.renderRemix(remix.value.id, {
+    const current = await api.renderRemix(remixId, {
       strategy: 'manual',
       middle_order: middleOrder.value,
     })
+    if (remix.value?.id !== remixId || props.video?.id !== videoId) return
     remix.value = current
     setPlanOrder(current)
     schedulePoll()
-    emit('notify', '正在拼接原片片段')
+    emit(
+      'notify',
+      automatic ? '原片分析完成，正在按默认顺序拼接' : '正在拼接原片片段',
+    )
   } catch (err) {
-    error.value = err.message
-    await loadRemix(remix.value.id, { silent: true })
+    if (remix.value?.id !== remixId || props.video?.id !== videoId) return
+    const message = err.message
+    await loadRemix(remixId, { silent: true })
+    if (
+      remix.value?.id === remixId &&
+      props.video?.id === videoId &&
+      remix.value.status === 'awaiting_order' &&
+      !remix.value.error
+    ) {
+      error.value = message
+    }
   } finally {
     rendering.value = false
   }
+}
+
+async function renderRemix() {
+  await startRender(false)
+}
+
+async function autoRenderDefaultOrder() {
+  const current = remix.value
+  if (
+    !props.open ||
+    !current?.id ||
+    current.status !== 'awaiting_order' ||
+    middleOrder.value.length < 2 ||
+    loading.value ||
+    rendering.value ||
+    autoRenderAttemptId === current.id
+  ) {
+    return
+  }
+  autoRenderAttemptId = current.id
+  await startRender(true)
 }
 
 async function cancelRemix() {
@@ -225,6 +285,7 @@ async function restartRemix() {
   remix.value = null
   activePlanSignature.value = ''
   middleOrder.value = []
+  orderBaseline.value = []
   await ensureRemix()
 }
 
@@ -259,14 +320,17 @@ watch(
       if (!videoId) return
       if (activeUploadId.value !== videoId) {
         activeUploadId.value = videoId
+        autoRenderAttemptId = ''
         remix.value = null
         activePlanSignature.value = ''
         middleOrder.value = []
+        orderBaseline.value = []
         error.value = ''
       }
       document.addEventListener('keydown', handleKeydown)
       ensureRemix()
     } else {
+      autoRenderAttemptId = ''
       document.removeEventListener('keydown', handleKeydown)
     }
   },
@@ -291,6 +355,21 @@ watch(
         : null,
     )
   },
+)
+
+watch(
+  [isAwaitingOrder, loading, rendering, () => middleOrder.value.length],
+  ([awaitingOrder, isLoading, isRendering, middleCount]) => {
+    if (
+      awaitingOrder &&
+      !isLoading &&
+      !isRendering &&
+      middleCount > 1
+    ) {
+      autoRenderDefaultOrder()
+    }
+  },
+  { immediate: true },
 )
 
 onBeforeUnmount(() => {
@@ -413,8 +492,8 @@ onBeforeUnmount(() => {
                 <section class="remix-order-panel">
                   <header class="remix-order-head">
                     <div>
-                      <strong>当前顺序已按分析结果打乱</strong>
-                      <span>你可以继续调整，确认后再开始拼接</span>
+                      <strong>{{ orderNotice.title }}</strong>
+                      <span>{{ orderNotice.detail }}</span>
                     </div>
                     <span class="remix-middle-count">{{ orderedMiddle.length }} 段</span>
                   </header>
@@ -543,7 +622,13 @@ onBeforeUnmount(() => {
 
           <footer v-if="!isRunning && !loading" class="remix-panel-actions">
             <span class="remix-action-note">
-              {{ isCompleted ? '重新拼接会按当前片段顺序生成新成片' : '只重排片段，不重新生成画面' }}
+              {{
+                isAwaitingOrder
+                  ? '默认顺序拼接未启动，请重试'
+                  : isCompleted
+                    ? '重新拼接会按当前片段顺序生成新成片'
+                    : '只重排片段，不重新生成画面'
+              }}
             </span>
             <div class="remix-action-buttons">
               <button
@@ -565,8 +650,17 @@ onBeforeUnmount(() => {
                 重新识别
               </button>
               <button
+                v-if="isAwaitingOrder && error"
+                class="button primary"
+                type="button"
+                :disabled="!canRender || rendering"
+                @click="renderRemix"
+              >
+                <RefreshCw :size="14" />
+                重试自动拼接
+              </button>
+              <button
                 v-if="
-                  isAwaitingOrder ||
                   isCompleted ||
                   (status === 'failed' && plan.ordered_units?.length)
                 "
@@ -584,7 +678,7 @@ onBeforeUnmount(() => {
                       ? '重试拼接'
                       : isCompleted
                         ? '按当前顺序重新拼接'
-                        : '确认并开始拼接'
+                        : '开始拼接'
                 }}
               </button>
             </div>

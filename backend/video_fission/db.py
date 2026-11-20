@@ -1305,6 +1305,22 @@ class Database:
         )
         return [self._production_from_row(row) for row in rows]
 
+    def list_productions_by_status(
+        self,
+        task_kind: str,
+        statuses: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        rows = self.query(
+            f"""SELECT * FROM productions
+            WHERE task_kind=? AND status IN ({placeholders})
+            ORDER BY created_at ASC""",
+            (task_kind, *statuses),
+        )
+        return [self._production_from_row(row) for row in rows]
+
     def find_production_by_upload(
         self,
         video_upload_id: str,

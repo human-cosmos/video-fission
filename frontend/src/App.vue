@@ -230,7 +230,7 @@ const remixTaskLabel = computed(() => {
       ? '原片重排 · 正在理解原片'
       : '原片重排 · 正在合成'
   }
-  if (task.status === 'awaiting_order') return '原片重排 · 等待确认顺序'
+  if (task.status === 'awaiting_order') return '原片重排 · 正在按默认顺序拼接'
   if (task.status === 'completed') return '原片重排已完成 · 查看成片'
   if (task.status === 'failed') return '原片重排失败 · 查看原因'
   if (task.status === 'cancelled') return '原片重排已取消'
@@ -240,7 +240,7 @@ const remixTaskClass = computed(() => {
   const status = remixTask.value?.status || ''
   if (status === 'completed') return 'is-complete'
   if (status === 'failed') return 'is-failed'
-  if (status === 'awaiting_order' || status === 'cancelled') return 'is-attention'
+  if (status === 'cancelled') return 'is-attention'
   return 'is-running'
 })
 

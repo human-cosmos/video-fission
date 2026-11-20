@@ -73,7 +73,15 @@ export const api = {
     if (query.trim()) search.set('q', query.trim())
     return request(`/conversations?${search.toString()}`)
   },
-  conversation: (id) => request(`/conversations/${id}`),
+  conversation: (id, { itemsCursor = '', itemsLimit = 80 } = {}) => {
+    const search = new URLSearchParams({ items_limit: String(itemsLimit) })
+    if (itemsCursor) search.set('items_cursor', itemsCursor)
+    return request(`/conversations/${id}?${search.toString()}`)
+  },
+  conversationUpdates: (id, since) =>
+    request(
+      `/conversations/${id}/updates?since=${encodeURIComponent(since)}`,
+    ),
   createConversation: (payload = {}) =>
     request('/conversations', json('POST', payload)),
   updateConversation: (id, payload) =>

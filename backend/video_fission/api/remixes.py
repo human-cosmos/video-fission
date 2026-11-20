@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .. import container
 from ..auth import get_current_user, owner_id
 from ..productions import ProductionConflict, ProductionNotFound
+from .media_cache import media_cache_headers
 
 router = APIRouter(prefix="/api/remixes", dependencies=[Depends(get_current_user)])
 
@@ -187,4 +188,5 @@ def get_remix_artifact(
         path,
         media_type=media_types.get(path.suffix.lower(), "application/octet-stream"),
         filename=path.name,
+        headers=media_cache_headers(),
     )

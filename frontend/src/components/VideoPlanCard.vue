@@ -153,7 +153,12 @@ function requestRevision() {
       data-testid="video-plan-reference-images"
     >
       <figure v-for="image in referenceImages" :key="image.id || image.path || image.name">
-        <img :src="image.url" :alt="image.name || '参考图'" />
+        <img
+          :src="image.url"
+          :alt="image.name || '参考图'"
+          loading="lazy"
+          decoding="async"
+        />
         <figcaption>{{ image.name || '参考图' }}</figcaption>
       </figure>
     </section>

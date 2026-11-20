@@ -1,5 +1,13 @@
 <script setup>
-import { ChevronRight, CircleAlert, Copy, FileText, Terminal, Wrench } from '@lucide/vue'
+import {
+  ChevronRight,
+  CircleAlert,
+  Copy,
+  FileText,
+  LoaderCircle,
+  Terminal,
+  Wrench,
+} from '@lucide/vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import {
   agentMessageStatusText,
@@ -26,6 +34,8 @@ const props = defineProps({
   conversation: { type: Object, default: null },
   rerunning: { type: Boolean, default: false },
   cancelling: { type: Boolean, default: false },
+  hasMoreItems: { type: Boolean, default: false },
+  loadingMoreItems: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -38,6 +48,7 @@ const emit = defineEmits([
   'request-script-revision',
   'regenerate-scripts',
   'regenerate-video',
+  'load-older',
 ])
 const scroller = ref(null)
 const clarificationDrafts = reactive({})
@@ -52,6 +63,20 @@ function scrollToBottom(behavior = 'smooth') {
       })
     }
   })
+}
+
+function captureScroll() {
+  if (!scroller.value) return null
+  return {
+    top: scroller.value.scrollTop,
+    height: scroller.value.scrollHeight,
+  }
+}
+
+function restoreScroll(state) {
+  if (!state || !scroller.value) return
+  scroller.value.scrollTop =
+    state.top + scroller.value.scrollHeight - state.height
 }
 
 function questionOptions(question) {
@@ -125,9 +150,21 @@ function stepStatusText(status) {
 }
 
 watch(
-  () => props.conversation?.items?.length,
-  (next, previous) => {
-    if (next !== previous) scrollToBottom()
+  () => {
+    const items = props.conversation?.items || []
+    return [items.length, items.at(-1)?.id || '']
+  },
+  ([nextLength, nextLast], [previousLength, previousLast]) => {
+    if (
+      nextLength > previousLength &&
+      previousLast &&
+      nextLast === previousLast
+    ) {
+      return
+    }
+    if (nextLength !== previousLength || nextLast !== previousLast) {
+      scrollToBottom()
+    }
   },
 )
 
@@ -136,7 +173,7 @@ watch(
   () => scrollToBottom('instant'),
 )
 
-defineExpose({ scrollToBottom })
+defineExpose({ captureScroll, restoreScroll, scrollToBottom })
 </script>
 
 <template>
@@ -179,6 +216,22 @@ defineExpose({ scrollToBottom })
     </div>
 
     <div v-else class="transcript" data-testid="message-timeline">
+      <div v-if="hasMoreItems" class="history-load">
+        <button
+          class="button subtle"
+          type="button"
+          :disabled="loadingMoreItems"
+          data-testid="load-older-items"
+          @click="$emit('load-older')"
+        >
+          <LoaderCircle
+            v-if="loadingMoreItems"
+            class="is-spinning"
+            :size="13"
+          />
+          {{ loadingMoreItems ? '正在加载' : '加载更早记录' }}
+        </button>
+      </div>
       <article
         v-for="(item, index) in displayItems"
         :key="item.id"
@@ -226,6 +279,8 @@ defineExpose({ scrollToBottom })
                   class="user-image"
                   :src="mediaUrl(file)"
                   :alt="file.name"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <span v-else>
                   <FileText :size="13" /> {{ file.name }}

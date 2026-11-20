@@ -23,6 +23,7 @@ import {
   isConversationListEvent,
   isProductionRefreshEvent,
   isRefreshEvent,
+  mergeConversationItems,
   mergeConversationSummaries,
 } from './utils/events'
 import {
@@ -62,6 +63,7 @@ const conversationQuery = ref('')
 const nextConversationCursor = ref('')
 const hasMoreConversations = ref(false)
 const loadingMoreConversations = ref(false)
+const loadingOlderItems = ref(false)
 const mobileSidebar = ref(false)
 const toast = ref('')
 const timeline = ref(null)
@@ -71,6 +73,8 @@ let eventSource = null
 let transcriptRefreshTimer = null
 let transcriptRefreshInFlight = false
 let transcriptRefreshQueued = false
+let transcriptRefreshConversationId = ''
+let transcriptSyncCursor = ''
 let listRefreshTimer = null
 let listRefreshInFlight = false
 let listRefreshQueued = false
@@ -92,6 +96,7 @@ const MODE_STORAGE_KEY = 'video-fission.workspaceMode'
 const REMIX_TASK_STORAGE_KEY = 'video-fission.remix.lastTask'
 const MODE_IDS = WORKSPACE_MODES.map((item) => item.id)
 const CONVERSATION_PAGE_SIZE = 30
+const CONVERSATION_ITEM_PAGE_SIZE = 80
 const CONVERSATION_POLL_MS = 15_000
 
 function storedWorkspaceMode() {
@@ -382,14 +387,8 @@ async function waitForAppReady() {
 async function runBootstrap() {
   loading.value = true
   bootError.value = ''
+  const metadataPromise = loadWorkspaceMetadata().catch(() => {})
   try {
-    const [modelPayload, featurePayload] = await Promise.all([
-      api.models().catch(() => ({ items: [] })),
-      api.features().catch(() => ({})),
-    ])
-    models.value = modelPayload.items || []
-    remixEnabled.value = Boolean(featurePayload.reference_remix)
-    await restoreRemixTask()
     await Promise.all([
       loadConversations({ reset: true }),
       loadProductions(),
@@ -411,6 +410,17 @@ async function runBootstrap() {
   } finally {
     loading.value = false
   }
+  await metadataPromise
+}
+
+async function loadWorkspaceMetadata() {
+  const [modelPayload, featurePayload] = await Promise.all([
+    api.models().catch(() => ({ items: [] })),
+    api.features().catch(() => ({})),
+  ])
+  models.value = modelPayload.items || []
+  remixEnabled.value = Boolean(featurePayload.reference_remix)
+  await restoreRemixTask()
 }
 
 function appendConversationPage(existing, incoming) {
@@ -501,15 +511,42 @@ function connectStream(conversationId, afterId = 0) {
 }
 
 function scheduleTranscriptRefresh(conversationId) {
+  transcriptRefreshConversationId = conversationId
   transcriptRefreshQueued = true
+  if (document.hidden) return
   if (transcriptRefreshTimer) return
   transcriptRefreshTimer = setTimeout(() => {
     transcriptRefreshTimer = null
-    flushScheduledTranscriptRefresh(conversationId)
+    flushScheduledTranscriptRefresh(transcriptRefreshConversationId)
   }, 140)
 }
 
+function applyConversationUpdates(conversationId, updates) {
+  if (currentConversation.value?.id !== conversationId) return false
+  const {
+    items = [],
+    deleted_item_ids: deletedItemIds = [],
+    items_synced_at: syncedAt,
+    ...metadata
+  } = updates
+  if (syncedAt && transcriptSyncCursor && syncedAt < transcriptSyncCursor) {
+    return false
+  }
+  currentConversation.value = {
+    ...currentConversation.value,
+    ...metadata,
+    items: mergeConversationItems(
+      currentConversation.value.items || [],
+      items,
+      deletedItemIds,
+    ),
+  }
+  if (syncedAt) transcriptSyncCursor = syncedAt
+  return true
+}
+
 async function flushScheduledTranscriptRefresh(conversationId) {
+  if (document.hidden) return
   if (currentConversation.value?.id !== conversationId) {
     transcriptRefreshQueued = false
     return
@@ -518,15 +555,29 @@ async function flushScheduledTranscriptRefresh(conversationId) {
   transcriptRefreshInFlight = true
   transcriptRefreshQueued = false
   try {
-    const detail = await api.conversation(conversationId)
-    if (currentConversation.value?.id !== conversationId) return
-    currentConversation.value = detail
+    if (transcriptSyncCursor) {
+      const updates = await api.conversationUpdates(
+        conversationId,
+        transcriptSyncCursor,
+      )
+      applyConversationUpdates(conversationId, updates)
+    } else {
+      const detail = await api.conversation(conversationId)
+      if (currentConversation.value?.id !== conversationId) return
+      currentConversation.value = detail
+      transcriptSyncCursor = detail.items_synced_at || ''
+    }
   } catch {
     // Keep the current transcript visible during transient stream reconnects.
   } finally {
     transcriptRefreshInFlight = false
-    if (transcriptRefreshQueued && currentConversation.value?.id === conversationId) {
-      scheduleTranscriptRefresh(conversationId)
+    const targetConversationId = transcriptRefreshConversationId
+    if (
+      transcriptRefreshQueued &&
+      targetConversationId &&
+      currentConversation.value?.id === targetConversationId
+    ) {
+      scheduleTranscriptRefresh(targetConversationId)
     }
   }
 }
@@ -592,10 +643,16 @@ async function selectConversationTask(id) {
   workspaceMode.value = 'chat'
   const sequence = ++selectionSequence
   closeStream()
+  clearTimeout(transcriptRefreshTimer)
+  transcriptRefreshTimer = null
+  transcriptRefreshQueued = false
+  transcriptRefreshConversationId = id
+  transcriptSyncCursor = ''
   try {
     const detail = await api.conversation(id)
     if (sequence !== selectionSequence) return
     currentConversation.value = detail
+    transcriptSyncCursor = detail.items_synced_at || ''
     window.localStorage.setItem('video-fission.activeConversation', id)
     titleBeforeEdit = currentConversation.value.title
     uploadGeneration += 1
@@ -635,6 +692,11 @@ function startDraftConversation() {
   selectionSequence += 1
   workspaceMode.value = 'chat'
   closeStream()
+  clearTimeout(transcriptRefreshTimer)
+  transcriptRefreshTimer = null
+  transcriptRefreshQueued = false
+  transcriptRefreshConversationId = ''
+  transcriptSyncCursor = ''
   currentConversation.value = null
   titleBeforeEdit = ''
   window.localStorage.removeItem('video-fission.activeConversation')
@@ -795,18 +857,67 @@ async function pollConversations() {
 }
 
 function handleVisibilityChange() {
-  if (!document.hidden) pollConversations()
+  if (document.hidden) return
+  pollConversations()
+  if (transcriptRefreshQueued && transcriptRefreshConversationId) {
+    flushScheduledTranscriptRefresh(transcriptRefreshConversationId)
+  }
 }
 
 async function refreshCurrent() {
   if (!currentConversation.value?.id) return
   const id = currentConversation.value.id
   try {
-    const detail = await api.conversation(id)
-    if (currentConversation.value?.id !== id) return
-    currentConversation.value = detail
+    if (transcriptSyncCursor) {
+      const updates = await api.conversationUpdates(id, transcriptSyncCursor)
+      applyConversationUpdates(id, updates)
+    } else {
+      const detail = await api.conversation(id)
+      if (currentConversation.value?.id !== id) return
+      currentConversation.value = detail
+      transcriptSyncCursor = detail.items_synced_at || ''
+    }
+    transcriptRefreshConversationId = id
   } catch (error) {
     notify(error.message)
+  }
+}
+
+async function loadOlderConversationItems() {
+  const conversation = currentConversation.value
+  const cursor = conversation?.items_next_cursor
+  const conversationId = conversation?.id
+  if (
+    !conversationId ||
+    !cursor ||
+    !conversation.items_has_more ||
+    loadingOlderItems.value
+  ) {
+    return
+  }
+  loadingOlderItems.value = true
+  const scrollState = timeline.value?.captureScroll()
+  try {
+    const detail = await api.conversation(conversationId, {
+      itemsCursor: cursor,
+      itemsLimit: CONVERSATION_ITEM_PAGE_SIZE,
+    })
+    if (currentConversation.value?.id !== conversationId) return
+    currentConversation.value = {
+      ...currentConversation.value,
+      items: mergeConversationItems(
+        detail.items || [],
+        currentConversation.value.items || [],
+      ),
+      items_next_cursor: detail.items_next_cursor || '',
+      items_has_more: Boolean(detail.items_has_more),
+    }
+    await nextTick()
+    timeline.value?.restoreScroll(scrollState)
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    loadingOlderItems.value = false
   }
 }
 
@@ -1292,6 +1403,8 @@ onBeforeUnmount(() => {
         :conversation="currentConversation"
         :rerunning="rerunning"
         :cancelling="cancelling"
+        :has-more-items="Boolean(currentConversation?.items_has_more)"
+        :loading-more-items="loadingOlderItems"
         @decide-approval="decideApproval"
         @answer-clarification="answerClarification"
         @copy="copyReply"
@@ -1301,6 +1414,7 @@ onBeforeUnmount(() => {
         @request-script-revision="requestScriptRevision"
         @regenerate-scripts="regenerateScripts"
         @regenerate-video="regenerateVideo"
+        @load-older="loadOlderConversationItems"
         @use-prompt="usePrompt"
       />
 

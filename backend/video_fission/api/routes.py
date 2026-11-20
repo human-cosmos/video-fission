@@ -6,6 +6,7 @@ import mimetypes
 import re
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from ..paths import user_upload_root
 from ..productions import ProductionConflict, ProductionNotFound
 from ..service import ConversationBusy, ConversationNotFound, RuntimeUnavailable
 from ..skills import SkillValidationError
+from .media_cache import media_cache_headers
 
 router = APIRouter(prefix="/api", dependencies=[Depends(get_current_user)])
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -184,10 +186,41 @@ def create_conversation(
 @router.get("/conversations/{conversation_id}")
 def get_conversation(
     conversation_id: str,
+    items_limit: int = Query(default=80, ge=1, le=500),
+    items_cursor: str | None = Query(default=None, max_length=512),
+    include_tool_runs: bool = False,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     try:
-        return container.hub.get_conversation(conversation_id, user_id=owner_id(current_user))
+        return container.hub.get_conversation(
+            conversation_id,
+            user_id=owner_id(current_user),
+            item_limit=items_limit,
+            item_cursor=items_cursor,
+            include_tool_runs=include_tool_runs,
+        )
+    except Exception as exc:
+        _error(exc)
+
+
+@router.get("/conversations/{conversation_id}/updates")
+def get_conversation_updates(
+    conversation_id: str,
+    since: str = Query(min_length=1, max_length=64),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        since_value = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(400, "无效的会话更新时间游标") from exc
+    if since_value.tzinfo is None:
+        raise HTTPException(400, "会话更新时间游标必须包含时区")
+    try:
+        return container.hub.get_conversation_updates(
+            conversation_id,
+            since_value.astimezone(UTC).isoformat(),
+            user_id=owner_id(current_user),
+        )
     except Exception as exc:
         _error(exc)
 
@@ -326,7 +359,12 @@ async def events(
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> StreamingResponse:
     try:
-        container.hub.get_conversation(conversation_id, user_id=owner_id(current_user))
+        container.hub.get_conversation(
+            conversation_id,
+            user_id=owner_id(current_user),
+            item_limit=1,
+            include_tool_runs=False,
+        )
     except Exception as exc:
         _error(exc)
 
@@ -454,6 +492,7 @@ def get_upload(
         media_type=media_type,
         filename=path.name,
         content_disposition_type="inline",
+        headers=media_cache_headers(immutable=True),
     )
 
 
@@ -689,6 +728,7 @@ def get_production_upload(
         media_type=str(record.get("content_type") or "video/mp4"),
         filename=record.get("name") or path.name,
         content_disposition_type="inline",
+        headers=media_cache_headers(immutable=True),
     )
 
 
@@ -957,4 +997,5 @@ def get_production_artifact(
         path,
         media_type=media_types.get(path.suffix.lower(), "application/octet-stream"),
         filename=path.name,
+        headers=media_cache_headers(),
     )

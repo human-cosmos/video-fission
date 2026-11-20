@@ -151,13 +151,13 @@ export function eventTouchesConversation(data) {
 }
 
 export function isRefreshEvent(kind) {
-  return /^(item\.|item_upserted|production_updated|production\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|thread\.name\.updated|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
+  return /^(item\.|item_upserted|item_deleted|production_updated|production\.|agent\.message\.|reasoning\.|plan\.|command\.|fileChange\.|mcpTool\.|turn\.|thread\.name\.updated|approval\.|clarification\.|tool\.|conversation\.|error$)/.test(
     String(kind || ''),
   )
 }
 
 export function isConversationListEvent(kind) {
-  return /^(item\.completed|item_upserted|item\.local|tool\.completed|turn\.|conversation\.|thread\.name\.updated|error$)/.test(
+  return /^(item\.completed|item_upserted|item_deleted|item\.local|tool\.completed|turn\.|conversation\.|thread\.name\.updated|error$)/.test(
     String(kind || ''),
   )
 }
@@ -192,6 +192,27 @@ export function mergeConversationSummaries(existing = [], incoming = []) {
     ...incoming.map((item) => ({ ...existingById.get(item.id), ...item })),
     ...existing.filter((item) => !incomingIds.has(item.id)),
   ]
+}
+
+export function mergeConversationItems(
+  existing = [],
+  incoming = [],
+  deletedIds = [],
+) {
+  const merged = new Map()
+  const deleted = new Set(deletedIds.filter(Boolean))
+  for (const item of [...existing, ...incoming]) {
+    if (!item?.id) continue
+    if (deleted.has(item.id)) {
+      merged.delete(item.id)
+      continue
+    }
+    merged.set(item.id, { ...merged.get(item.id), ...item })
+  }
+  return [...merged.values()].sort((left, right) => {
+    const time = String(left.created_at || '').localeCompare(String(right.created_at || ''))
+    return time || String(left.id || '').localeCompare(String(right.id || ''))
+  })
 }
 
 export function compactTitle(value, fallback = '新对话') {

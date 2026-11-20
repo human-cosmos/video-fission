@@ -14,6 +14,7 @@ const props = defineProps({
 })
 
 const activeCandidate = ref(null)
+const playingCandidateId = ref('')
 const compareTrigger = ref(null)
 const candidateVideos = computed(() =>
   Array.isArray(props.payload?.candidate_videos)
@@ -41,11 +42,18 @@ function downloadName(candidate, index) {
 function openCompare(candidate, event) {
   if (!candidate || !originalVideoUrl.value) return
   compareTrigger.value = event?.currentTarget || null
+  playingCandidateId.value = ''
   activeCandidate.value = candidate
 }
 
 function closeCompare() {
   activeCandidate.value = null
+}
+
+function activateCandidate(candidate) {
+  if (!candidate?.id) return
+  playingCandidateId.value =
+    playingCandidateId.value === candidate.id ? '' : candidate.id
 }
 
 function restoreCompareFocus() {
@@ -90,6 +98,9 @@ function restoreCompareFocus() {
           :width="Number(candidate.width) || 0"
           :height="Number(candidate.height) || 0"
           :testid="`video-candidate-player-${candidate.id}`"
+          :label="`候选 ${candidateLetter(index)}`"
+          :active="playingCandidateId === candidate.id"
+          @activate="activateCandidate(candidate)"
         />
 
         <footer class="candidate-video-actions">

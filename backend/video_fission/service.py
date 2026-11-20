@@ -233,18 +233,53 @@ class CodexHub:
         self,
         conversation_id: str,
         user_id: str | None = None,
+        *,
+        item_limit: int = 80,
+        item_cursor: str | None = None,
+        include_tool_runs: bool = False,
     ) -> dict[str, Any]:
         self._close_idle_runtimes()
         row = self._conversation(conversation_id, user_id)
         self._auto_approve_pending(conversation_id)
+        items_synced_at = utc_now()
+        page = self.db.list_items_page(
+            conversation_id,
+            limit=item_limit,
+            cursor=item_cursor,
+        )
         latest_event_id = self.db.latest_event_id(conversation_id)
-        return {
+        detail = {
             **self._public_conversation(row),
-            "items": self.db.list_items(conversation_id),
+            "items": page["items"],
+            "items_next_cursor": page["next_cursor"],
+            "items_has_more": page["has_more"],
+            "items_synced_at": items_synced_at,
             "pending_approvals": self.db.pending_approvals(conversation_id),
             "pending_clarifications": self.db.pending_clarifications(conversation_id),
-            "tool_runs": self.db.list_tool_runs(conversation_id),
             "latest_event_id": latest_event_id,
+        }
+        if include_tool_runs:
+            detail["tool_runs"] = self.db.list_tool_runs(conversation_id)
+        return detail
+
+    def get_conversation_updates(
+        self,
+        conversation_id: str,
+        since: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        row = self._conversation(conversation_id, user_id)
+        items_synced_at = utc_now()
+        items = self.db.list_items_updated_since(conversation_id, since)
+        deleted_item_ids = self.db.list_deleted_item_ids_since(conversation_id, since)
+        return {
+            **self._public_conversation(row),
+            "items": items,
+            "deleted_item_ids": deleted_item_ids,
+            "items_synced_at": items_synced_at,
+            "pending_approvals": self.db.pending_approvals(conversation_id),
+            "pending_clarifications": self.db.pending_clarifications(conversation_id),
+            "latest_event_id": self.db.latest_event_id(conversation_id),
         }
 
     def create_conversation(

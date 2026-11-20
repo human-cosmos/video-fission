@@ -54,6 +54,37 @@ def decode_conversation_cursor(cursor: str) -> tuple[str, str]:
     return updated_at, conversation_id
 
 
+def encode_item_cursor(updated_at: str, item_id: str) -> str:
+    value = json.dumps([updated_at, item_id], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def decode_item_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        updated_at, item_id = value
+    except (ValueError, TypeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise ValueError("无效的时间线游标") from exc
+    if not isinstance(updated_at, str) or not isinstance(item_id, str):
+        raise ValueError("无效的时间线游标")
+    return updated_at, item_id
+
+
+def _item_record(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "conversation_id": row["conversation_id"],
+        "codex_item_id": row["codex_item_id"],
+        "item_type": row["item_type"],
+        "role": row["role"],
+        "status": row["status"],
+        "payload": _load(row["payload"], {}),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -164,6 +195,8 @@ class Database:
                     WHERE codex_item_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_items_conversation_created
                     ON items(conversation_id, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_items_conversation_updated
+                    ON items(conversation_id, updated_at DESC, id DESC);
 
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +207,8 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_conversation
                     ON events(conversation_id, id);
+                CREATE INDEX IF NOT EXISTS idx_events_conversation_kind_created
+                    ON events(conversation_id, kind, created_at, id);
 
                 CREATE TABLE IF NOT EXISTS approvals (
                     id TEXT PRIMARY KEY,
@@ -761,20 +796,88 @@ class Database:
             "SELECT * FROM items WHERE conversation_id = ? ORDER BY created_at ASC, id ASC",
             (conversation_id,),
         )
-        return [
-            {
-                "id": row["id"],
-                "conversation_id": row["conversation_id"],
-                "codex_item_id": row["codex_item_id"],
-                "item_type": row["item_type"],
-                "role": row["role"],
-                "status": row["status"],
-                "payload": _load(row["payload"], {}),
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-            }
-            for row in rows
-        ]
+        return [_item_record(row) for row in rows]
+
+    def list_items_page(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 80,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        page_size = max(1, min(int(limit), 500))
+        values: list[Any] = [conversation_id]
+        cursor_clause = ""
+        if cursor:
+            updated_at, item_id = decode_item_cursor(cursor)
+            cursor_clause = (
+                " AND (updated_at < ? OR (updated_at = ? AND id < ?))"
+            )
+            values.extend((updated_at, updated_at, item_id))
+        rows = self.query(
+            f"""
+            SELECT * FROM items
+            WHERE conversation_id = ?{cursor_clause}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*values, page_size + 1),
+        )
+        has_more = len(rows) > page_size
+        selected_rows = rows[:page_size]
+        next_cursor = (
+            encode_item_cursor(selected_rows[-1]["updated_at"], selected_rows[-1]["id"])
+            if has_more and selected_rows
+            else None
+        )
+        return {
+            "items": sorted(
+                (_item_record(row) for row in selected_rows),
+                key=lambda item: (item["created_at"], item["id"]),
+            ),
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
+
+    def list_items_updated_since(
+        self,
+        conversation_id: str,
+        updated_after: str,
+    ) -> list[dict[str, Any]]:
+        rows = self.query(
+            """
+            SELECT * FROM items
+            WHERE conversation_id = ? AND updated_at > ?
+            ORDER BY updated_at ASC, id ASC
+            """,
+            (conversation_id, updated_after),
+        )
+        return [_item_record(row) for row in rows]
+
+    def list_deleted_item_ids_since(
+        self,
+        conversation_id: str,
+        deleted_after: str,
+    ) -> list[str]:
+        rows = self.query(
+            """
+            SELECT payload FROM events
+            WHERE conversation_id = ?
+              AND kind IN ('item_deleted', 'item.deleted')
+              AND created_at > ?
+            ORDER BY id ASC
+            """,
+            (conversation_id, deleted_after),
+        )
+        deleted_ids: list[str] = []
+        for row in rows:
+            payload = _load(row["payload"], {})
+            if not isinstance(payload, dict):
+                continue
+            item_id = str(payload.get("item_id") or "").strip()
+            if item_id and item_id not in deleted_ids:
+                deleted_ids.append(item_id)
+        return deleted_ids
 
     def add_item(self, conversation_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         item_id = uuid.uuid4().hex
@@ -811,11 +914,7 @@ class Database:
 
     def get_item(self, item_id: str) -> dict[str, Any] | None:
         row = self.query_one("SELECT * FROM items WHERE id = ?", (item_id,))
-        if not row:
-            return None
-        value = dict(row)
-        value["payload"] = _load(value["payload"], {})
-        return value
+        return _item_record(row) if row else None
 
     def delete_item(self, item_id: str, conversation_id: str | None = None) -> bool:
         with self.transaction() as connection:

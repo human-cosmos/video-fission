@@ -1,6 +1,6 @@
 <script setup>
 import { ChevronRight } from '@lucide/vue'
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   ACTION_LABELS,
   ROLE_LABELS,
@@ -24,6 +24,9 @@ const props = defineProps({
 defineEmits(['rerun-brief'])
 
 const hiddenFrames = ref({})
+const opened = ref(false)
+const activeMediaKey = ref('')
+const details = ref(null)
 
 const productionId = computed(() => props.payload?.production_id || '')
 const segments = computed(
@@ -43,6 +46,11 @@ const canRerunBrief = computed(
 
 watch(productionId, () => {
   hiddenFrames.value = {}
+  activeMediaKey.value = ''
+})
+
+onMounted(() => {
+  opened.value = Boolean(details.value?.open)
 })
 
 function actionOf(segment) {
@@ -60,11 +68,29 @@ function clipUrl(clip) {
 function segmentClipUrl(segment) {
   return clipMediaUrl(segment, productionId.value)
 }
+
+function clipKey(clip) {
+  return String(clip?.id || clip?.shot_id || clip?.path || '')
+}
+
+function setOpened(event) {
+  opened.value = Boolean(event?.currentTarget?.open)
+  if (!opened.value) activeMediaKey.value = ''
+}
+
+function activateMedia(key) {
+  activeMediaKey.value = activeMediaKey.value === key ? '' : key
+}
 </script>
 
 <template>
   <section class="video-card studio-card" data-testid="video-segments-card">
-    <details class="studio-disclosure" data-testid="video-segments-disclosure">
+    <details
+      ref="details"
+      class="studio-disclosure"
+      data-testid="video-segments-disclosure"
+      @toggle="setOpened"
+    >
       <summary class="studio-disclosure-summary">
         <span>
           <strong>原片与片段</strong>
@@ -72,7 +98,7 @@ function segmentClipUrl(segment) {
         </span>
         <ChevronRight :size="15" />
       </summary>
-      <div class="studio-disclosure-body">
+      <div v-if="opened" class="studio-disclosure-body">
     <p v-if="replacePlan" class="page-muted" data-testid="video-replace-plan">
       本轮新生成：{{ (replacePlan.resolved_segment_ids || []).join('、') || '无' }}
     </p>
@@ -122,6 +148,9 @@ function segmentClipUrl(segment) {
           :width="Number(segment.width) || 0"
           :height="Number(segment.height) || 0"
           :testid="`video-segment-clip-${segment.id}`"
+          :label="`片段 ${segment.id}`"
+          :active="activeMediaKey === `segment:${segment.id}`"
+          @activate="activateMedia(`segment:${segment.id}`)"
           compact
         />
         <div class="frame-row">
@@ -131,6 +160,8 @@ function segmentClipUrl(segment) {
             :key="name"
             :src="frameMediaUrl(productionId, name)"
             :alt="`${segment.id} 关键帧`"
+            loading="lazy"
+            decoding="async"
             @error="hideFrame(`${segment.id}:${name}`)"
           />
         </div>
@@ -144,6 +175,9 @@ function segmentClipUrl(segment) {
           :src="clipUrl(clip)"
           :width="Number(clip.width) || 0"
           :height="Number(clip.height) || 0"
+          :label="clip.shot_id ? `片段 ${clip.shot_id}` : '产物片段'"
+          :active="activeMediaKey === `clip:${clipKey(clip)}`"
+          @activate="activateMedia(`clip:${clipKey(clip)}`)"
           compact
         />
         <figcaption>

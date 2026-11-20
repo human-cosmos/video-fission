@@ -542,7 +542,13 @@ onBeforeUnmount(() => {
                       >
                         <span class="remix-unit-index">{{ String(index + 1).padStart(2, '0') }}</span>
                         <div class="remix-unit-media">
-                          <img v-if="unitFrame(unit)" :src="unitFrame(unit)" :alt="unit.id" />
+                          <img
+                            v-if="unitFrame(unit)"
+                            :src="unitFrame(unit)"
+                            :alt="unit.id"
+                            loading="lazy"
+                            decoding="async"
+                          />
                           <AspectVideo
                             v-else-if="unitClip(unit)"
                             :src="unitClip(unit)"

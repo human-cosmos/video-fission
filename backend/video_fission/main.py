@@ -9,11 +9,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import container
 from .api.auth import router as auth_router
+from .api.media_cache import media_not_modified_headers
 from .api.remixes import router as remix_router
 from .api.routes import router
 from .config import settings
@@ -131,6 +132,13 @@ async def request_logging(request: Request, call_next):
                 (time.perf_counter() - started) * 1000,
             )
             raise
+        if request.method in {"GET", "HEAD"} and response.status_code == 200:
+            not_modified_headers = media_not_modified_headers(
+                request.headers.get("if-none-match", ""),
+                response.headers,
+            )
+            if not_modified_headers is not None:
+                response = Response(status_code=304, headers=not_modified_headers)
         elapsed_ms = (time.perf_counter() - started) * 1000
         response.headers["X-Request-ID"] = request_id
         log = logger.warning if response.status_code >= 400 else logger.info

@@ -46,6 +46,12 @@ test("generates three full-width candidate videos with synchronized comparison",
     const rowBox = await page.getByTestId(`video-candidate-${candidateId}`).boundingBox()
     expect(rowBox.width).toBeCloseTo(gridBox.width, 0)
   }
+  const activeCandidateVideos = page.locator(".candidate-video-row video")
+  await expect(activeCandidateVideos).toHaveCount(0)
+  await page.getByTestId("video-candidate-player-script_a").click()
+  await expect(activeCandidateVideos).toHaveCount(1)
+  await page.getByTestId("video-candidate-player-script_b").click()
+  await expect(activeCandidateVideos).toHaveCount(1)
 
   const productionId = (await page.getByTestId("video-production-id").innerText()).trim()
   const finished = await request.get(`/api/productions/${productionId}`)

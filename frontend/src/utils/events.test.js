@@ -12,6 +12,7 @@ import {
   isProductionRefreshEvent,
   isRefreshEvent,
   itemLabel,
+  mergeConversationItems,
   mergeConversationSummaries,
   payloadText,
   toolCallName,
@@ -67,6 +68,7 @@ describe('conversation event helpers', () => {
     expect(isRefreshEvent('agent.message.delta')).toBe(true)
     expect(isRefreshEvent('approval.requested')).toBe(true)
     expect(isRefreshEvent('item_upserted')).toBe(true)
+    expect(isRefreshEvent('item_deleted')).toBe(true)
     expect(isRefreshEvent('production_updated')).toBe(true)
     expect(isRefreshEvent('thread.name.updated')).toBe(true)
     expect(isRefreshEvent('stream.heartbeat')).toBe(false)
@@ -76,6 +78,7 @@ describe('conversation event helpers', () => {
     expect(isConversationListEvent('reasoning.text.delta')).toBe(false)
     expect(isConversationListEvent('agent.message.delta')).toBe(false)
     expect(isConversationListEvent('item.completed')).toBe(true)
+    expect(isConversationListEvent('item_deleted')).toBe(true)
     expect(isConversationListEvent('turn.completed')).toBe(true)
     expect(isConversationListEvent('thread.name.updated')).toBe(true)
     expect(isProductionRefreshEvent('production_updated')).toBe(true)
@@ -102,6 +105,35 @@ describe('conversation event helpers', () => {
       { id: 'a', list_state: 'completed', title: 'A' },
       { id: 'b', list_state: 'completed', title: 'B' },
     ])
+  })
+
+  it('upserts changed timeline items without dropping older pages', () => {
+    const merged = mergeConversationItems(
+      [
+        { id: 'older', created_at: '2026-01-01T00:00:00Z', status: 'completed' },
+        { id: 'active', created_at: '2026-01-02T00:00:00Z', status: 'inProgress' },
+      ],
+      [
+        { id: 'active', created_at: '2026-01-02T00:00:00Z', status: 'completed' },
+        { id: 'new', created_at: '2026-01-03T00:00:00Z', status: 'completed' },
+      ],
+    )
+
+    expect(merged.map((item) => item.id)).toEqual(['older', 'active', 'new'])
+    expect(merged[1].status).toBe('completed')
+  })
+
+  it('removes deleted timeline items during incremental updates', () => {
+    const merged = mergeConversationItems(
+      [
+        { id: 'keep', created_at: '2026-01-01T00:00:00Z' },
+        { id: 'remove', created_at: '2026-01-02T00:00:00Z' },
+      ],
+      [],
+      ['remove'],
+    )
+
+    expect(merged.map((item) => item.id)).toEqual(['keep'])
   })
 
   it('groups adjacent execution events while preserving messages', () => {

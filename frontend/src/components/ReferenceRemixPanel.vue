@@ -20,7 +20,7 @@ const props = defineProps({
   video: { type: Object, default: null },
 })
 
-const emit = defineEmits(['close', 'notify'])
+const emit = defineEmits(['close', 'notify', 'task-update'])
 
 const remix = ref(null)
 const loading = ref(false)
@@ -80,7 +80,7 @@ function stopPolling() {
 
 function schedulePoll(delay = 900) {
   stopPolling()
-  if (!props.open || !remix.value?.id || !isRunning.value) return
+  if (!remix.value?.id || !isRunning.value) return
   pollTimer = setTimeout(() => loadRemix(remix.value.id, { silent: true }), delay)
 }
 
@@ -229,9 +229,6 @@ async function restartRemix() {
 }
 
 function close() {
-  requestSequence += 1
-  loading.value = false
-  stopPolling()
   emit('close')
 }
 
@@ -271,10 +268,29 @@ watch(
       ensureRemix()
     } else {
       document.removeEventListener('keydown', handleKeydown)
-      stopPolling()
     }
   },
   { immediate: true },
+)
+
+watch(
+  remix,
+  (current) => {
+    emit(
+      'task-update',
+      current
+        ? {
+            id: current.id,
+            title: current.title,
+            status: current.status,
+            current_stage: current.current_stage,
+            error: current.error,
+            source_video: current.source_video,
+            output: current.output,
+          }
+        : null,
+    )
+  },
 )
 
 onBeforeUnmount(() => {
@@ -297,166 +313,239 @@ onBeforeUnmount(() => {
           role="dialog"
           aria-modal="true"
           aria-labelledby="remix-panel-title"
+          aria-describedby="remix-panel-description"
           data-testid="reference-remix-panel"
         >
           <header class="remix-panel-head">
-            <div>
-              <span class="remix-kicker">原片结构</span>
-              <h2 id="remix-panel-title">{{ statusTitle }}</h2>
-              <p>保留开头和结尾，只调整中间 value 片段。成片只使用原片片段，不调用视频生成模型。</p>
+            <div class="remix-panel-heading">
+              <span class="remix-title-icon" aria-hidden="true">
+                <Shuffle :size="17" />
+              </span>
+              <div>
+                <span class="remix-kicker">原片结构</span>
+                <h2 id="remix-panel-title">{{ statusTitle }}</h2>
+                <p id="remix-panel-description">
+                  开头与结尾保持锁定，只重排中间片段并使用原片音轨。
+                </p>
+              </div>
             </div>
-            <button class="icon-button" type="button" aria-label="关闭原片重排" @click="close">
+            <button
+              class="icon-button remix-close"
+              type="button"
+              aria-label="关闭原片重排"
+              @click="close"
+            >
               <X :size="18" />
             </button>
           </header>
 
-          <div v-if="isRunning || loading" class="remix-running" aria-live="polite">
-            <LoaderCircle class="is-spinning" :size="20" />
-            <div>
-              <strong>{{ statusTitle }}</strong>
-              <span>
-                {{
-                  remix?.current_stage === 'decompose'
-                    ? '正在识别段落、开头、结尾和中间价值片段'
-                    : '正在裁切并重新拼接片段，保持原片音轨'
-                }}
+          <div class="remix-panel-body">
+            <div v-if="isRunning || loading" class="remix-running" aria-live="polite">
+              <span class="remix-running-icon" aria-hidden="true">
+                <LoaderCircle class="is-spinning" :size="22" />
               </span>
-            </div>
-            <button v-if="isRunning" class="button subtle" type="button" @click="cancelRemix">
-              取消
-            </button>
-          </div>
-
-          <template v-else>
-            <div class="remix-source-row">
-              <video
-                class="remix-source-video"
-                :src="video.previewUrl || video.url"
-                controls
-                preload="metadata"
-              ></video>
-              <div class="remix-source-copy">
-                <strong>{{ video.name }}</strong>
-                <span>{{ formatDuration(video.duration_ms) }}</span>
-                <p>{{ remix?.summary || '正在读取原片结构' }}</p>
-                <small v-if="remix?.provider">
-                  片段理解：{{ remix.provider }}{{ remix.model ? ` / ${remix.model}` : '' }}
-                </small>
-              </div>
-            </div>
-
-            <section
-              v-if="isAwaitingOrder || isCompleted || (status === 'failed' && orderedMiddle.length)"
-              class="remix-timeline"
-            >
-              <div class="remix-bookend">
-                <span>开头锁定</span>
-                <strong>
-                  {{ formatTimecode(plan.opening?.start_ms || 0) }}
-                  <template>至</template>
-                  {{ formatTimecode(plan.opening?.end_ms || 0) }}
-                </strong>
-                <small>{{ formatDuration((plan.opening?.end_ms || 0) - (plan.opening?.start_ms || 0)) }}</small>
-              </div>
-
-              <div class="remix-middle-head">
-                <div>
-                  <strong>中间片段</strong>
-                  <span>调整顺序后生成一条成片</span>
+              <div class="remix-running-copy">
+                <strong>{{ statusTitle }}</strong>
+                <span>
+                  {{
+                    remix?.current_stage === 'decompose'
+                      ? '正在识别段落、开头、结尾和中间价值片段'
+                      : '正在裁切并重新拼接片段，保持原片音轨'
+                  }}
+                </span>
+                <div class="remix-stage-track" aria-hidden="true">
+                  <span
+                    class="remix-stage-step"
+                    :class="{
+                      'is-active': remix?.current_stage === 'decompose',
+                      'is-done': remix?.current_stage && remix.current_stage !== 'decompose',
+                    }"
+                  >
+                    <b>1</b>
+                    理解片段
+                  </span>
+                  <span class="remix-stage-line"></span>
+                  <span
+                    class="remix-stage-step"
+                    :class="{
+                      'is-active': remix?.current_stage && remix.current_stage !== 'decompose',
+                    }"
+                  >
+                    <b>2</b>
+                    拼接成片
+                  </span>
                 </div>
-                <span class="remix-middle-count">{{ orderedMiddle.length }} 段</span>
               </div>
+              <button
+                v-if="isRunning"
+                class="button subtle remix-cancel"
+                type="button"
+                @click="cancelRemix"
+              >
+                取消任务
+              </button>
+            </div>
 
-              <ol class="remix-unit-list">
-                <li
-                  v-for="(unit, index) in orderedMiddle"
-                  :key="unit.id"
-                  class="remix-unit"
-                  :data-testid="`remix-unit-${unit.id}`"
-                >
-                  <span class="remix-unit-index">{{ String(index + 1).padStart(2, '0') }}</span>
-                  <div class="remix-unit-media">
-                    <img v-if="unitFrame(unit)" :src="unitFrame(unit)" :alt="unit.id" />
-                    <AspectVideo
-                      v-else-if="unitClip(unit)"
-                      :src="unitClip(unit)"
-                      :width="video.width"
-                      :height="video.height"
-                      compact
-                    />
-                    <Film v-else :size="20" />
+            <template v-else>
+              <div class="remix-workspace">
+                <aside class="remix-source-panel">
+                  <div class="remix-source-media">
+                    <video
+                      class="remix-source-video"
+                      :src="video.previewUrl || video.url"
+                      controls
+                      preload="metadata"
+                    ></video>
+                    <span class="remix-source-time">
+                      {{ formatDuration(video.duration_ms) }}
+                    </span>
                   </div>
-                  <div class="remix-unit-copy">
-                    <span>{{ unit.role === 'value' ? 'Value' : unit.role }}</span>
-                    <strong>{{ unit.summary || unit.id }}</strong>
-                    <small>
-                      {{ formatTimecode(unit.start_ms) }} 至 {{ formatTimecode(unit.end_ms) }}
-                      · {{ formatDuration(unit.end_ms - unit.start_ms) }}
+                  <div class="remix-source-copy">
+                    <span class="remix-section-label">素材原片</span>
+                    <strong>{{ video.name }}</strong>
+                    <p>{{ remix?.summary || '正在读取原片结构' }}</p>
+                    <small v-if="remix?.provider">
+                      片段理解：{{ remix.provider }}{{ remix.model ? ` / ${remix.model}` : '' }}
                     </small>
                   </div>
-                  <div class="remix-unit-actions">
-                    <button
-                      class="icon-button compact"
-                      type="button"
-                      :aria-label="`上移 ${unit.id}`"
-                      :disabled="!canMoveMiddle(index, -1)"
-                      @click="moveMiddle(index, -1)"
-                    >
-                      <ArrowUp :size="14" />
-                    </button>
-                    <button
-                      class="icon-button compact"
-                      type="button"
-                      :aria-label="`下移 ${unit.id}`"
-                      :disabled="!canMoveMiddle(index, 1)"
-                      @click="moveMiddle(index, 1)"
-                    >
-                      <ArrowDown :size="14" />
-                    </button>
+                </aside>
+
+                <section class="remix-order-panel">
+                  <header class="remix-order-head">
+                    <div>
+                      <strong>当前顺序已按分析结果打乱</strong>
+                      <span>你可以继续调整，确认后再开始拼接</span>
+                    </div>
+                    <span class="remix-middle-count">{{ orderedMiddle.length }} 段</span>
+                  </header>
+
+                  <section
+                    v-if="isAwaitingOrder || isCompleted || (status === 'failed' && orderedMiddle.length)"
+                    class="remix-timeline"
+                  >
+                    <div class="remix-bookend">
+                      <span>开头锁定</span>
+                      <strong>
+                        {{ formatTimecode(plan.opening?.start_ms || 0) }}
+                        至
+                        {{ formatTimecode(plan.opening?.end_ms || 0) }}
+                      </strong>
+                      <small>
+                        {{ formatDuration((plan.opening?.end_ms || 0) - (plan.opening?.start_ms || 0)) }}
+                      </small>
+                    </div>
+
+                    <ol class="remix-unit-list">
+                      <li
+                        v-for="(unit, index) in orderedMiddle"
+                        :key="unit.id"
+                        class="remix-unit"
+                        :data-testid="`remix-unit-${unit.id}`"
+                      >
+                        <span class="remix-unit-index">{{ String(index + 1).padStart(2, '0') }}</span>
+                        <div class="remix-unit-media">
+                          <img v-if="unitFrame(unit)" :src="unitFrame(unit)" :alt="unit.id" />
+                          <AspectVideo
+                            v-else-if="unitClip(unit)"
+                            :src="unitClip(unit)"
+                            :width="video.width"
+                            :height="video.height"
+                            compact
+                          />
+                          <Film v-else :size="20" />
+                        </div>
+                        <div class="remix-unit-copy">
+                          <span>{{ unit.role === 'value' ? '可替换片段' : unit.role }}</span>
+                          <strong>{{ unit.summary || unit.id }}</strong>
+                          <small>
+                            {{ formatTimecode(unit.start_ms) }} 至 {{ formatTimecode(unit.end_ms) }}
+                            · {{ formatDuration(unit.end_ms - unit.start_ms) }}
+                          </small>
+                        </div>
+                        <div class="remix-unit-actions">
+                          <button
+                            class="icon-button compact"
+                            type="button"
+                            :aria-label="`上移 ${unit.id}`"
+                            :title="canMoveMiddle(index, -1) ? '上移片段' : '已经位于可移动范围顶部'"
+                            :disabled="!canMoveMiddle(index, -1)"
+                            @click="moveMiddle(index, -1)"
+                          >
+                            <ArrowUp :size="15" />
+                          </button>
+                          <button
+                            class="icon-button compact"
+                            type="button"
+                            :aria-label="`下移 ${unit.id}`"
+                            :title="canMoveMiddle(index, 1) ? '下移片段' : '已经位于可移动范围底部'"
+                            :disabled="!canMoveMiddle(index, 1)"
+                            @click="moveMiddle(index, 1)"
+                          >
+                            <ArrowDown :size="15" />
+                          </button>
+                        </div>
+                      </li>
+                    </ol>
+
+                    <div class="remix-bookend remix-bookend-end">
+                      <span>结尾锁定</span>
+                      <strong>
+                        {{ formatTimecode(plan.ending?.start_ms || 0) }}
+                        至
+                        {{ formatTimecode(plan.ending?.end_ms || 0) }}
+                      </strong>
+                      <small>
+                        {{ formatDuration((plan.ending?.end_ms || 0) - (plan.ending?.start_ms || 0)) }}
+                      </small>
+                    </div>
+                  </section>
+
+                  <div v-if="!orderedMiddle.length" class="remix-order-empty">
+                    <Film :size="22" />
+                    <strong>等待片段结构</strong>
+                    <span>原片拆解完成后，可调整的中间片段会显示在这里。</span>
                   </div>
-                </li>
-              </ol>
-
-              <div class="remix-bookend remix-bookend-end">
-                <span>结尾锁定</span>
-                <strong>
-                  {{ formatTimecode(plan.ending?.start_ms || 0) }}
-                  至
-                  {{ formatTimecode(plan.ending?.end_ms || 0) }}
-                </strong>
-                <small>{{ formatDuration((plan.ending?.end_ms || 0) - (plan.ending?.start_ms || 0)) }}</small>
+                </section>
               </div>
-            </section>
 
-            <section v-if="outputUrl" class="remix-output" data-testid="reference-remix-output">
-              <header>
-                <span><Check :size="15" /> 成片已生成</span>
-                <a
-                  class="button primary"
-                  :href="outputUrl"
-                  download="reference-remix.mp4"
-                  data-testid="reference-remix-download"
-                >
-                  <Download :size="14" />
-                  下载 MP4
-                </a>
-              </header>
-              <AspectVideo
-                :src="outputUrl"
-                :width="remix?.output?.width || video.width"
-                :height="remix?.output?.height || video.height"
-                testid="reference-remix-player"
-              />
-            </section>
+              <section v-if="outputUrl" class="remix-output" data-testid="reference-remix-output">
+                <header>
+                  <div>
+                    <span><Check :size="15" /> 成片已生成</span>
+                    <small>当前顺序已完成拼接</small>
+                  </div>
+                  <a
+                    class="button primary"
+                    :href="outputUrl"
+                    download="reference-remix.mp4"
+                    data-testid="reference-remix-download"
+                  >
+                    <Download :size="14" />
+                    下载 MP4
+                  </a>
+                </header>
+                <AspectVideo
+                  :src="outputUrl"
+                  :width="remix?.output?.width || video.width"
+                  :height="remix?.output?.height || video.height"
+                  testid="reference-remix-player"
+                />
+              </section>
 
-            <p v-if="error || remix?.error" class="page-error">
-              {{ error || remix?.error }}
-            </p>
-            <ul v-if="remix?.warnings?.length" class="warning-list">
-              <li v-for="(warning, index) in remix.warnings" :key="index">{{ warning }}</li>
-            </ul>
+              <div v-if="error || remix?.error" class="remix-feedback">
+                <p class="page-error">{{ error || remix?.error }}</p>
+              </div>
+              <ul v-if="remix?.warnings?.length" class="warning-list">
+                <li v-for="(warning, index) in remix.warnings" :key="index">{{ warning }}</li>
+              </ul>
+            </template>
+          </div>
 
-            <footer class="remix-panel-actions">
+          <footer v-if="!isRunning && !loading" class="remix-panel-actions">
+            <span class="remix-action-note">
+              {{ isCompleted ? '重新拼接会按当前片段顺序生成新成片' : '只重排片段，不重新生成画面' }}
+            </span>
+            <div class="remix-action-buttons">
               <button
                 v-if="!remix && error"
                 class="button subtle"
@@ -495,11 +584,11 @@ onBeforeUnmount(() => {
                       ? '重试拼接'
                       : isCompleted
                         ? '按当前顺序重新拼接'
-                        : '生成重排视频'
+                        : '确认并开始拼接'
                 }}
               </button>
-            </footer>
-          </template>
+            </div>
+          </footer>
         </section>
       </div>
     </Transition>

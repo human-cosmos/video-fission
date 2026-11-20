@@ -1,7 +1,9 @@
 <script setup>
 import {
+  CircleAlert,
   ArrowUp,
   Check,
+  LoaderCircle,
   Menu,
   Plus,
   Shuffle,
@@ -9,7 +11,7 @@ import {
   X,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, eventUrl } from './api'
+import { api, eventUrl, productionUploadUrl } from './api'
 import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
@@ -52,6 +54,8 @@ const selectingVideo = ref(false)
 const cancelling = ref(false)
 const remixOpen = ref(false)
 const remixEnabled = ref(false)
+const remixTask = ref(null)
+const remixVideoSnapshot = ref(null)
 const videoInput = ref(null)
 const conversationQuery = ref('')
 const nextConversationCursor = ref('')
@@ -77,11 +81,13 @@ let conversationPollTimer = null
 let selectionSequence = 0
 let uploadGeneration = 0
 let toastTimer = null
+let remixRestoreTimer = null
 let titleBeforeEdit = ''
 let bootstrapPromise = null
 let navigationPromise = null
 
 const MODE_STORAGE_KEY = 'video-fission.workspaceMode'
+const REMIX_TASK_STORAGE_KEY = 'video-fission.remix.lastTask'
 const MODE_IDS = WORKSPACE_MODES.map((item) => item.id)
 const CONVERSATION_PAGE_SIZE = 30
 const CONVERSATION_POLL_MS = 15_000
@@ -215,12 +221,139 @@ watch(productionVideo, (value) => {
   if (!value) remixOpen.value = false
 })
 
+const showRemixTask = computed(() => Boolean(remixTask.value?.id) && !remixOpen.value)
+const remixTaskLabel = computed(() => {
+  const task = remixTask.value
+  if (!task) return ''
+  if (task.status === 'running') {
+    return task.current_stage === 'decompose'
+      ? '原片重排 · 正在理解原片'
+      : '原片重排 · 正在合成'
+  }
+  if (task.status === 'awaiting_order') return '原片重排 · 等待确认顺序'
+  if (task.status === 'completed') return '原片重排已完成 · 查看成片'
+  if (task.status === 'failed') return '原片重排失败 · 查看原因'
+  if (task.status === 'cancelled') return '原片重排已取消'
+  return '原片重排 · 查看任务'
+})
+const remixTaskClass = computed(() => {
+  const status = remixTask.value?.status || ''
+  if (status === 'completed') return 'is-complete'
+  if (status === 'failed') return 'is-failed'
+  if (status === 'awaiting_order' || status === 'cancelled') return 'is-attention'
+  return 'is-running'
+})
+
 function notify(message) {
   toast.value = message
   clearTimeout(toastTimer)
   toastTimer = setTimeout(() => {
     toast.value = ''
   }, 3200)
+}
+
+function remixVideoFromTask(task) {
+  const source = task?.source_video || {}
+  if (!source.upload_id) return null
+  return {
+    id: source.upload_id,
+    name: source.filename || '参考视频',
+    url: productionUploadUrl(source.upload_id),
+    size: 0,
+    content_type: '',
+    duration_ms: source.duration_ms,
+    width: source.width,
+    height: source.height,
+    fps: source.fps,
+  }
+}
+
+function persistRemixTask(task, video) {
+  if (!task?.id) {
+    window.localStorage.removeItem(REMIX_TASK_STORAGE_KEY)
+    return
+  }
+  const { previewUrl: _previewUrl, ...persistedVideo } = video || {}
+  window.localStorage.setItem(
+    REMIX_TASK_STORAGE_KEY,
+    JSON.stringify({
+      taskId: task.id,
+      video: persistedVideo,
+    }),
+  )
+}
+
+function handleRemixTaskUpdate(task) {
+  remixTask.value = task || null
+  if (!task?.id) {
+    window.localStorage.removeItem(REMIX_TASK_STORAGE_KEY)
+    return
+  }
+  if (!remixVideoSnapshot.value) {
+    remixVideoSnapshot.value = remixVideoFromTask(task)
+  }
+  persistRemixTask(task, remixVideoSnapshot.value || remixVideoFromTask(task))
+}
+
+async function restoreRemixTask() {
+  if (!remixEnabled.value) return
+  const raw = window.localStorage.getItem(REMIX_TASK_STORAGE_KEY)
+  if (!raw) return
+  try {
+    const saved = JSON.parse(raw)
+    if (!saved?.taskId) {
+      window.localStorage.removeItem(REMIX_TASK_STORAGE_KEY)
+      return
+    }
+    const task = await api.remix(saved.taskId)
+    remixTask.value = task
+    if (saved.video) {
+      const { previewUrl: _previewUrl, ...video } = saved.video
+      remixVideoSnapshot.value = video
+    } else {
+      remixVideoSnapshot.value = remixVideoFromTask(task)
+    }
+    if (task.status === 'running') scheduleRestoredRemixPoll(task.id)
+  } catch (error) {
+    if (error.status === 404) {
+      window.localStorage.removeItem(REMIX_TASK_STORAGE_KEY)
+    }
+  }
+}
+
+function scheduleRestoredRemixPoll(taskId) {
+  clearTimeout(remixRestoreTimer)
+  remixRestoreTimer = setTimeout(async () => {
+    if (!taskId) return
+    try {
+      const task = await api.remix(taskId)
+      remixTask.value = task
+      if (!remixVideoSnapshot.value) {
+        remixVideoSnapshot.value = remixVideoFromTask(task)
+      }
+      persistRemixTask(task, remixVideoSnapshot.value)
+      if (task.status === 'running') scheduleRestoredRemixPoll(taskId)
+    } catch {
+      remixRestoreTimer = setTimeout(() => scheduleRestoredRemixPoll(taskId), 3000)
+    }
+  }, 1500)
+}
+
+function openReferenceRemix() {
+  if (!productionVideo.value?.id) return
+  clearTimeout(remixRestoreTimer)
+  const { previewUrl: _previewUrl, ...video } = productionVideo.value
+  remixVideoSnapshot.value = video
+  remixOpen.value = true
+}
+
+function openRemixTask() {
+  clearTimeout(remixRestoreTimer)
+  if (!remixVideoSnapshot.value) {
+    remixVideoSnapshot.value = remixVideoFromTask(remixTask.value)
+  }
+  if (!remixVideoSnapshot.value?.id) return
+  remixOpen.value = true
 }
 
 function setBootError(error) {
@@ -253,6 +386,7 @@ async function runBootstrap() {
     ])
     models.value = modelPayload.items || []
     remixEnabled.value = Boolean(featurePayload.reference_remix)
+    await restoreRemixTask()
     await Promise.all([
       loadConversations({ reset: true }),
       loadProductions(),
@@ -1052,6 +1186,7 @@ onBeforeUnmount(() => {
   listRefreshQueued = false
   productionRefreshQueued = false
   clearTimeout(toastTimer)
+  clearTimeout(remixRestoreTimer)
   stopSidebarResize()
   window.removeEventListener('keydown', handleShortcut)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
@@ -1180,7 +1315,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="composer-remix-button"
                   data-testid="open-reference-remix"
-                  @click="remixOpen = true"
+                  @click="openReferenceRemix"
                 >
                   <Shuffle :size="14" />
                   原片重排
@@ -1321,10 +1456,30 @@ onBeforeUnmount(() => {
 
     <ReferenceRemixPanel
       :open="remixOpen"
-      :video="productionVideo"
+      :video="remixVideoSnapshot || productionVideo"
       @close="remixOpen = false"
       @notify="notify"
+      @task-update="handleRemixTaskUpdate"
     />
+
+    <button
+      v-if="showRemixTask"
+      type="button"
+      class="remix-task-pill"
+      :class="remixTaskClass"
+      data-testid="reference-remix-task-pill"
+      aria-live="polite"
+      @click="openRemixTask"
+    >
+      <LoaderCircle
+        v-if="remixTask?.status === 'running'"
+        class="is-spinning"
+        :size="15"
+      />
+      <Check v-else-if="remixTask?.status === 'completed'" :size="15" />
+      <CircleAlert v-else :size="15" />
+      <span>{{ remixTaskLabel }}</span>
+    </button>
 
     <Transition name="toast">
       <div v-if="toast" class="toast-message" role="status">

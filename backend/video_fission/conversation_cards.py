@@ -286,8 +286,8 @@ def _stage_outputs(public: dict[str, Any], stage_id: str, state: str) -> list[di
                 _output_row("候选脚本", f"{len(candidates)} 份" if candidates else ""),
                 _output_row("脚本角度", " / ".join(title for title in titles if title)),
                 _output_row(
-                    "当前选用",
-                    (selected or {}).get("title") if selected else "等待选择",
+                    "执行方式",
+                    (selected or {}).get("title") if selected else "三份脚本分别生成",
                 ),
                 _output_row("分镜结果", f"{len(shots)} 个镜头" if shots else ""),
                 _output_row(
@@ -414,11 +414,11 @@ def _activity_item(
         else:
             text = f"执行失败：{message}" if message else "执行失败"
     elif kind == "awaiting_video_choice":
-        text = message or "等待选择候选视频"
+        text = message or "候选视频已生成"
     elif kind == "awaiting_script_approval":
         text = message or "创意脚本已生成，等待确认"
     elif kind == "completed":
-        text = "全部步骤完成，成片已生成"
+        text = "全部步骤完成，视频已生成"
     else:
         text = message or kind.replace("_", " ")
     detail = _detail_text(payload.get("details"))

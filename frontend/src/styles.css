@@ -4963,13 +4963,12 @@ a.button.primary {
   --vf-accent-soft: rgba(91, 94, 230, 0.08);
   --vf-accent-line: rgba(91, 94, 230, 0.24);
   --vf-grid: rgba(91, 94, 230, 0.035);
-  --welcome-surface: var(--paper-deep);
-  --welcome-surface: color-mix(in srgb, var(--vf-accent) 30%, var(--paper-bright));
-  --welcome-accent: var(--vf-accent);
-  --welcome-accent-soft: var(--vf-accent-soft);
-  --welcome-line: var(--vf-accent-line);
-  --welcome-text: var(--ink);
-  --welcome-text-soft: var(--ink-soft);
+  --welcome-surface: var(--vf-accent);
+  --welcome-accent: var(--gold);
+  --welcome-accent-soft: rgba(255, 255, 255, 0.06);
+  --welcome-line: rgba(255, 255, 255, 0.2);
+  --welcome-text: var(--paper-bright);
+  --welcome-text-soft: var(--paper-bright);
   --welcome-serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --font-display: "Inter", "Noto Sans SC", "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --font-body: "Inter", "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
@@ -5303,7 +5302,7 @@ a.button.primary {
   border: 1px solid var(--welcome-line);
   border-radius: 8px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
     0 18px 44px var(--vf-accent-soft);
   isolation: isolate;
 }
@@ -5319,7 +5318,7 @@ a.button.primary {
   line-height: 1;
   pointer-events: none;
   content: "映" / "";
-  opacity: 0.06;
+  opacity: 0.08;
   speak: never;
 }
 
@@ -5399,7 +5398,7 @@ a.button.primary {
   align-items: center;
   gap: 7px;
   padding-top: 2px;
-  color: var(--ink);
+  color: var(--welcome-text);
   font-family: var(--font-body);
   font-size: 11px;
   font-weight: 650;
@@ -5889,45 +5888,53 @@ a.button.primary {
   font-size: 10px;
 }
 
-.candidate-video-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.candidate-video-card {
+.candidate-video-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  padding: 9px;
-  background: #f8fafc;
-  border: 1px solid var(--line);
-  border-radius: 6px;
 }
 
-.candidate-video-card.is-selected {
-  background: rgba(245, 158, 11, 0.04);
-  border-color: rgba(245, 158, 11, 0.5);
-  box-shadow: inset 3px 0 0 #f59e0b;
+.candidate-video-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 0 6px;
+}
+
+.candidate-video-row:first-child {
+  padding-top: 2px;
+}
+
+.candidate-video-row + .candidate-video-row {
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
 }
 
 .candidate-video-title {
   display: flex;
-  gap: 8px;
-  align-items: flex-start;
+  gap: 10px;
+  align-items: center;
   min-width: 0;
 }
 
-.candidate-video-title > span {
-  color: var(--vf-accent);
+.candidate-video-letter {
+  display: grid;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  color: var(--electric);
+  background: #eef4ff;
+  border: 1px solid #cddcf7;
+  border-radius: 5px;
+  place-items: center;
   font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 650;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .candidate-video-title > div {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
@@ -5942,32 +5949,247 @@ a.button.primary {
 
 .candidate-video-title strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .candidate-video-title small {
   color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.candidate-video-title time {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
   font-size: 10px;
 }
 
-.candidate-video-card .player-frame {
+.candidate-video-row .player-frame {
   background: #0f172a;
 }
 
 .candidate-video-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  min-height: 34px;
+  gap: 8px;
+  padding: 0 0 8px;
 }
 
-.candidate-selected {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-  color: #8a6d2f;
+.candidate-video-actions .button {
+  min-height: 32px;
+  padding: 0 11px;
   font-size: 11px;
+  border-radius: 5px;
+}
+
+.video-compare-backdrop {
+  position: fixed;
+  z-index: 130;
+  inset: 0;
+  display: grid;
+  padding: 18px;
+  background: rgba(8, 20, 17, 0.66);
+  backdrop-filter: blur(8px);
+  place-items: center;
+}
+
+.video-compare-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 36px);
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 10px;
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.34);
+}
+
+.video-compare-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.video-compare-head > div {
+  min-width: 0;
+}
+
+.video-compare-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--electric);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 650;
+}
+
+.video-compare-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 680;
+  line-height: 1.35;
+}
+
+.video-compare-stage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 0;
+  padding: 16px 20px 0;
+  overflow-y: auto;
+}
+
+.video-compare-item {
+  min-width: 0;
+  margin: 0;
+}
+
+.video-compare-item figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 7px;
+}
+
+.video-compare-item figcaption span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.video-compare-item figcaption small {
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.video-compare-player {
+  height: clamp(200px, 48vh, 520px);
+  overflow: hidden;
+  background: #0f172a;
+  border: 1px solid #1f2b3d;
+  border-radius: 7px;
+}
+
+.video-compare-player video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #0f172a;
+  object-fit: contain;
+}
+
+.video-compare-error {
+  margin: 10px 20px 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.video-compare-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px 17px;
+}
+
+.video-compare-toggle {
+  min-width: 86px;
+}
+
+.video-compare-time,
+.video-compare-rate {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.video-compare-seek {
+  flex: 1 1 220px;
+  min-width: 140px;
+  accent-color: var(--electric);
+}
+
+.video-compare-audio {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-color: var(--line);
+}
+
+.video-compare-modal-enter-active,
+.video-compare-modal-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.video-compare-modal-enter-active .video-compare-dialog,
+.video-compare-modal-leave-active .video-compare-dialog {
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.video-compare-modal-enter-from,
+.video-compare-modal-leave-to {
+  opacity: 0;
+}
+
+.video-compare-modal-enter-from .video-compare-dialog,
+.video-compare-modal-leave-to .video-compare-dialog {
+  transform: translateY(12px) scale(0.99);
+}
+
+@media (max-width: 760px) {
+  .video-compare-backdrop {
+    padding: 0;
+  }
+
+  .video-compare-dialog {
+    width: 100%;
+    max-height: 100vh;
+    min-height: 100vh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .video-compare-stage {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+    padding: 14px 14px 0;
+  }
+
+  .video-compare-player {
+    height: min(32vh, 340px);
+  }
+
+  .video-compare-head {
+    padding: 14px;
+  }
+
+  .video-compare-controls {
+    padding: 12px 14px max(14px, env(safe-area-inset-bottom));
+  }
+
+  .video-compare-seek {
+    order: 10;
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-compare-modal-enter-active,
+  .video-compare-modal-leave-active,
+  .video-compare-modal-enter-active .video-compare-dialog,
+  .video-compare-modal-leave-active .video-compare-dialog {
+    transition: none;
+  }
 }
 
 .app-shell.mode-chat .dock-tickets {
@@ -6451,10 +6673,6 @@ a.button.primary {
   .app-shell.mode-chat .composer-dock {
     width: calc(100% - 16px);
     padding-bottom: max(8px, env(safe-area-inset-bottom));
-  }
-
-  .candidate-video-grid {
-    grid-template-columns: 1fr;
   }
 
   .app-shell.mode-chat .dock-tickets {

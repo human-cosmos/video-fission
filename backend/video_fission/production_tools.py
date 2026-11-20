@@ -457,9 +457,17 @@ class ProductionToolHost:
             )
             self.generate_video_shots(arguments, context)
             composed = self.compose_timeline(arguments, context)
+            self.burn_subtitles(arguments, context)
             current = self._production(production_id)
             output = dict(current.get("output") or composed.get("output") or {})
-            video_path = Path(str(output.get("composed_video_path") or composed.get("video_path") or ""))
+            video_path = Path(
+                str(
+                    output.get("subtitled_video_path")
+                    or output.get("video_path")
+                    or composed.get("video_path")
+                    or ""
+                )
+            )
             if not video_path.is_file() or video_path.stat().st_size <= 0:
                 raise ProductionToolError(f"候选 {candidate_id} 的视频文件缺失或为空")
             result = {
@@ -501,7 +509,7 @@ class ProductionToolHost:
             if str(item.get("id") or "") in results_by_id
         ]
         if len(ordered) != 3:
-            raise ProductionToolError("候选视频未全部生成，不能进入视频选择")
+            raise ProductionToolError("候选视频未全部生成，任务不能完成")
         first_script = candidates[0].get("script") or production.get("script")
         self.db.update_production(
             production_id,
@@ -511,19 +519,19 @@ class ProductionToolHost:
                 "clips": [],
                 "output": None,
                 "selected_script_id": None,
-                "status": "awaiting_video_choice",
-                "current_stage": "compose",
+                "status": "completed",
+                "current_stage": "done",
                 "error": None,
             },
         )
         self.engine._emit(
             production_id,
-            "awaiting_video_choice",
-            {"message": "3 个候选视频已生成，请选择一个继续最终合成", "count": 3},
+            "completed",
+            {"message": "3 个候选视频已生成", "count": 3},
         )
         return {
             "production_id": production_id,
-            "status": "awaiting_video_choice",
+            "status": "completed",
             "candidate_videos": [
                 {
                     "id": item["id"],
@@ -532,8 +540,8 @@ class ProductionToolHost:
                 }
                 for item in ordered
             ],
-            "paused": True,
-            "message": "3 个候选视频已生成，请选择其中一个继续最终合成。",
+            "paused": False,
+            "message": "3 个候选视频已生成，可预览或下载。",
         }
 
     def generate_video_shots(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -753,7 +761,7 @@ def register_production_tools(registry: ToolRegistry, host: ProductionToolHost) 
         "update_production_progress": ("更新任务进度", "Write progress, status, or a short progress message."),
         "generate_candidate_videos": (
             "生成三个候选视频",
-            "Generate and compose all three script candidates, then pause for final video selection.",
+            "Generate, compose, and subtitle all three script candidates as final deliverables.",
         ),
         "generate_video_shots": (
             "生成视频镜头",

@@ -25,7 +25,6 @@ import VideoUnderstandingCard from './VideoUnderstandingCard.vue'
 const props = defineProps({
   conversation: { type: Object, default: null },
   rerunning: { type: Boolean, default: false },
-  selecting: { type: Boolean, default: false },
   cancelling: { type: Boolean, default: false },
 })
 
@@ -35,7 +34,6 @@ const emit = defineEmits([
   'copy',
   'cancel-production',
   'rerun-brief',
-  'select-video',
   'approve-scripts',
   'request-script-revision',
   'regenerate-scripts',
@@ -373,11 +371,7 @@ defineExpose({ scrollToBottom })
         </template>
 
         <template v-else-if="item.item_type === 'video_output'">
-          <VideoOutputCard
-            :payload="cardPayload(item)"
-            :selecting="selecting"
-            @select-video="$emit('select-video', $event)"
-          />
+          <VideoOutputCard :payload="cardPayload(item)" />
         </template>
 
         <template

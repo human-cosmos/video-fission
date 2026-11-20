@@ -1,113 +1,129 @@
 <script setup>
-import { Check, Download } from '@lucide/vue'
-import { computed } from 'vue'
-import { candidateVideoUrl, outputVideoUrl } from '../utils/productionMedia'
+import { Columns2, Download } from '@lucide/vue'
+import { computed, nextTick, ref } from 'vue'
+import { formatDuration } from '../utils/format'
+import {
+  candidateVideoUrl,
+  sourceVideoUrl,
+} from '../utils/productionMedia'
 import AspectVideo from './AspectVideo.vue'
+import VideoCompareModal from './VideoCompareModal.vue'
 
 const props = defineProps({
   payload: { type: Object, default: () => ({}) },
-  selecting: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select-video'])
-const videoUrl = computed(() => outputVideoUrl(props.payload))
+const activeCandidate = ref(null)
+const compareTrigger = ref(null)
 const candidateVideos = computed(() =>
   Array.isArray(props.payload?.candidate_videos)
-    ? props.payload.candidate_videos.filter((item) => item?.video_url)
+    ? props.payload.candidate_videos.filter((item) => item?.id && item?.video_url)
     : [],
 )
-const awaitingChoice = computed(() => props.payload?.status === 'awaiting_video_choice')
-const selectedVideoId = computed(() => String(props.payload?.selected_script_id || ''))
-const dims = computed(() => {
-  const source = props.payload?.output || props.payload || {}
-  return {
-    width: Number(source.width) || 0,
-    height: Number(source.height) || 0,
-  }
+const originalVideoUrl = computed(() => sourceVideoUrl(props.payload))
+const activeCandidateUrl = computed(() =>
+  activeCandidate.value ? candidateVideoUrl(props.payload, activeCandidate.value) : '',
+)
+const activeCandidateLabel = computed(() => {
+  const index = candidateVideos.value.findIndex((item) => item.id === activeCandidate.value?.id)
+  return index >= 0 ? `候选 ${candidateLetter(index)}` : '候选视频'
 })
 
-function chooseVideo(candidate) {
-  if (!awaitingChoice.value || props.selecting || !candidate?.id) return
-  emit('select-video', {
-    productionId: props.payload?.production_id,
-    videoId: candidate.id,
-  })
+function candidateLetter(index) {
+  return String.fromCharCode(65 + index)
+}
+
+function downloadName(candidate, index) {
+  const id = String(candidate?.id || `candidate-${index + 1}`).replace(/[^a-zA-Z0-9_-]+/g, '-')
+  return `${id || `candidate-${index + 1}`}.mp4`
+}
+
+function openCompare(candidate, event) {
+  if (!candidate || !originalVideoUrl.value) return
+  compareTrigger.value = event?.currentTarget || null
+  activeCandidate.value = candidate
+}
+
+function closeCompare() {
+  activeCandidate.value = null
+}
+
+function restoreCompareFocus() {
+  nextTick(() => compareTrigger.value?.focus())
 }
 </script>
 
 <template>
   <section
-    v-if="candidateVideos.length || videoUrl"
+    v-if="candidateVideos.length"
     class="video-card studio-card studio-output video-output"
     data-testid="video-output-card"
   >
-    <template v-if="candidateVideos.length">
-      <header class="candidate-video-head">
-        <div>
-          <h3>候选视频</h3>
-          <p>3 个创意已分别生成视频，选择一条继续最终合成。</p>
-        </div>
-        <span>{{ candidateVideos.length }} / 3</span>
-      </header>
-      <div class="candidate-video-grid" data-testid="video-candidate-grid">
-        <article
-          v-for="(candidate, index) in candidateVideos"
-          :key="candidate.id"
-          class="candidate-video-card"
-          :class="{ 'is-selected': candidate.id === selectedVideoId }"
-          :data-testid="`video-candidate-${candidate.id}`"
-        >
-          <header class="candidate-video-title">
-            <span>0{{ index + 1 }}</span>
-            <div>
-              <strong>{{ candidate.title || candidate.id }}</strong>
-              <small v-if="candidate.angle">{{ candidate.angle }}</small>
-            </div>
-          </header>
-          <AspectVideo
-            :src="candidateVideoUrl(payload, candidate)"
-            :width="Number(candidate.width) || 0"
-            :height="Number(candidate.height) || 0"
-            :testid="`video-candidate-player-${candidate.id}`"
-          />
-          <footer class="candidate-video-actions">
-            <span v-if="candidate.id === selectedVideoId" class="candidate-selected">
-              <Check :size="13" />
-              已选用
-            </span>
-            <button
-              v-else-if="awaitingChoice"
-              class="button primary"
-              type="button"
-              data-testid="video-candidate-select"
-              :disabled="selecting"
-              @click="chooseVideo(candidate)"
-            >
-              使用这个视频
-            </button>
-          </footer>
-        </article>
+    <header class="candidate-video-head">
+      <div>
+        <h3>候选视频</h3>
+        <p>三种创意已分别生成，可下载或与原视频对比。</p>
       </div>
-    </template>
-    <h3 v-if="videoUrl">最终成片</h3>
-    <AspectVideo
-      v-if="videoUrl"
-      :src="videoUrl"
-      :width="dims.width"
-      :height="dims.height"
-      testid="video-player"
-    />
-    <div v-if="videoUrl" class="studio-actions">
-      <a
-        v-if="videoUrl"
-        class="button primary"
-        data-testid="video-download-mp4"
-        :href="videoUrl"
-        download="final.mp4"
+      <span>{{ candidateVideos.length }} / 3</span>
+    </header>
+
+    <div class="candidate-video-list" data-testid="video-candidate-grid">
+      <article
+        v-for="(candidate, index) in candidateVideos"
+        :key="candidate.id"
+        class="candidate-video-row"
+        :data-testid="`video-candidate-${candidate.id}`"
       >
-        <Download :size="14" />
-        下载 MP4
-      </a>
+        <header class="candidate-video-title">
+          <span class="candidate-video-letter">{{ candidateLetter(index) }}</span>
+          <div>
+            <strong>{{ candidate.title || `候选视频 ${candidateLetter(index)}` }}</strong>
+            <small v-if="candidate.angle">{{ candidate.angle }}</small>
+          </div>
+          <time v-if="candidate.duration_ms">
+            {{ formatDuration(candidate.duration_ms) }}
+          </time>
+        </header>
+
+        <AspectVideo
+          :src="candidateVideoUrl(payload, candidate)"
+          :width="Number(candidate.width) || 0"
+          :height="Number(candidate.height) || 0"
+          :testid="`video-candidate-player-${candidate.id}`"
+        />
+
+        <footer class="candidate-video-actions">
+          <a
+            class="button primary"
+            :href="candidateVideoUrl(payload, candidate)"
+            :download="downloadName(candidate, index)"
+            :data-testid="`video-candidate-download-${candidate.id}`"
+          >
+            <Download :size="14" />
+            下载 MP4
+          </a>
+          <button
+            class="button subtle"
+            type="button"
+            :disabled="!originalVideoUrl"
+            :data-testid="`video-candidate-compare-${candidate.id}`"
+            @click="openCompare(candidate, $event)"
+          >
+            <Columns2 :size="14" />
+            对比原视频
+          </button>
+        </footer>
+      </article>
     </div>
+
+    <VideoCompareModal
+      :open="Boolean(activeCandidate)"
+      :source-url="originalVideoUrl"
+      :candidate-url="activeCandidateUrl"
+      :candidate-label="activeCandidateLabel"
+      :candidate-title="activeCandidate?.title || ''"
+      @close="closeCompare"
+      @closed="restoreCompareFocus"
+    />
   </section>
 </template>

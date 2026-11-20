@@ -38,19 +38,18 @@ description: 在当前 Codex 对话中完成视频创意意图、骨架和三份
 6. `write_intent_and_scripts`（写入恰好 3 个候选后暂停）
 7. **暂停**：`awaiting_script_approval`，界面展示真实意图、卖点、痛点和 3 份脚本，等待用户确认。
 8. 用户确认后执行 `generate_candidate_videos`：为 3 个创意分别生成、分离音频并合成候选视频。
-9. **暂停**：`awaiting_video_choice`，界面展示 3 条视频，等待用户选择。
-10. 用户选定后从 `finalize` 继续：`compose_timeline` → `burn_subtitles`。
+9. 完成：3 条候选视频分别完成生成与合成后直接进入 `completed`，界面展示全宽候选视频，可逐条下载或与原视频同步对比。不得再要求用户选择候选视频，也不再生成单独的最终成片。
 
 追问留在同一任务上：澄清、局部修改或恢复。不要一说「再改一下」就从 ingest 重来。需要更新意图或脚本时，先在当前对话重新生成内容，再通过 `run_video_production` 提交。
 
 ## 后台 Tool 必须保证的不变量
 
 - 开场 `[0, opening_end)` 必须是一个连续的 `shot_opening` 块，不得再发明 3000ms hook 切点。
-- 脚本阶段恰好 3 个候选，三个候选都必须生成并合成视频，全部成功后才进入 `awaiting_video_choice`。
+- 脚本阶段恰好 3 个候选，三个候选都必须生成并合成视频，全部成功后任务直接进入 `completed`。
 - 脚本写入后必须停在 `awaiting_script_approval`，用户明确确认前不得调用 Seedance。
 - 用户上传参考图时，`production.reference_images` 必须作为 Seedance `reference_image` 输入，
   并在提示词中锁定商品外观、颜色、结构和场景一致性。
-- 视频选择前不得设置最终 `selected_script_id`；用户选定的候选视频才作为最终合成输入。
+- 三条候选视频生成并合成成功后，`candidate_videos` 就是本次任务的交付物；任务直接进入 `completed`，不得停在视频选择状态或要求 `selected_script_id`。
 - 生成镜头只允许 Seedance / OpenAI Compatible / Generic HTTP，不得用本地关键帧伪生成冒充模型出片。
 - 无 Key、工具失败、占位或未真正调用视频模型时，不得出现「已还原」「已按参考对齐」「已还原参考」或等同表述，也不得把本地/降级结果展示成已确认的模型结果。
-- `select-video` 只能从当前任务已生成的 `candidate_videos` 中选择，并触发最终合成，不得重新生成或混用未选候选。
+- 历史任务若仍为 `awaiting_video_choice`，界面只展示候选视频的下载与原片对比，不提供选择入口。新任务不得写入该状态。

@@ -146,11 +146,6 @@ export const api = {
     request(`/productions/${encodeURIComponent(id)}/generate-scripts`, { method: 'POST' }),
   approveProductionScripts: (id) =>
     request(`/productions/${encodeURIComponent(id)}/approve-scripts`, { method: 'POST' }),
-  selectVideo: (id, videoId) =>
-    request(
-      `/productions/${encodeURIComponent(id)}/select-video`,
-      json('POST', { video_id: videoId }),
-    ),
   deleteProduction: (id) =>
     request(`/productions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   createRemix: (payload) => request('/remixes', json('POST', payload)),

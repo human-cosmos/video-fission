@@ -63,7 +63,7 @@ describe('agent trace display', () => {
     expect(agentTraceSummary(payload)).toBe('已制定编排计划 · 已加载 2 个 Skill · 已执行 2 个工具')
   })
 
-  it('surfaces a failed tool and video-choice pause without success claims', () => {
+  it('surfaces a failed tool and completed candidates without success claims', () => {
     const failed = {
       status: 'failed',
       agent_trace: [...trace, { type: 'tool', name: 'generate_video_shots', success: false }],
@@ -82,7 +82,7 @@ describe('agent trace display', () => {
         { type: 'tool', name: 'generate_candidate_videos', success: true },
       ],
     }
-    expect(currentAgentActionText(paused)).toBe('等待选择候选视频')
+    expect(currentAgentActionText(paused)).toBe('候选视频已生成')
     expect(nextPlannedTool(paused)).toBe('')
   })
 

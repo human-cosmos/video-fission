@@ -297,7 +297,7 @@ class ProductionAgent:
                 )
                 return current
             if current.get("status") == "awaiting_video_choice":
-                self._emit(production_id, "awaiting_video_choice", {"message": "请选择候选视频"})
+                self._emit(production_id, "awaiting_video_choice", {"message": "候选视频已生成"})
                 return current
             if current.get("status") in {"failed", "cancelled"}:
                 return current

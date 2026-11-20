@@ -73,7 +73,7 @@ describe('format helpers', () => {
       '自动生成准备中',
     )
     expect(historyStatusText({ status: 'awaiting_video_choice', current_stage: 'compose' })).toBe(
-      '待选择视频',
+      '候选视频已生成',
     )
   })
 

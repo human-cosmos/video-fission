@@ -31,8 +31,8 @@ const workflow = [
   },
   {
     icon: Clapperboard,
-    title: '确认后完成成片',
-    detail: '确认脚本并选择候选后，系统生成视频、混音、合成并交付。',
+    title: '确认后生成候选',
+    detail: '确认脚本后，系统生成、混音并合成三条候选视频，可直接下载。',
   },
 ]
 
@@ -52,7 +52,7 @@ const scriptInputs = [
           <span class="help-kicker">系统帮助</span>
           <h1>一条参考视频，如何变成可交付的新成片</h1>
           <p>
-            系统负责理解视频、生成创意、控制流程和完成剪辑；你负责确认脚本、选择成片。
+            系统负责理解视频、生成创意、控制流程和完成剪辑；你负责确认脚本并查看候选成片。
           </p>
           <div class="help-hero-actions">
             <button
@@ -214,8 +214,8 @@ const scriptInputs = [
           </div>
           <div>
             <Clapperboard :size="16" />
-            <strong>候选选择</strong>
-            <span>从三条候选成片中选择最终方案</span>
+            <strong>候选交付</strong>
+            <span>三条候选成片可逐条下载，并与原视频同步对比</span>
           </div>
           <div>
             <ShieldCheck :size="16" />

@@ -268,7 +268,7 @@ npm test --prefix frontend
 npm run build --prefix frontend
 ```
 
-后端管线测试使用仓库内夹具 `backend/tests/fixtures/sample-reference.mp4`（约 8 秒，含 Hook/Value/CTA 色块和简单音频）。测试通过 Provider 桩验证真实远端生成路径、模型音轨、拼接和 `final.mp4` 输出，不再覆盖本地视频伪生成。
+前端 E2E 会在 `.e2e-fixtures/` 自动生成约 8 秒的合成测试视频并附带简单音频。测试通过 Provider 桩验证真实远端生成路径、模型音轨、候选视频合成和下载产物，不再覆盖本地视频伪生成。
 
 真实 Codex 集成测试：
 

@@ -85,7 +85,7 @@ export const STATUS_LABELS = {
   awaiting_creative_context: '等待生成脚本',
   awaiting_script_approval: '待确认脚本',
   awaiting_script_choice: '自动生成准备中',
-  awaiting_video_choice: '待选择视频',
+  awaiting_video_choice: '候选视频已生成',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',

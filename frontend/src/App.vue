@@ -52,7 +52,6 @@ const uploading = ref(false)
 const sending = ref(false)
 const productions = ref([])
 const rerunning = ref(false)
-const selectingVideo = ref(false)
 const cancelling = ref(false)
 const remixOpen = ref(false)
 const remixEnabled = ref(false)
@@ -186,11 +185,12 @@ const otherAttachments = computed(() =>
   attachments.value.filter((file) => !isVideoFile(file) && !isImageFile(file)),
 )
 const needsBriefHint = computed(() => Boolean(productionVideo.value) && !composer.value.trim())
-const awaitingVideoChoice = computed(() =>
+const candidateVideosReady = computed(() =>
   (currentConversation.value?.items || []).some(
     (item) =>
-      ['video_progress', 'video_output'].includes(item?.item_type) &&
-      item?.payload?.status === 'awaiting_video_choice',
+      item?.item_type === 'video_output' &&
+      Array.isArray(item?.payload?.candidate_videos) &&
+      item.payload.candidate_videos.length > 0,
   ),
 )
 const awaitingScriptApproval = computed(() =>
@@ -1062,22 +1062,6 @@ async function rerunBrief(productionId) {
   }
 }
 
-async function selectVideo({ productionId, videoId }) {
-  if (!productionId || !videoId) return
-  selectingVideo.value = true
-  try {
-    await api.selectVideo(productionId, videoId)
-    await refreshCurrent()
-    await loadProductions()
-    notify('已选用视频，开始最终合成')
-  } catch (error) {
-    notify(error.message)
-    await refreshCurrent()
-  } finally {
-    selectingVideo.value = false
-  }
-}
-
 async function regenerateScripts(productionId) {
   if (!productionId) return
   rerunning.value = true
@@ -1307,14 +1291,12 @@ onBeforeUnmount(() => {
         ref="timeline"
         :conversation="currentConversation"
         :rerunning="rerunning"
-        :selecting="selectingVideo"
         :cancelling="cancelling"
         @decide-approval="decideApproval"
         @answer-clarification="answerClarification"
         @copy="copyReply"
         @cancel-production="cancelProduction"
         @rerun-brief="rerunBrief"
-        @select-video="selectVideo"
         @approve-scripts="approveScripts"
         @request-script-revision="requestScriptRevision"
         @regenerate-scripts="regenerateScripts"
@@ -1407,8 +1389,8 @@ onBeforeUnmount(() => {
                   ? '该对话已归档，取消归档后可继续发送'
                   : currentConversation?.status === 'running'
                   ? '追问当前执行，或补充新的限制…'
-                  : awaitingVideoChoice
-                  ? '三个候选视频已生成，请先选择一个视频'
+                  : candidateVideosReady
+                  ? '三条候选视频已生成，可继续追问或提出修改…'
                   : awaitingScriptApproval
                   ? '确认脚本，或说明需要修改的卖点、台词和镜头'
                   : '描述你想拆解、策划或完成的视频任务…'
@@ -1459,11 +1441,11 @@ onBeforeUnmount(() => {
           补充创作说明后再发送
         </p>
         <p
-          v-else-if="awaitingVideoChoice"
+          v-else-if="candidateVideosReady"
           class="composer-hint"
-          data-testid="composer-hint-awaiting-video"
+          data-testid="composer-hint-candidate-videos"
         >
-          请先在上方候选视频中选择一条，选定后会继续最终替换与合成。
+          三条候选视频已生成，可下载或对比原视频。
         </p>
         <p
           v-else-if="awaitingScriptApproval"

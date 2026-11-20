@@ -179,7 +179,7 @@ function requestRevision() {
             payload.status === 'awaiting_script_approval'
               ? '等待确认后生成视频'
               : payload.status === 'awaiting_video_choice'
-                ? '3 条候选视频已生成'
+                ? '3 条候选视频已生成，可下载'
                 : '3 个创意将分别生成视频'
           }}
         </span>

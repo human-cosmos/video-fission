@@ -94,7 +94,7 @@ const agentActionText = computed(() => currentAgentActionText(props.payload))
 const statusTitle = computed(() => {
   if (awaitingCreativeContext.value) return '参考拆解已完成，等待生成创意脚本'
   if (awaitingScript.value) return '创意脚本已生成，等待确认'
-  if (awaitingVideo.value) return '3 个候选视频已生成，等待选择'
+  if (awaitingVideo.value) return '3 个候选视频已生成'
   if (agentActionText.value) {
     if (status.value === 'failed') return agentActionText.value
     if (status.value === 'running') return agentActionText.value
@@ -353,7 +353,7 @@ function formatClock(value) {
             {{
               activeStage.state === 'awaiting'
                 ? awaitingVideo
-                  ? '等待选择候选视频后继续'
+                  ? '候选视频已生成，可预览或下载'
                   : awaitingScript
                     ? '等待确认脚本后开始生成视频'
                     : '后台正在自动推进'
@@ -384,7 +384,7 @@ function formatClock(value) {
       v-if="awaitingVideo"
       class="progress-awaiting-video"
       data-testid="video-progress-awaiting-video"
-    >3 个候选视频已生成，请选择一条继续</p>
+    >3 个候选视频已生成，可下载或对比原视频</p>
     <p v-if="payload.error" class="page-error">{{ payload.error }}</p>
     <ul v-if="warnings.length" class="warning-list">
       <li v-for="(warning, index) in warnings" :key="index">{{ warning }}</li>

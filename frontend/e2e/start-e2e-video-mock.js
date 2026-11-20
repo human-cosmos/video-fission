@@ -2,12 +2,14 @@ import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensureE2eVideoFixture } from './ensure-video-fixture.js'
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const fixture = resolve(frontendRoot, '../backend/tests/fixtures/sample-reference.mp4')
+const fixture = resolve(frontendRoot, '../.e2e-fixtures/sample-reference.mp4')
 let video = null
 let fixtureError = ''
 try {
+  ensureE2eVideoFixture(fixture)
   video = await readFile(fixture)
 } catch (error) {
   fixtureError = error instanceof Error ? error.message : String(error)

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 
 const fixture = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../backend/tests/fixtures/sample-reference.mp4",
+  "../../.e2e-fixtures/sample-reference.mp4",
 )
 
 test("settings entry lives in the sidebar, not the top bar", async ({ page }) => {
@@ -85,6 +85,7 @@ test("confirms scripts before generating candidates and keeps detail cards colla
   page,
   request,
 }) => {
+  test.setTimeout(360_000)
   const configured = await request.put("/api/settings", {
     data: {
       video_generator: {
@@ -124,20 +125,17 @@ test("confirms scripts before generating candidates and keeps detail cards colla
     await page.getByTestId("video-segments-disclosure").evaluate((element) => element.open),
   ).toBe(false)
   await page.getByTestId("video-script-approve").click()
-  const chooseVideo = page.getByTestId("video-candidate-select").first()
   const segmentsCard = page.getByTestId("video-segments-card")
-  await expect(chooseVideo).toBeVisible({ timeout: 180_000 })
-  await expect(page.getByTestId("video-candidate-grid")).toBeVisible()
-  await expect(page.getByTestId("video-candidate-select")).toHaveCount(3)
-  await chooseVideo.click()
+  await expect(page.getByTestId("video-candidate-grid")).toBeVisible({ timeout: 180_000 })
+  await expect(page.getByTestId("video-candidate-select")).toHaveCount(0)
   await expect(segmentsCard).toBeVisible({ timeout: 180_000 })
   await expect(page.getByTestId("video-output-card")).toBeVisible({ timeout: 180_000 })
-  await expect(page.getByTestId("video-player")).toBeVisible()
-  await expect(page.getByTestId("video-download-mp4")).toBeVisible()
+  await expect(page.getByTestId("video-player")).toHaveCount(0)
+  await expect(page.getByTestId("video-candidate-download-script_a")).toBeVisible()
+  await expect(page.getByTestId("video-candidate-compare-script_a")).toBeVisible()
   await expect(page.getByTestId("video-download-srt")).toHaveCount(0)
   await expect(page.getByTestId("video-production-step-decompose")).toContainText("切片结果")
-  await expect(page.getByTestId("video-production-step-generate")).toContainText("片段结果")
-  await expect(page.getByTestId("video-production-step-compose")).toContainText("成片文件")
+  await expect(page.getByTestId("video-production-step-generate")).toContainText("候选视频")
 
   const productionId = (await page.getByTestId("video-production-id").innerText()).trim()
   await expect
@@ -149,6 +147,8 @@ test("confirms scripts before generating candidates and keeps detail cards colla
   const detail = await request.get(`/api/productions/${productionId}`)
   expect(detail.ok()).toBeTruthy()
   const production = await detail.json()
+  expect(production.selected_script_id == null || production.selected_script_id === "").toBeTruthy()
+  expect((production.candidate_videos || []).length).toBe(3)
   await expect(page.locator('[data-testid^="video-segment-regen-"]')).toHaveCount(0)
   await expect(page.getByTestId("video-rerun-selected")).toHaveCount(0)
   await expect(page.getByTestId("mode-studio")).toHaveCount(0)

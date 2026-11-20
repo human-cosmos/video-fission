@@ -26,6 +26,7 @@ REMIX_ID_PREFIX = "rmx_"
 DEFAULT_STRATEGY = "seeded_shuffle"
 SUPPORTED_STRATEGIES = {"seeded_shuffle", "reverse", "manual"}
 REORDERABLE_ROLES = {"value"}
+MAX_AUTO_REORDERED_UNITS = 3
 
 
 class ReferenceRemixService:
@@ -285,7 +286,16 @@ class ReferenceRemixService:
             plan = production.get("remix_plan") or {}
             if production.get("decomposition") and plan.get("ordered_units"):
                 if production.get("status") == "awaiting_order":
-                    self._queue_default_render(remix_id, plan, wait=wait)
+                    try:
+                        rebuilt_plan = self._build_plan(production)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception(
+                            "reference_remix.recovery_plan_failed remix=%s",
+                            remix_id,
+                        )
+                        self._fail(remix_id, f"原片重排恢复失败：{exc}")
+                        continue
+                    self._queue_default_render(remix_id, rebuilt_plan, wait=wait)
                 else:
                     self._start_render(remix_id, wait=wait)
             else:
@@ -707,6 +717,18 @@ class ReferenceRemixService:
             seed=selected_seed,
             middle_order=middle_order,
         )
+        adjusted_value_ids = self._changed_value_ids(
+            [item["id"] for item in middle_units],
+            ordered_ids,
+            {item["id"] for item in reorderable},
+        )
+        if (
+            selected_strategy != "manual"
+            and len(adjusted_value_ids) > MAX_AUTO_REORDERED_UNITS
+        ):
+            raise ValueError(
+                f"自动重排最多调整 {MAX_AUTO_REORDERED_UNITS} 个 value 片段"
+            )
         reorderable_id_set = {item["id"] for item in reorderable}
         for index, unit in enumerate(middle_units):
             if unit["id"] not in reorderable_id_set and ordered_ids[index] != unit["id"]:
@@ -746,6 +768,9 @@ class ReferenceRemixService:
             "middle_order": ordered_ids,
             "total_duration_ms": total_duration_ms,
             "reorderable_ids": [item["id"] for item in reorderable],
+            "adjusted_value_ids": adjusted_value_ids,
+            "adjusted_value_count": len(adjusted_value_ids),
+            "max_auto_adjusted_units": MAX_AUTO_REORDERED_UNITS,
             "video_model_called": False,
             "warnings": plan_warnings,
         }
@@ -798,13 +823,28 @@ class ReferenceRemixService:
             ordered_values = list(reversed(value_ids))
         else:
             ordered_values = list(value_ids)
-            random.Random(seed).shuffle(ordered_values)
-            if len(ordered_values) > 1 and ordered_values == value_ids:
-                ordered_values = ordered_values[1:] + ordered_values[:1]
+            if len(ordered_values) > 1:
+                pair_index = random.Random(seed).randrange(len(ordered_values) - 1)
+                ordered_values[pair_index], ordered_values[pair_index + 1] = (
+                    ordered_values[pair_index + 1],
+                    ordered_values[pair_index],
+                )
         value_iter = iter(ordered_values)
         return [
             next(value_iter) if item_id in value_id_set else item_id
             for item_id in original
+        ]
+
+    @staticmethod
+    def _changed_value_ids(
+        original_ids: list[str],
+        ordered_ids: list[str],
+        value_id_set: set[str],
+    ) -> list[str]:
+        return [
+            original_id
+            for original_id, ordered_id in zip(original_ids, ordered_ids)
+            if original_id in value_id_set and original_id != ordered_id
         ]
 
     @staticmethod

@@ -47,6 +47,23 @@ const outputUrl = computed(() => remix.value?.output?.video_url || '')
 const isRunning = computed(() => status.value === 'running')
 const isAwaitingOrder = computed(() => status.value === 'awaiting_order')
 const isCompleted = computed(() => status.value === 'completed')
+const autoAdjustedCount = computed(() => {
+  const explicit = Number(plan.value.adjusted_value_count)
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit
+  const valueIds = new Set(
+    (plan.value.middle_units || [])
+      .filter((unit) => unit.role === 'value')
+      .map((unit) => String(unit.id)),
+  )
+  const originalOrder = (plan.value.middle_units || [])
+    .filter((unit) => valueIds.has(String(unit.id)))
+    .map((unit) => String(unit.id))
+  const currentOrder = middleOrder.value.filter((id) => valueIds.has(String(id)))
+  return originalOrder.reduce(
+    (count, id, index) => count + (id === String(currentOrder[index]) ? 0 : 1),
+    0,
+  )
+})
 const orderAdjusted = computed(
   () => JSON.stringify(middleOrder.value) !== JSON.stringify(orderBaseline.value),
 )
@@ -60,12 +77,14 @@ const orderNotice = computed(() => {
   if (isCompleted.value) {
     return {
       title: '当前成片已按此顺序生成',
-      detail: '你可以继续调整，再按当前顺序重新拼接',
+      detail: '系统默认只小改顺序，你可以继续手动调整后重新拼接',
     }
   }
   return {
-    title: '当前顺序已按分析结果打乱',
-    detail: '系统将直接按此顺序拼接，你仍可在成片后调整',
+    title: autoAdjustedCount.value
+      ? `系统仅调整了 ${autoAdjustedCount.value} 个中间片段`
+      : '中间片段保持原顺序',
+    detail: '其余片段保持原顺序，成片后仍可手动调整',
   }
 })
 const canRender = computed(

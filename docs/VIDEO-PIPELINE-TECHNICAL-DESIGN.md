@@ -13,7 +13,8 @@
 - 任务类型为 `reference_remix`，旧任务默认保持 `creative`。
 - 快捷入口只在用户已经上传参考视频时显示，不经过 Agent 和 `ToolRegistry`。
 - Gemini 可用于原片片段理解；模型不可用时允许本地拆解，并明确写入警告。
-- 开头 `[0, opening_end)` 和结尾 `[ending_start, duration)` 固定，中间片段按确定性顺序重排。
+- 开头 `[0, opening_end)` 和结尾 `[ending_start, duration)` 固定；默认只交换一组相邻的中间 value 片段，
+  让多数原片顺序保持不变。自动策略最多调整 3 个 value 片段，用户手动调整不受此限制。
 - 只生成一条成片，不创建候选视频，也不进入 `awaiting_video_choice`。
 - 最终合成只调用本地 FFmpeg，不调用 Seedance 或其他视频生成模型。
 - 独立 API 位于 `/api/remixes`，旧 `/api/productions` 继续只处理 `creative` 任务。

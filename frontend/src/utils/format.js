@@ -42,6 +42,7 @@ export function formatMessageTime(value, now = new Date()) {
 export const WORKSPACE_MODES = [
   { id: 'chat', label: '对话' },
   { id: 'settings', label: '系统设置' },
+  { id: 'help', label: '系统帮助' },
 ]
 
 export const VIDEO_ITEM_TYPES = [

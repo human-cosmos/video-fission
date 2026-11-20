@@ -99,8 +99,8 @@ describe('format helpers', () => {
 })
 
 describe('chat-native production helpers', () => {
-  it('keeps only chat and settings workspace modes', () => {
-    expect(WORKSPACE_MODES.map((item) => item.id)).toEqual(['chat', 'settings'])
+  it('keeps chat, settings, and help workspace modes', () => {
+    expect(WORKSPACE_MODES.map((item) => item.id)).toEqual(['chat', 'settings', 'help'])
     expect(WORKSPACE_MODES.some((item) => item.id === 'studio')).toBe(false)
     expect(VIDEO_ITEM_TYPES).toContain('video_observe')
   })

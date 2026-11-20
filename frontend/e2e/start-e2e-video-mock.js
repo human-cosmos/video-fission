@@ -5,7 +5,14 @@ import { fileURLToPath } from 'node:url'
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = resolve(frontendRoot, '../backend/tests/fixtures/sample-reference.mp4')
-const video = await readFile(fixture)
+let video = null
+let fixtureError = ''
+try {
+  video = await readFile(fixture)
+} catch (error) {
+  fixtureError = error instanceof Error ? error.message : String(error)
+  console.warn(`[e2e-video-mock] fixture unavailable: ${fixtureError}`)
+}
 
 const server = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url === '/health') {
@@ -14,6 +21,16 @@ const server = createServer(async (request, response) => {
     return
   }
   if (request.method === 'GET' && request.url === '/video.mp4') {
+    if (!video) {
+      response.writeHead(503, { 'Content-Type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          detail: 'E2E video fixture is missing',
+          fixture,
+        }),
+      )
+      return
+    }
     response.writeHead(200, {
       'Content-Type': 'video/mp4',
       'Content-Length': String(video.length),

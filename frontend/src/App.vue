@@ -3,6 +3,7 @@ import {
   CircleAlert,
   ArrowUp,
   Check,
+  HelpCircle,
   LoaderCircle,
   Menu,
   Plus,
@@ -16,6 +17,7 @@ import ConversationSidebar from './components/ConversationSidebar.vue'
 import MessageTimeline from './components/MessageTimeline.vue'
 import ModelSettings from './components/ModelSettings.vue'
 import ReferenceRemixPanel from './components/ReferenceRemixPanel.vue'
+import SystemHelp from './components/SystemHelp.vue'
 import TopbarSelect from './components/TopbarSelect.vue'
 import {
   isConversationListEvent,
@@ -65,6 +67,7 @@ const mobileSidebar = ref(false)
 const toast = ref('')
 const timeline = ref(null)
 const composerInput = ref(null)
+const helpReturnMode = ref('chat')
 let eventSource = null
 let transcriptRefreshTimer = null
 let transcriptRefreshInFlight = false
@@ -609,6 +612,22 @@ async function selectConversationTask(id) {
 
 function openSettings() {
   workspaceMode.value = 'settings'
+  mobileSidebar.value = false
+}
+
+function openHelp() {
+  if (workspaceMode.value === 'help') {
+    workspaceMode.value = helpReturnMode.value
+    mobileSidebar.value = false
+    return
+  }
+  helpReturnMode.value = workspaceMode.value
+  workspaceMode.value = 'help'
+  mobileSidebar.value = false
+}
+
+function closeHelp() {
+  workspaceMode.value = helpReturnMode.value
   mobileSidebar.value = false
 }
 
@@ -1200,6 +1219,7 @@ onBeforeUnmount(() => {
       'sidebar-collapsed': sidebarCollapsed,
       'mode-chat': isChatMode,
       'mode-settings': workspaceMode === 'settings',
+      'mode-help': workspaceMode === 'help',
     }"
     :style="{ '--sidebar-width': `${sidebarGridWidth}px` }"
   >
@@ -1253,9 +1273,21 @@ onBeforeUnmount(() => {
             <h1 v-else>视频裂变</h1>
           </template>
           <template v-else>
-            <h1>系统设置</h1>
+            <h1>{{ workspaceMode === 'help' ? '系统帮助' : '系统设置' }}</h1>
           </template>
         </div>
+        <button
+          class="icon-button topbar-help-button"
+          :class="{ active: workspaceMode === 'help' }"
+          type="button"
+          :aria-label="workspaceMode === 'help' ? '返回工作台' : '打开系统帮助'"
+          :aria-pressed="workspaceMode === 'help'"
+          :title="workspaceMode === 'help' ? '返回工作台' : '系统帮助'"
+          data-testid="open-help"
+          @click="openHelp"
+        >
+          <HelpCircle :size="18" />
+        </button>
       </header>
 
       <template v-if="isChatMode">
@@ -1451,6 +1483,10 @@ onBeforeUnmount(() => {
         v-else-if="workspaceMode === 'settings'"
         :current-user="currentUser"
         @notify="notify"
+      />
+      <SystemHelp
+        v-else-if="workspaceMode === 'help'"
+        @back="closeHelp"
       />
     </main>
 

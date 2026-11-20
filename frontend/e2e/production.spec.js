@@ -40,6 +40,34 @@ test("settings entry lives in the sidebar, not the top bar", async ({ page }) =>
   await expect(page.getByTestId("message-input")).toBeVisible()
 })
 
+test("help page explains the production flow and renders both diagrams", async ({ page }) => {
+  await page.goto("/")
+  const helpButton = page.getByTestId("open-help")
+  await expect(helpButton).toBeVisible()
+  await helpButton.click()
+
+  await expect(page.getByTestId("system-help-page")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "一条参考视频，如何变成可交付的新成片" }),
+  ).toBeVisible()
+  await expect(page.getByText("AI 提供创意", { exact: true })).toBeVisible()
+  await expect(page.getByText("流程保证可控", { exact: true })).toBeVisible()
+
+  const diagrams = page.locator('[data-testid^="help-diagram-"] img')
+  await expect(diagrams).toHaveCount(2)
+  for (let index = 0; index < 2; index += 1) {
+    const diagram = diagrams.nth(index)
+    await diagram.scrollIntoViewIfNeeded()
+    await expect
+      .poll(() => diagram.evaluate((image) => image.naturalWidth))
+      .toBeGreaterThan(0)
+  }
+
+  await page.getByTestId("close-help").click()
+  await expect(page.getByTestId("system-help-page")).toHaveCount(0)
+  await expect(helpButton).toHaveAttribute("aria-pressed", "false")
+})
+
 test("composer requires a brief after a reference video is attached", async ({ page }) => {
   await page.goto("/")
   await page.getByTestId("new-conversation").click()

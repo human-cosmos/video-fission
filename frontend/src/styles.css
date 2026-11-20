@@ -775,6 +775,23 @@ body.is-resizing-sidebar {
   gap: 7px;
 }
 
+.topbar-help-button {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+}
+
+.topbar-help-button:hover {
+  color: var(--electric);
+  background: #f4f8ff;
+  border-color: #d6e4fa;
+}
+
+.topbar-help-button.active {
+  color: var(--electric);
+  background: #edf4ff;
+  border-color: #cbdcf6;
+}
+
 .mobile-session-backdrop {
   display: none;
 }
@@ -2665,6 +2682,10 @@ a.button.primary {
 
 @media (max-width: 900px) {
   .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-shell.mode-help {
     grid-template-columns: minmax(0, 1fr);
   }
 
